@@ -53,21 +53,21 @@
 
 ### 2.1 数据流架构
 ```mermaid
-flowchart LR
-  S[Sources\\nRSS/HTML/API/FileDrop/Internal] --> C[Collector]
-  C -->|RawDocument| BUS[(Event Bus\\nNATS JetStream)]
+graph LR
+  S[Sources] --> C[Collector]
+  C --> BUS[NATS JetStream]
   BUS --> N[Normalizer]
-  N --> D[Deduper/Canonicalizer]
-  D --> E[Enrichment\\nNER/Event/Impact/Embed/Summary]
-  E --> OLTP[(Postgres\\nMetadata/State)]
-  E --> OBJ[(MinIO\\nRaw HTML/PDF/Snapshots)]
-  E --> IDX[Index\\nPostgres FTS]
-  E --> VDB[(Vector DB\\nQdrant)]
-  E --> A[Alert/Signal DB\\n(Postgres)]
-  API[API Gateway\\nREST/gRPC/MCP] --> OLTP
+  N --> D[Deduper]
+  D --> E[Enrichment]
+  E --> OLTP[Postgres]
+  E --> OBJ[MinIO]
+  E --> VDB[Qdrant]
+  E --> IDX[Postgres FTS]
+  E --> SIG[Signals DB]
+  API[API Gateway (REST/MCP)] --> OLTP
   API --> IDX
   API --> VDB
-  UI[OpenWebUI / Dashboard] --> API
+  UI[Dashboard] --> API
 ```
 
 ### 2.2 单条新闻的时序（从发现到告警）
@@ -78,8 +78,8 @@ sequenceDiagram
   participant Norm as Normalizer
   participant Dedup as Deduper
   participant Enrich as Enricher
-  participant Store as DB/Index
-  participant Alert as Alert/Signal DB
+  participant Store as DBIndex
+  participant Signals as SignalsDB
 
   Collector->>Bus: publish RawDocument
   Bus->>Norm: consume RawDocument
@@ -88,12 +88,12 @@ sequenceDiagram
   Dedup->>Bus: publish CanonicalArticle
   Bus->>Enrich: consume CanonicalArticle
   Enrich->>Store: upsert entities/events/features/index
-  Enrich->>Alert: upsert signals/alerts (DB)
+  Enrich->>Signals: upsert signals (DB)
 ```
 
 ### 2.3 协议栈建议（系统间调用）
 - 采集层：HTTPS（优先 HTTP/2）+ 条件请求（ETag/If-Modified-Since）+ 源级限速/熔断。
-- 内部服务：gRPC（HTTP/2 + Protobuf）用于低延迟与强契约；对外 REST（OpenAPI）。
+- 对外服务：REST（OpenAPI）+ MCP（stdio）。
 - 事件总线：NATS JetStream。
 - 存储：Postgres wire；MinIO（S3 API）；Qdrant gRPC/HTTP。
 - LLM：在线 `DashScope API（Qwen3-Max）` + 本地推理（embedding）。
@@ -253,23 +253,12 @@ sequenceDiagram
 
 ### 4.2 调度：控制面/数据面
 ```mermaid
-flowchart TB
-  subgraph ControlPlane[Control Plane]
-    SCH[Scheduler\\n(priority+SLA)]
-    REG[Agent Registry\\n(version/capability)]
-    STATE[(Task State DB\\nPostgres)]
-  end
-
-  subgraph DataPlane[Data Plane]
-    Q[(Task Queue\\nCelery + Redis)]
-    WCPU[Worker Pool\\nCPU]
-  end
-
-  SCH -->|enqueue task| Q
-  Q --> WCPU
-  WCPU -->|heartbeat/result| STATE
-  REG --> SCH
-  STATE --> SCH
+graph TB
+  REG[Agent Registry] --> SCH[Scheduler]
+  STATE[Task State DB (Postgres)] --> SCH
+  SCH --> Q[Task Queue (Celery + Redis)]
+  Q --> WCPU[Worker Pool (CPU)]
+  WCPU --> STATE
 ```
 
 ### 4.3 任务模型（强烈建议幂等 + 引用传递）
@@ -398,7 +387,7 @@ flowchart TB
 
 ### 6.1 API 服务
 - 面向前端与外部系统：新闻检索、事件时间线、影响评分、信号/告警查询、推荐信号输出。
-- 形式：REST（OpenAPI）+ gRPC（内部高吞吐）。
+- 形式：REST（OpenAPI）。
 - 版权策略（v0）：对象存储保留全文用于审计/回放；**对话界面与对外 API 不返回全文**，仅返回摘要/结构化标注/引用链接（必要时可返回短引用片段与定位信息）。
 
 ### 6.2 MCP 服务（给 LLM 的“工具层”）
@@ -442,5 +431,65 @@ flowchart TB
 - 关键项：
   - 抓取并发：`crawler.max_concurrency: 1`
   - Raw 保留：`retention.raw_days: 7`
-  - 事件归并窗口：`event_windows`（按 `event_type` 配置）
+  - 事件归并窗口：`event_windows_minutes`（按 `event_type` 动态配置）
   - Tushare：`tushare.token`（用于拉取 A 股主数据）
+
+---
+
+## 10. 运行方式（v0 单机）
+
+### 10.1 启动依赖服务
+- `docker compose up -d`
+
+### 10.1.1 一键启动（Linux）
+- `bash scripts/start.sh`
+
+### 10.2 Python 环境与依赖
+- `python -m venv .venv && source .venv/bin/activate`
+- `pip install -r requirements.txt`
+- `pip install -e .`
+- （可选）开发工具：`pip install -r requirements-dev.txt`
+
+### 10.3 配置
+- 复制环境变量：`cp .env.example .env` 并按需修改
+- 填写 `config/config.yaml`：
+  - `tushare.token`（必填，首次同步 A 股主数据）
+  - `llm.api_key` 或环境变量 `DASHSCOPE_API_KEY`（可选；不填则只走规则路径）
+- 站点列表：编辑 `config/sources.txt`（每行一个站点根 URL）
+
+### 10.4 初始化 A 股主数据（Tushare）
+- `python -m apps.sync_tushare`
+
+### 10.5 启动 Worker（Celery）与 NATS Bridge
+- 启动 Celery worker：`celery -A tx_news.tasks.celery_app.celery_app worker -l INFO`
+- 启动 NATS Bridge（把 `txnews.raw` 转成 Celery 流水线）：`python -m apps.worker.nats_bridge`
+
+### 10.6 启动采集器
+- `python -m apps.collector.main`
+
+### 10.7 启动 API
+- `uvicorn apps.api.main:app --host 0.0.0.0 --port 8000`
+
+### 10.7.1 启动 MCP（stdio）
+- `python -m apps.mcp.server`
+
+### 10.8 常用 API
+- 健康检查：`GET /health`
+- 语义检索：`GET /search?q=...`
+- 单条分析：`GET /articles/{canonical_id}`（不返回全文）
+- 信号列表：`GET /signals`
+- 事件时间线：`GET /events/{event_id}`
+- 个股画像：`GET /entities/{ts_code}`
+
+### 10.9 维护任务
+- 同步 A 股主数据（可重复执行）：`python -m apps.sync_tushare`
+- 清理过期 raw（保留 7 天）：`python -c "from tx_news.tasks.maintenance import cleanup_raw; print(cleanup_raw.apply().get())"`
+
+---
+
+## 11. 微调（仅提供启动模板）
+
+真实微调不在本仓库自动执行；你可以使用 `finetune/` 下的模板快速启动：
+- 说明：`finetune/README.md`
+- 配置模板：`finetune/sft.yaml`
+- 启动脚本：`bash finetune/run_sft.sh finetune/sft.yaml`

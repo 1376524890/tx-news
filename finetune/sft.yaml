@@ -1,0 +1,38 @@
+# LLaMA-Factory SFT template (fill paths and params)
+# Notes:
+# - This file is intentionally conservative; adjust per your GPU/CPU and LLaMA-Factory version.
+# - For LoRA/QLoRA, set the corresponding fields and ensure your environment supports it.
+
+model_name_or_path: /path/to/base-model
+
+stage: sft
+do_train: true
+finetuning_type: lora
+
+dataset_dir: /path/to/sft-datasets
+dataset: your_dataset_name
+
+template: default
+cutoff_len: 4096
+max_samples: 200000
+
+output_dir: /path/to/output-lora
+overwrite_output_dir: true
+
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 2.0e-4
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+logging_steps: 10
+save_steps: 200
+
+fp16: true
+
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.05
+
+report_to: none
+
