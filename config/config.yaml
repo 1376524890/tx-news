@@ -28,7 +28,7 @@ llm:
 
 tushare:
   # Tushare token（必填；用于拉取 A 股主数据）
-  token: ""
+  token: "cab8e22a8a441ce9d816359fa54b06dee2ccc1809bc4402197f71f4a"
 
 # 事件归并窗口（按 event_type 动态配置；单位分钟）
 # 说明：用于把新闻聚合为 event_id，并驱动 Event-Centric RAG 的时间线维护。
