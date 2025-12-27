@@ -1,0 +1,41 @@
+# v0 固定配置（单机起步）
+
+crawler:
+  # 单机全局并发上限
+  max_concurrency: 1
+  # 基础超时（秒）
+  request_timeout_seconds: 20
+  # 重试次数（仅对 5xx/超时/网络抖动等可恢复错误）
+  max_retries: 3
+  # 按域名限速（秒）；为 0 表示不额外 sleep，仅靠 max_concurrency 控制
+  per_domain_min_interval_seconds: 0
+
+retention:
+  # raw 全文与快照保留天数（超过后按 TTL 清理）
+  raw_days: 7
+
+embedding:
+  # v0 CPU 友好；后续可替换为更大模型或 GPU 推理服务
+  model_name: bge-small-zh-v1.5
+
+llm:
+  provider: dashscope
+  model: qwen3-max
+  # DashScope API Key 建议通过环境变量注入；若必须写配置文件，可放在这里
+  # api_key: ""
+  max_concurrency: 2
+  timeout_seconds: 60
+
+tushare:
+  # Tushare token（必填；用于拉取 A 股主数据）
+  token: ""
+
+# 事件归并窗口（按 event_type 动态配置；单位分钟）
+# 说明：用于把新闻聚合为 event_id，并驱动 Event-Centric RAG 的时间线维护。
+event_windows_minutes:
+  policy: 1440
+  macro_data: 1440
+  company_event: 2880
+  geopolitics: 4320
+  industry_supply_demand: 4320
+  liquidity: 1440

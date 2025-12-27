@@ -23,12 +23,17 @@
 - 可追溯：每条新闻从抓取→解析→特征→结论→告警全链路审计。
 
 ### 0.4 已确认需求（v0）
-1) 数据源：**外网抓取为主**（仍保留内部投递通道作为补充与离线回放入口）。  
-2) 时效：**当天突发新闻 1 小时内完成分析并响应**。  
-3) 部署：**单机本地部署起步**，后续迁移到 K8s/更大规模平台。  
-4) RAG：希望采用**先进且效果好**的方案（本文提供多套可选设计）。  
-5) LLM 参与：用于**结构化标注 + 分析推理**，并生成“**个股列表** + **大盘变动**”等下游可用结果。  
-6) 语言：**中文**（中文分词/实体/事件模板与评估以中文为主）。  
+1) 数据源：外网抓取为主（保留内部投递通道用于补充与离线回放）。  
+2) 时效：当天突发新闻 1 小时内完成分析并响应（响应=入库可检索 + 分析结果写库）。  
+3) 部署：单机本地起步，后续迁移 K8s。  
+4) 市场：A 股为主。  
+5) 检索：向量检索为主（`Qdrant`），全文检索兜底（`Postgres FTS`）。  
+6) LLM：基础路径 + 在线增强都实现；在线使用 DashScope `qwen3-max`。  
+7) 合规：存全文用于审计/回放，但 UI/API 不展示全文。  
+8) 抓取并发：单机全局并发上限为 1。  
+9) 事件归并窗口：按事件类型动态配置。  
+10) A 股主数据：通过 Tushare（或同类免费平台）拉取，API Key 写入配置文件。  
+11) Raw 全文保留：7 天；不做审计删除逻辑（仅按 TTL 清理）。  
 
 ---
 
@@ -36,7 +41,7 @@
 
 本系统拆为五大板块（与最初设想一致），同时在工程上进一步细化为可部署的服务/agent：
 
-1) **金融新闻相关大模型服务（可选/增强项）**  
+1) **LLM 服务（DashScope `qwen3-max`）**  
 2) **高时效新闻知识库（采集/清洗/分析/标签/向量/检索）**  
 3) **前端与交互（OpenWebUI 二开或自研 Dashboard）**  
 4) **对外 API 服务（结构化与推荐/信号输出）**  
@@ -50,21 +55,18 @@
 ```mermaid
 flowchart LR
   S[Sources\\nRSS/HTML/API/FileDrop/Internal] --> C[Collector]
-  C -->|RawDocument| BUS[(Event Bus\\nKafka / NATS JetStream)]
+  C -->|RawDocument| BUS[(Event Bus\\nNATS JetStream)]
   BUS --> N[Normalizer]
   N --> D[Deduper/Canonicalizer]
   D --> E[Enrichment\\nNER/Event/Impact/Embed/Summary]
   E --> OLTP[(Postgres\\nMetadata/State)]
   E --> OBJ[(MinIO\\nRaw HTML/PDF/Snapshots)]
-  E --> IDX[Index\\nPostgres FTS / OpenSearch]
-  E --> VDB[(Vector DB\\npgvector / Qdrant)]
-  E --> OLAP[(ClickHouse\\nFeatures/Aggregates)]
-  E --> A[Alert Engine]
-  A --> P[Push\\nWebSocket/SSE/Email/IM]
+  E --> IDX[Index\\nPostgres FTS]
+  E --> VDB[(Vector DB\\nQdrant)]
+  E --> A[Alert/Signal DB\\n(Postgres)]
   API[API Gateway\\nREST/gRPC/MCP] --> OLTP
   API --> IDX
   API --> VDB
-  API --> OLAP
   UI[OpenWebUI / Dashboard] --> API
 ```
 
@@ -77,8 +79,7 @@ sequenceDiagram
   participant Dedup as Deduper
   participant Enrich as Enricher
   participant Store as DB/Index
-  participant Alert as AlertEngine
-  participant Push as WS/SSE
+  participant Alert as Alert/Signal DB
 
   Collector->>Bus: publish RawDocument
   Bus->>Norm: consume RawDocument
@@ -87,17 +88,15 @@ sequenceDiagram
   Dedup->>Bus: publish CanonicalArticle
   Bus->>Enrich: consume CanonicalArticle
   Enrich->>Store: upsert entities/events/features/index
-  Enrich->>Alert: emit signals (impact/keywords)
-  Alert->>Push: push alerts (real-time)
+  Enrich->>Alert: upsert signals/alerts (DB)
 ```
 
 ### 2.3 协议栈建议（系统间调用）
 - 采集层：HTTPS（优先 HTTP/2）+ 条件请求（ETag/If-Modified-Since）+ 源级限速/熔断。
 - 内部服务：gRPC（HTTP/2 + Protobuf）用于低延迟与强契约；对外 REST（OpenAPI）。
-- 事件总线：Kafka 协议（强回放）或 NATS JetStream（轻量低延迟）。
-- 存储：Postgres wire；MinIO（S3 API）；ClickHouse native/http；OpenSearch REST。
-- 实时推送：SSE（实现简单、单向推送）或 WebSocket（双向交互）。
-- LLM：OpenAI 兼容 API（vLLM 部署自建模型；或在线 LLM 作为增强）。
+- 事件总线：NATS JetStream。
+- 存储：Postgres wire；MinIO（S3 API）；Qdrant gRPC/HTTP。
+- LLM：在线 `DashScope API（Qwen3-Max）` + 本地推理（embedding）。
 - 给 LLM 的工具接口：MCP（Model Context Protocol）服务化暴露“检索/时间线/告警解释”等能力。
 
 ---
@@ -115,32 +114,19 @@ sequenceDiagram
 - 解析失败兜底：正文抽取失败时，至少保留 `raw_html` 与基础元信息，进入“人工/离线重跑队列”。
 - Headless 仅作为兜底：默认走静态抓取；遇到强 JS 渲染源再按源启用 `playwright`，并在单机环境下严格限流。
 
-**方案 A：Python（最快落地）**
-- 技术：`Python + asyncio + httpx`；RSS：`feedparser`；正文抽取：`trafilatura` 或 `readability-lxml`；反爬（可选）：`playwright`。
-- 优点：开发快、生态完整、与 NLP/LLM 集成顺滑。
-- 缺点：极高并发下需更严格的性能治理；playwright 资源占用大。
-
-**方案 B：Go 采集 + Python 分析（生产常见组合）**
-- 技术：采集：`Go (colly/goquery)`；队列：Kafka/NATS；分析：Python worker。
-- 优点：采集稳定、低资源、高并发；分析仍享受 Python 生态。
-- 缺点：双语言维护成本；Schema/契约治理更重要。
-
-**方案 C：JVM 企业化**
-- 技术：`Java/Kotlin + Spring`；抓取：OkHttp + jsoup；流处理：Kafka Streams/Flink。
-- 优点：工程治理强，适合大团队长期运维。
-- 缺点：初期速度慢；NLP/LLM 周边不如 Python 直观。
-
-**减少外部依赖的采集策略**
-- 强缓存：ETag/Last-Modified + 内容 hash + 本地 BloomFilter（减少重复请求）。
-- 内部投递优先：把“文件投递/内部 webhook/内部 MQ”作为主数据入口，外网抓取作为可插拔连接器。
+**v0 选择（固定）**
+- 实现：`Python + asyncio + httpx`；RSS：`feedparser`
+- 反爬兜底：允许按 source 配置启用 `playwright`（严格限流，只对必须 JS 渲染的源开启）
+- 抽取：见 `README.md:3.2`（`readability-lxml`）
+- 缓存：ETag/Last-Modified + 内容 hash（减少重复请求）
 
 ### 3.2 解析与规范化（Normalizer）
 **职责**
 - HTML→正文抽取、语言识别、时间/作者/栏目提取、链接展开、编码修复。
 - 输出 `NormalizedArticle`：稳定 schema（建议版本化 `schema_version`）。
 
-**建议栈（Python）**
-- 内容抽取：`trafilatura`（鲁棒）/ `readability-lxml`（轻量）。
+**建议栈（Python，v0 选择 `readability-lxml`）**
+- 内容抽取：`readability-lxml`（轻量、可控；适合单机起步与高吞吐抓取）。
 - 时间解析：`dateparser` + 源站规则（每源一套轻量 parser）。
 - Schema：`Pydantic` + JSONSchema 导出（供多语言消费者使用）。
 
@@ -148,47 +134,84 @@ sequenceDiagram
 **目标**
 - 同稿多源、转载、改标题、轻微改写的归并；保留版本便于追溯。
 
-**推荐组合**
-1) URL 规范化 + `checksum(normalized_text)` 粗去重  
-2) SimHash/MinHash（LSH）近重复  
-3) 语义去重（可选）：embedding 相似度（本地模型）  
-4) 归并：生成 `canonical_id`，保存 `versions[]`（每次变更可审计）
+**v0 选择的去重流水线（兼顾速度与语义覆盖）**
+1) URL 规范化 + `checksum(normalized_text)` 粗去重（秒级）  
+2) SimHash/MinHash（LSH）近重复（快，减少后续向量计算量）  
+3) 语义去重：仅对 LSH 判定为“不重复”的候选计算 embedding，再做相似度判定（对改写/同义表述更鲁棒）  
+4) 归并：生成 `canonical_id`（文章权威 ID），并把不同来源/版本写入 `versions[]`（审计与回放）
+
+**embedding 复用（用于“语义去重”与“向量检索/RAG”节约算力）**
+- 计算一次，多处复用：对每个 `canonical_id` 计算并缓存 `embedding(model_version, text_fingerprint)`。
+- 存储位置：向量库（`Qdrant`）存向量；Postgres 存元信息（模型版本、文本指纹、生成时间）。
+- 复用策略：
+  - 语义去重阶段：优先查缓存向量；不存在才计算并写入。
+  - 向量检索阶段：直接复用同一向量（或对 `event timeline summary` 另算一条“事件级向量”）。
+- 注意：如果用于检索的 chunk 向量与用于去重的“整文向量”不同，需要分别缓存（但仍可共享同一 embedding 模型与推理服务）。
 
 **优缺点**
 - SimHash/MinHash：速度快、离线友好；对深度改写弱。
 - 向量去重：对改写强；成本高，需向量库与算力。
 
 ### 3.4 实时处理与消息系统（Event Bus / Stream）
-**方案 A：Kafka（复杂系统优选）**
-- 优点：持久化、回放、消费者组成熟；适合“高时效 + 可回放 + 多下游”。
-- 缺点：运维复杂度高于轻量方案。
-
-**方案 B：NATS JetStream（轻量低延迟）**
-- 优点：部署轻、延迟低；适合 agent 事件驱动与短任务调度。
-- 缺点：超大规模回放与生态不如 Kafka。
-
-**方案 C：RabbitMQ / Redis Streams（中等复杂度）**
-- 优点：易用；与 Celery/任务模型契合。
-- 缺点：日志式大吞吐与回放不如 Kafka。
+**v0 选择（固定）：NATS JetStream**
+- 承载 `raw -> normalized -> canonical -> enriched -> signals` 的消息流。
+- 与调度分工：NATS 负责数据事件；Celery 负责任务执行与资源治理（见 `README.md:4.5`）。
 
 ### 3.5 存储（对象 + OLTP + OLAP）
-**推荐分层**
-- 对象存储：`MinIO`（自托管 S3）存 raw/html/pdf/snapshots。
-- OLTP：`PostgreSQL` 存文章元数据、实体/事件关系、任务状态、审计。
-- OLAP（可选）：`ClickHouse` 存特征/日志/聚合（热度、来源对比、情绪分布）。
+**v0 存储分层（固定）**
+- 对象存储：`MinIO`（自托管 S3）存 raw/html/pdf/snapshots（**保存全文**，用于审计与回放）。
+- OLTP：`PostgreSQL` 存文章元数据、实体/事件关系、任务状态、审计、A 股主数据表（代码/简称/行业/别名等）。
+- 向量库：`Qdrant`（向量检索 + 语义去重 embedding 复用）
 
 **低依赖替代**
 - 仅 Postgres：组件最少，但高频聚合与海量日志会吃力。
 
 ### 3.6 检索（全文/结构化/向量）
-**全文检索**
-- 方案 A：`OpenSearch/Elasticsearch`（强检索、聚合、near real-time；资源与运维更重）
-- 方案 B：`Postgres FTS + pg_trgm`（低依赖、够用；复杂检索与吞吐上限较低）
+检索的意义不只是“给人搜新闻”，还决定了：
+- RAG 能否拿到正确上下文（否则 LLM 再强也会被错误证据带偏）。
+- 事件聚类/相似新闻发现是否稳定（影响 Fast Path 的“突发归并”和 Deep Path 的“时间线”）。
+- 对外 API 的可用性（按时间/来源/标的/事件类型检索，支撑“1 小时内响应”的工作流）。
 
-**向量检索（用于相似新闻、语义聚类、RAG）**
-- `pgvector`：最少组件；适合中小规模。
-- `Qdrant`：自托管简单、性能好；适合中等规模与生产化。
-- `Milvus`：大规模强，但运维更复杂。
+下面按“你更倾向向量检索”的方向，给出实现方式与多方案对比。
+
+#### 3.6.1 向量检索（Vector Search，v0 主检索）
+**它解决什么问题**
+- 用户不知道准确关键词时：用语义相近召回（例如“央行降准”≈“释放流动性”）。
+- 跨来源不同表述：同一事件的不同写法仍能召回。
+- 适合 RAG：给 LLM 提供“语义相关证据”，降低漏检。
+
+**它不擅长什么**
+- 精确条件：例如“只要包含某个精确数字/代码/日期”的检索，关键词/结构化过滤更可靠。
+- 召回质量受 embedding 模型、分段策略、时间窗口影响很大；必须配合过滤与重排。
+
+**工程实现要点（v0 固定，先跑通流程）**
+- 向量对象（两级）：
+  - 文章级：`canonical_id_embedding`（用于相似检索、语义去重复用）
+  - 事件级：`event_timeline_embedding`（用于 Event-Centric RAG，降低噪声）
+- v0 不做正文分段向量（chunking），避免组件与计算复杂化；后续如需提高证据定位与召回率，再补 `chunk_embeddings`。
+- 元数据过滤（强烈建议）：时间窗口（近 24h/7d）、来源白名单、实体/股票代码、事件类型；过滤能显著提升“突发新闻”检索质量。
+- 重排（v0）：规则重排（时间新鲜度 + 来源多样性 + 去重）提升精度。
+
+**v0 向量库（固定）**
+- `Qdrant`：过滤能力强、性能稳定，适合“向量检索为主”的新闻场景。
+
+#### 3.6.2 全文检索（Full-Text Search，用于精确召回与审计）
+即使主检索走向量，也建议保留一条“全文检索/关键词召回”的能力作为兜底与审计入口：
+- 找精确实体、数字、公告标题、股票代码、政策条款时更可靠。
+- 处理“向量误召回/漏召回”时便于人工核查与修正。
+
+**v0 兜底实现（固定）**
+- `Postgres FTS + pg_trgm`：组件最少，满足精确关键词/数字/代码的召回与审计。
+
+#### 3.6.3 混合检索（Hybrid Search，最佳效果但复杂度更高）
+在新闻场景里，最稳妥的做法通常是：**向量召回（高召回） + 关键词/过滤/重排（高精度）**。
+
+推荐的 v0 查询流程（向量为主）：
+1) 元数据过滤（时间窗口、A 股标的/行业、来源等）
+2) 向量召回 TopK（优先 `event timeline`，其次 `canonical article`，最后 `chunks`）
+3) 去重与多样性约束（同一事件簇最多 N 条、来源覆盖至少 M 个）
+4) 规则重排：新鲜度 + 置信度 + 证据密度（v0 不引入重排模型）
+5) 返回给 UI/API：只返回摘要/结构化结果/引用链接，不返回全文（版权要求）
 
 ### 3.7 分析层（NLP/规则/本地模型/在线 LLM）
 **任务**
@@ -199,12 +222,12 @@ sequenceDiagram
 
 **“无 LLM”基础路径（建议必须可用）**
 - 词典+规则：行业/公司别名、宏观指标模板、事件触发词与正则模式
-- 传统 NLP：`HanLP`（中文友好）/ `spaCy`；分类器可用轻量模型微调
-- Embedding：本地 embedding 模型（如 `bge-m3`/`e5` 系列）用于聚类/相似检索
+- 传统 NLP（中文优先）：`HanLP`（分词/实体/依存等）+ 金融领域词典；分类器可用轻量模型微调
+- Embedding（v0 固定，CPU 友好）：`bge-small-zh-v1.5`（用于聚类/相似检索/语义去重/向量检索；后续可无缝升级到 GPU/更大模型）
 
-**在线 LLM 增强（可选）**
-- 用于摘要、归因解释、复杂事件归纳、生成“可读的分析报告”
-- 必须缓存输出（按 `canonical_id + prompt_version` 幂等存储），避免重复调用
+**在线 LLM 增强（v0：DashScope `qwen3-max`）**
+- 用于结构化标注、影响推理、跨源归并解释、生成“可读的分析报告”
+- 必须缓存输出（按 `canonical_id/event_id + prompt_version` 幂等存储），避免重复调用与降低成本
 
 ---
 
@@ -238,16 +261,13 @@ flowchart TB
   end
 
   subgraph DataPlane[Data Plane]
-    Q[(Task Queue\\nKafka/NATS/Rabbit)]
+    Q[(Task Queue\\nCelery + Redis)]
     WCPU[Worker Pool\\nCPU]
-    WGPU[Worker Pool\\nGPU/LLM]
   end
 
   SCH -->|enqueue task| Q
   Q --> WCPU
-  Q --> WGPU
   WCPU -->|heartbeat/result| STATE
-  WGPU -->|heartbeat/result| STATE
   REG --> SCH
   STATE --> SCH
 ```
@@ -271,7 +291,7 @@ flowchart TB
 
 - **Fast Path（用于 T+30m 内响应）**  
   - 触发点：`Normalize + Dedup` 完成后立即进入  
-  - 内容：规则/轻量模型 + 必要的 LLM（可选）输出“事件类型、涉及实体/个股、影响方向、置信度、触发原因（证据引用）”  
+  - 内容：规则/轻量模型先跑；对疑似高影响（或低置信度）的样本再调用在线 LLM（`qwen3-max`）补齐标注与推理，输出“事件类型、涉及实体/个股、影响方向、置信度、触发原因（证据引用）”  
   - 产物：`BreakingSignal`（可直接驱动告警/看板/对外 API）
 
 - **Deep Path（用于 T+60m 内完整分析）**  
@@ -281,42 +301,35 @@ flowchart TB
 
 **单机运行时的调度要点**
 - 使用优先级队列：Fast Path 任务优先；Deep Path 可在低峰或空闲资源运行。
-- Worker 分池：CPU 池跑抓取/解析/规则；（可选）GPU/LLM 池跑 embedding/摘要/推理。
+- Worker 分池（v0）：CPU 池跑抓取/解析/规则/embedding/推理（DashScope 调用并发单独限流）。
 - 强幂等：所有产物以 `canonical_id/event_id + version` 做 upsert，确保可重试与可回放。
 
-### 4.5 调度实现方案（可选对比）
-**方案 A：Temporal（推荐用于复杂 agent 编排）**
-- 优点：工作流/DAG、重试/超时、版本化、审计一体化；适合长任务与可靠性要求高的系统。
-- 缺点：部署与学习成本高于 Celery。
-
-**方案 B：Prefect（Python 友好）**
-- 优点：DAG 易写，适合 Python 团队；可自托管。
-- 缺点：对“超高频微任务”需要额外治理并发与队列策略。
-
-**方案 C：Celery + Redis/Rabbit（最快落地）**
-- 优点：上手快；工程化成熟。
-- 缺点：复杂编排/回放/版本化审计需要额外工程补齐。
-
-**方案 D：LangGraph（偏“LLM Agent 流程编排”，适合板块 5 的分析调度）**
-- 适用：把“检索→分析→生成报告→验证/自检→写回知识库”做成可观测的图流程。
-- 建议：与 Temporal/Kafka 的“数据流水线”解耦，LangGraph 负责“分析型多步推理链”，基础 ETL 仍走可靠流水线。
+### 4.5 调度实现方案（v0 选择：方案 C）
+**方案 C：Celery + Redis（单机优先）**
+- 定位：作为调度与任务执行引擎（抓取、解析、去重、embedding、写库、Deep Path 分析链的分步执行）。
+- 与消息系统分工：`NATS JetStream` 承载数据事件流（raw/normalized/canonical/enriched）；Celery 负责把这些事件转换成可控的后台任务并执行（重试/限流/并发）。
+- 建议部署：`Celery + Redis`（broker/result backend）+ 分 worker 队列（CPU 队列、LLM 队列、embedding 队列），用优先级保证 Fast Path 先跑。
+- Deep Path（Agentic RAG）：作为 Celery 的一个“任务链/子流程”运行，结束后以幂等 upsert 回写优化结构化结果。
 
 ---
 
 ## 5. LLM 服务与 RAG（板块 1/2/3 的关键接口）
 
-### 5.1 自建模型微调与部署（建议路线）
-- 微调工具：`LLaMA-Factory` + LoRA/QLoRA
-- 数据：金融新闻/财经对话对齐；可用大模型生成高质量 SFT 数据（需人审/规则筛）
-- 部署：`vLLM` 提供 OpenAI 兼容 API（`/v1/chat/completions` 等）
+### 5.1 在线 LLM（v0 固定）
+- 在线服务：`DashScope API`
+- 模型：`qwen3-max`
+- 用法定位：作为“标注与推理增强层”，所有关键输出必须结构化（JSON Schema）且可缓存可回放。
+
+### 5.1.1 本地模型（v0 固定）
+- Embedding：本地运行，用于语义去重与向量检索（见 `README.md:3.3`、`README.md:3.6`）。
 
 ### 5.2 RAG 方案（先进可选，并给出取舍）
 
 #### 方案 A：时间感知的 Hybrid RAG（推荐作为 v0 默认）
 **核心思路**
-- 检索：全文（Postgres FTS/OpenSearch）+ 向量（pgvector/Qdrant）混合召回。
+- 检索：全文（Postgres FTS）+ 向量（Qdrant）混合召回（以向量为主，全文兜底）。
 - 时间加权：对“越近的新闻/事件簇”施加更高权重（recency bias），避免旧闻污染。
-- 重排：本地 reranker（可选）+ 规则约束（必须包含发布时间、来源多样性等）。
+- 重排：规则约束（必须包含发布时间、来源多样性等）。
 - 组装上下文：以“事件簇/时间线”为单位拼上下文，而非逐条新闻堆叠。
 
 **优点**
@@ -337,18 +350,7 @@ flowchart TB
 **缺点**
 - 需要先把聚类与事件建模做扎实；冷启动阶段事件质量依赖规则/聚类参数。
 
-#### 方案 C：GraphRAG（知识图谱增强，适合“实体/关系/因果链”）
-**核心思路**
-- 维护实体-事件-指标-市场的图结构（公司/行业/宏观指标/政策/商品/汇率等）。
-- 查询时：先做实体识别与链接 → 子图检索（相关实体、相关事件、历史相似情景）→ 再做文档检索补证据。
-
-**优点**
-- 对“关系链、因果链、关联标的扩散”的解释能力更强，适合做大盘/行业联动分析。
-
-**缺点**
-- 工程投入更大；图谱质量决定上限（需要持续维护实体词典与关系抽取）。
-
-#### 方案 D：Agentic RAG（LangGraph/工具调用链，适合“多步分析报告”）
+#### 方案 D：Agentic RAG（用于 Deep Path 的逻辑化分析）
 **核心思路**
 - 以 LangGraph 把流程固化为：`检索→归并→证据检查→标注→生成报告→自检→写回`。
 - LLM 只做“推理与表达”，检索/归并/计算/验证全部工具化（MCP/内部 API）。
@@ -360,31 +362,30 @@ flowchart TB
 - 调试成本高；需要严格的结构化输出约束与缓存，否则成本与不稳定性会上升。
 
 #### 选择建议（结合已确认需求）
-- v0 默认：**方案 A（时间感知 Hybrid）+ 方案 B（事件中心）**，优先保障“1 小时内响应”的稳定性与可解释性。
-- v1 增强：引入 **方案 D（Agentic）** 做“突发事件分析报告”流水线。
-- v2 增强：引入 **方案 C（GraphRAG）** 做“行业扩散/关联标的/宏观链路”解释。
+- v0：**方案 A（时间感知 Hybrid）+ 方案 B（事件中心）** 用于“短平快突发处理”（Fast Path，快速入库可检索 + 初步信号）。
+- v0：同时引入 **方案 D（Agentic RAG / LangGraph）** 用于“逻辑化深度分析”（Deep Path），并在分析结束后以幂等 upsert 的方式**优化/覆盖数据库中的结构化结果**。
 
 #### 工具接口（给 LLM 的最小集合）
 - `search_news(query, time_range, sources, top_k)`
 - `get_event_timeline(event_id)`
 - `get_entity_profile(entity_id)`（公司/行业/宏观指标画像）
-- `get_market_snapshot(date_time)`（可先只读本地缓存或内部数据源）
 - `write_annotations(canonical_id, schema_version, payload)`
 
 ### 5.3 “在线 LLM”最小化策略
 - 仅用于高价值环节：深度摘要、影响解释、跨源归因与报告生成
 - 强缓存：按输入引用与 prompt 版本缓存输出；失败自动降级到规则/抽取式摘要
+- DashScope 调用治理：对 `qwen3-max` 设定并发上限、超时与重试策略；对输出做 JSON Schema 校验，不合格则走“重试/降级/人工复核队列”。
 
 ### 5.4 结构化标注与推理输出（面向“个股列表 + 大盘变动”）
 
-为支持“自动标注、分析推理、生成个股列表与大盘变动结论”，建议统一一套可版本化的结构化输出（写入 Postgres/ClickHouse/向量库均可引用同一 `canonical_id/event_id`）。
+为支持“自动标注、分析推理、生成个股列表与大盘变动结论”，建议统一一套可版本化的结构化输出（写入 Postgres/向量库均可引用同一 `canonical_id/event_id`）。
 
 **建议输出要素**
 - `event_type`：政策/宏观数据/公司事件/地缘政治/行业供需/市场流动性等
-- `entities`：公司/行业/宏观指标/国家/机构（必须做链接：与本地“个股/指数/行业”主数据表对齐）
+- `entities`：公司/行业/宏观指标/国家/机构（必须做链接：与本地 A 股“个股/指数/行业”主数据表对齐）
 - `impact`：`scope`（大盘/行业/个股/商品/汇率）、`direction`（利好/利空/不确定）、`horizon`（短/中/长）、`confidence`
-- `tickers`：个股列表（含理由与证据引用，允许为空但必须说明原因）
-- `index_view`：大盘变动判断（方向/驱动因素/不确定性/风险点），强调“情景化”而非确定性预测
+- `tickers`：个股列表（来自“本地 A 股主数据表”，含理由与证据引用；允许为空但必须说明原因）
+- `index_view`：大盘变动判断（新闻驱动的方向性/情景化判断，非实时行情涨跌；包含驱动因素/不确定性/风险点）
 - `evidence`：引用的新闻/数据点列表（`source_id/url/publish_time/quote_span`）
 
 **关键约束**
@@ -396,37 +397,50 @@ flowchart TB
 ## 6. 对外服务（API + MCP）
 
 ### 6.1 API 服务
-- 面向前端与外部系统：新闻检索、事件时间线、影响评分、告警订阅、推荐信号输出。
-- 形式：REST（OpenAPI）+ WebSocket/SSE（实时推送）+ gRPC（内部高吞吐）。
+- 面向前端与外部系统：新闻检索、事件时间线、影响评分、信号/告警查询、推荐信号输出。
+- 形式：REST（OpenAPI）+ gRPC（内部高吞吐）。
+- 版权策略（v0）：对象存储保留全文用于审计/回放；**对话界面与对外 API 不返回全文**，仅返回摘要/结构化标注/引用链接（必要时可返回短引用片段与定位信息）。
 
 ### 6.2 MCP 服务（给 LLM 的“工具层”）
 - 把知识库能力（检索/时间线/实体画像/告警解释）以 MCP Server 形式暴露，供 OpenWebUI/自研对话前端的 LLM 调用。
 
 ---
 
-## 7. 三套推荐落地组合（按团队与资源选择）
-
-1) **复杂系统推荐（强回放 + 强审计）**  
-`Kafka + Temporal + Postgres + MinIO + (ClickHouse) + (OpenSearch) + Qdrant/pgvector`
-
-2) **单机起步推荐（匹配“1 小时内响应”，可平滑迁移 K8s）**  
-`Celery/Prefect + Postgres + MinIO + Qdrant(pgvector 亦可) + Postgres FTS`（可选加 `OpenSearch/ClickHouse`）
-
-3) **轻量低延迟（事件驱动）**  
-`NATS JetStream + Prefect/轻量调度 + Postgres + MinIO + (Qdrant)`
+## 7. v0 已选落地组合（单机起步，可迁移 K8s）
+`Python(Collector/Workers) + NATS JetStream + Celery + Redis + Postgres + MinIO + Qdrant`  
+（Extractor：`readability-lxml`；去重：LSH→本地 embedding 语义去重；embedding 复用到向量检索；本地 embedding：`bge-small-zh-v1.5`；在线 LLM：DashScope `qwen3-max`）
 
 ---
 
 ## 8. 已确认的关键决策（v0）
 
 1) 数据源：外网抓取为主。  
-2) 时效目标：当天突发新闻 **1 小时内完成分析并响应**。  
+2) 时效目标：当天突发新闻 **1 小时内完成分析并响应**；响应定义为“写入知识库可检索 + 分析结果更新到数据库”。  
 3) 部署形态：单机本地部署起步，后续考虑迁移 K8s。  
-4) RAG：需要先进且效果好的方案（默认建议“时间感知 Hybrid + 事件中心”，见 `README.md:5.2`）。  
-5) LLM：参与结构化标注、分析推理，并产出“个股列表/大盘变动”等结果。  
-6) 语言：中文。
+4) 抽取：正文抽取使用 `readability-lxml`。  
+5) 去重：LSH 近重复去重后，对“未重复候选”做本地 embedding 语义去重，并复用 embedding 于向量检索。  
+6) 消息系统：使用 `NATS JetStream`。  
+7) 检索：以向量检索为主（`Qdrant`），并保留全文检索兜底（`Postgres FTS`）。  
+8) LLM：基础路径 + 在线增强都实现；在线为 DashScope `qwen3-max`，用于标注与推理并产出“个股列表/大盘变动（新闻驱动的方向性判断）”。  
+9) RAG：Fast Path 用方案 A+B；Deep Path 用 Agentic RAG（LangGraph）做逻辑化分析并回写优化结果。  
+10) 市场范围：A 股为主。  
+11) 版权：存全文用于审计/回放，但 UI/API 不展示全文。
+12) 抓取配置：站点通过配置文件按行列出根 URL（见 `config/sources.txt`）。  
+13) 并发：单机抓取全局并发上限为 1。  
+14) 事件归并：按事件类型动态窗口（见 `config/config.yaml`）。  
+15) 主数据：通过 Tushare 拉取，token 配置在 `config/config.yaml`。  
+16) 保留：raw 全文保留 7 天，不做审计逻辑。  
 
-## 9. 下一步建议补充（用于落到可实现的工程规格）
-- 明确“覆盖市场范围”的主数据：A 股/港股/美股/期货/外汇？以及个股主表来源（可先本地静态表，后续再接实时行情）。
-- 明确“响应”的定义：业务告警（推送）/写库（API 可取）/生成日报（报告）分别的 SLA。
-- 明确合规策略：抓取频率、robots、版权与引用方式（存全文 vs 存摘要+引用链接）。
+## 9. 配置（v0 固定）
+
+### 9.1 站点配置
+- 文件：`config/sources.txt`
+- 格式：每行一个站点根 URL（例如 `https://finance.example.com/`），采集器按根 URL 加载对应抓取规则与限流策略。
+
+### 9.2 全局配置
+- 文件：`config/config.yaml`
+- 关键项：
+  - 抓取并发：`crawler.max_concurrency: 1`
+  - Raw 保留：`retention.raw_days: 7`
+  - 事件归并窗口：`event_windows`（按 `event_type` 配置）
+  - Tushare：`tushare.token`（用于拉取 A 股主数据）
