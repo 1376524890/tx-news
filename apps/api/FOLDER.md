@@ -9,7 +9,7 @@
 架构（≤3行）：
 - FastAPI 对外提供检索/对话/管理台等 HTTP 接口，并挂载 `static/` UI。
 - 依赖 Postgres/Qdrant/Redis/NATS（通过 `tx_news.settings` 读取连接信息）。
-- 对话支持 `/chat/stream` SSE 流式输出 + Markdown 渲染；管理台提供实时监控面板（可通过 `TXNEWS_LOG_LEVEL=DEBUG` 打开服务端流式调试日志）。
+- 对话支持 `/chat/stream` SSE 流式输出 + Markdown 渲染（含表格）；管理台提供实时监控面板（可通过 `TXNEWS_LOG_LEVEL=DEBUG` 打开服务端流式调试日志）。
 
 ## 文件
 

@@ -70,6 +70,8 @@ function renderMarkdown(md) {
   let codeLines = [];
   let para = [];
   let list = [];
+  let table = null; // string[][]
+  let tableAlign = null; // ("left"|"center"|"right"|null)[]
 
   function flushPara() {
     if (!para.length) return;
@@ -90,6 +92,40 @@ function renderMarkdown(md) {
     list = [];
   }
 
+  function flushTable() {
+    if (!table || table.length < 2) {
+      table = null;
+      tableAlign = null;
+      return;
+    }
+    const header = table[0];
+    const rows = table.slice(1);
+    const aligns = tableAlign || header.map(() => null);
+    const ths = header
+      .map((cell, i) => {
+        const a = aligns[i];
+        const style = a ? ` style="text-align:${a}"` : "";
+        return `<th${style}>${renderInlineMarkdown(cell)}</th>`;
+      })
+      .join("");
+    const trs = rows
+      .map((r) => {
+        const tds = header
+          .map((_, i) => {
+            const cell = (r[i] ?? "").trim();
+            const a = aligns[i];
+            const style = a ? ` style="text-align:${a}"` : "";
+            return `<td${style}>${renderInlineMarkdown(cell)}</td>`;
+          })
+          .join("");
+        return `<tr>${tds}</tr>`;
+      })
+      .join("");
+    out.push(`<div class="md-table"><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`);
+    table = null;
+    tableAlign = null;
+  }
+
   function flushCode() {
     const code = escapeHtml(codeLines.join("\n"));
     const lang = escapeHtml(codeLang || "");
@@ -98,6 +134,33 @@ function renderMarkdown(md) {
     );
     codeLines = [];
     codeLang = "";
+  }
+
+  function parseTableRow(line) {
+    let s = String(line || "").trim();
+    if (!s.includes("|")) return null;
+    if (s.startsWith("|")) s = s.slice(1);
+    if (s.endsWith("|")) s = s.slice(0, -1);
+    const cells = s.split("|").map((x) => x.trim());
+    if (cells.length < 2) return null;
+    return cells;
+  }
+
+  function parseAlignRow(line) {
+    const cells = parseTableRow(line);
+    if (!cells) return null;
+    const aligns = [];
+    for (const c of cells) {
+      const t = c.replaceAll(" ", "");
+      if (!/^:?-+:?$/.test(t)) return null;
+      const left = t.startsWith(":");
+      const right = t.endsWith(":");
+      if (left && right) aligns.push("center");
+      else if (right) aligns.push("right");
+      else if (left) aligns.push("left");
+      else aligns.push(null);
+    }
+    return aligns;
   }
 
   for (const lineRaw of lines) {
@@ -110,6 +173,7 @@ function renderMarkdown(md) {
       } else {
         flushPara();
         flushList();
+        flushTable();
         inCode = true;
         codeLang = fence[1] || "";
       }
@@ -121,10 +185,48 @@ function renderMarkdown(md) {
       continue;
     }
 
+    // Pipe table (GitHub style): header | header, second line ---|---, then body rows.
+    // We only start a table when we see header row followed by a valid align row.
+    if (!table) {
+      // Lookahead requires peeking next line; handled by buffering in `table` when we can.
+      // Here we opportunistically detect a header row and stash it in `table`, then wait for align row.
+      const header = parseTableRow(line);
+      if (header) {
+        // We can't look ahead easily in this streaming loop, so mark pending header with a sentinel
+        // and confirm when we see the next align row.
+        // Use table as pending with one row until align row arrives.
+        table = [header];
+        tableAlign = null;
+        continue;
+      }
+    } else if (table && table.length === 1 && tableAlign == null) {
+      // Expect align row; otherwise fall back to paragraph.
+      const aligns = parseAlignRow(line);
+      if (aligns) {
+        tableAlign = aligns;
+        continue;
+      }
+      // Not a table; push pending header back into paragraph and continue parsing current line.
+      para.push(table[0].join(" | "));
+      table = null;
+      tableAlign = null;
+      // fall through to normal parsing of current line
+    } else if (table && tableAlign) {
+      const row = parseTableRow(line);
+      if (row) {
+        table.push(row);
+        continue;
+      }
+      // End of table
+      flushTable();
+      // fall through to parse current line
+    }
+
     const h = line.match(/^(#{1,3})\s+(.*)$/);
     if (h) {
       flushPara();
       flushList();
+      flushTable();
       const lvl = h[1].length;
       out.push(`<h${lvl}>${renderInlineMarkdown(h[2])}</h${lvl}>`);
       continue;
@@ -133,6 +235,7 @@ function renderMarkdown(md) {
     const li = line.match(/^\s*[-*]\s+(.*)$/);
     if (li) {
       flushPara();
+      flushTable();
       list.push(li[1]);
       continue;
     }
@@ -141,6 +244,7 @@ function renderMarkdown(md) {
     if (quote) {
       flushPara();
       flushList();
+      flushTable();
       const html = renderInlineMarkdown(quote[1]);
       out.push(`<blockquote>${html}</blockquote>`);
       continue;
@@ -149,6 +253,7 @@ function renderMarkdown(md) {
     if (!line.trim()) {
       flushPara();
       flushList();
+      flushTable();
       continue;
     }
 
@@ -156,6 +261,7 @@ function renderMarkdown(md) {
   }
 
   if (inCode) flushCode();
+  flushTable();
   flushPara();
   flushList();
   return out.join("\n");

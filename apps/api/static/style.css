@@ -252,6 +252,35 @@ body {
 .bubble .content.md a:hover {
   text-decoration: underline;
 }
+
+.bubble .content.md .md-table {
+  margin: 10px 0;
+  overflow: auto;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(8, 10, 14, 0.5);
+}
+.bubble .content.md table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.bubble .content.md th,
+.bubble .content.md td {
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  vertical-align: top;
+}
+.bubble .content.md th {
+  position: sticky;
+  top: 0;
+  background: rgba(18, 24, 34, 0.9);
+  text-align: left;
+  font-weight: 700;
+}
+.bubble .content.md tr:last-child td {
+  border-bottom: 0;
+}
 .meta {
   margin-top: 10px;
   border-top: 1px dashed rgba(255, 255, 255, 0.12);

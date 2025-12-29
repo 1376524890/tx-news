@@ -16,6 +16,17 @@ const rt = {
   js_pending: [],
 };
 
+const rtDom = {
+  inited: false,
+  metrics: {},
+  flow: {},
+};
+
+const logState = {
+  lastKey: "",
+  lastTail: "",
+};
+
 function escapeHtml(text) {
   return String(text || "")
     .replaceAll("&", "&amp;")
@@ -67,24 +78,47 @@ function fmt(n) {
   return String(Math.round(x * 10) / 10);
 }
 
-function sparkline(values, color) {
+function computeSparkPoints(values) {
   const w = 120;
   const h = 28;
   const vs = (values || []).slice(-RT_MAX_POINTS);
-  if (vs.length < 2) return `<svg width="${w}" height="${h}"></svg>`;
+  if (vs.length < 2) return "";
   const min = Math.min(...vs);
   const max = Math.max(...vs);
   const span = max - min || 1;
-  const pts = vs
+  return vs
     .map((v, i) => {
       const x = (i / (vs.length - 1)) * (w - 2) + 1;
       const y = h - 2 - ((v - min) / span) * (h - 4);
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     })
     .join(" ");
-  return `<svg class="spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">
-    <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></polyline>
-  </svg>`;
+}
+
+function ensureSpark(containerEl, color) {
+  if (containerEl._spark) return containerEl._spark;
+  const w = 120;
+  const h = 28;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "spark");
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg.setAttribute("width", String(w));
+  svg.setAttribute("height", String(h));
+  const pl = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+  pl.setAttribute("fill", "none");
+  pl.setAttribute("stroke", color);
+  pl.setAttribute("stroke-width", "2");
+  pl.setAttribute("stroke-linecap", "round");
+  pl.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(pl);
+  containerEl.innerHTML = "";
+  containerEl.appendChild(svg);
+  containerEl._spark = pl;
+  return pl;
+}
+
+function setSpark(polylineEl, values) {
+  polylineEl.setAttribute("points", computeSparkPoints(values));
 }
 
 function pushSeries(arr, v) {
@@ -101,7 +135,7 @@ function renderRealtime(st, pipe) {
   const deps = (st && st.dependencies) || {};
   const ok = Object.values(deps).every((x) => x && x.ok);
   qs("rtStatus").className = "badge " + (ok ? "badge-ok" : "badge-warn");
-  qs("rtStatus").textContent = ok ? "OK" : "DEGRADED";
+  qs("rtStatus").textContent = ok ? "正常" : "依赖异常";
 
   const js = st.nats_jetstream || {};
   const counts = (pipe && pipe.counts) || {};
@@ -115,73 +149,104 @@ function renderRealtime(st, pipe) {
   pushSeries(rt.lag, lag || 0);
   pushSeries(rt.js_pending, pending || 0);
 
-  const metrics = [
-    {
-      k: "raw / window",
-      v: fmt(counts.raw_documents),
-      s: sparkline(rt.raw, "#93c5fd"),
-      hint: "窗口内 raw_docs 总数",
-    },
-    {
-      k: "versions / window",
-      v: fmt(counts.article_versions),
-      s: sparkline(rt.ver, "#a7f3d0"),
-      hint: "窗口内 versions 总数",
-    },
-    {
-      k: "analyses / window",
-      v: fmt(counts.analyses),
-      s: sparkline(rt.ana, "#fcd34d"),
-      hint: "窗口内 analyses 总数",
-    },
-    {
-      k: "lag (s)",
-      v: lag == null ? "-" : Number(lag).toFixed(1),
-      s: sparkline(rt.lag, "#fca5a5"),
-      hint: "raw 最新时间 - analysis 最新时间",
-    },
-    {
-      k: "js pending",
-      v: fmt(pending),
-      s: sparkline(rt.js_pending, "#c4b5fd"),
-      hint: "JetStream consumer.num_pending",
-    },
+  const metricsSpec = [
+    ["raw", "原始抓取 / 窗口", () => fmt(counts.raw_documents), rt.raw, "#93c5fd", "时间窗口内 raw_documents 总数"],
+    ["ver", "版本入库 / 窗口", () => fmt(counts.article_versions), rt.ver, "#a7f3d0", "时间窗口内 article_versions 总数"],
+    ["ana", "分析产出 / 窗口", () => fmt(counts.analyses), rt.ana, "#fcd34d", "时间窗口内 analyses 总数"],
+    ["lag", "延迟（秒）", () => (lag == null ? "-" : Number(lag).toFixed(1)), rt.lag, "#fca5a5", "raw 最新 created_at - analyses 最新 created_at"],
+    ["js", "队列积压", () => fmt(pending), rt.js_pending, "#c4b5fd", "NATS JetStream consumer.num_pending"],
   ];
 
-  const rtEl = qs("rtMetrics");
-  rtEl.innerHTML = metrics
-    .map(
-      (m) => `<div class="metric">
-        <div class="metric-k">${escapeHtml(m.k)}</div>
-        <div class="metric-v">${escapeHtml(m.v)}</div>
-        <div class="metric-s">${m.s}</div>
-        <div class="metric-h">${escapeHtml(m.hint || "")}</div>
-      </div>`
-    )
-    .join("");
+  if (!rtDom.inited) {
+    const rtEl = qs("rtMetrics");
+    rtEl.innerHTML = "";
+    for (const [key, label, getVal, series, color, hint] of metricsSpec) {
+      const card = document.createElement("div");
+      card.className = "metric";
+      const k = document.createElement("div");
+      k.className = "metric-k";
+      k.textContent = label;
+      const v = document.createElement("div");
+      v.className = "metric-v";
+      v.textContent = getVal();
+      const s = document.createElement("div");
+      s.className = "metric-s";
+      const h = document.createElement("div");
+      h.className = "metric-h";
+      h.textContent = hint;
+      card.appendChild(k);
+      card.appendChild(v);
+      card.appendChild(s);
+      card.appendChild(h);
+      rtEl.appendChild(card);
+      const pl = ensureSpark(s, color);
+      setSpark(pl, series);
+      rtDom.metrics[key] = { v, pl };
+    }
 
-  const flow = qs("rtFlow");
+    const flow = qs("rtFlow");
+    flow.innerHTML = "";
+    const row = document.createElement("div");
+    row.className = "flow-row";
+    flow.appendChild(row);
+
+    function addNode(k, title) {
+      const node = document.createElement("div");
+      node.className = "node";
+      const t = document.createElement("div");
+      t.className = "node-title";
+      t.textContent = title;
+      const sub = document.createElement("div");
+      sub.className = "node-sub";
+      sub.textContent = "-";
+      node.appendChild(t);
+      node.appendChild(sub);
+      row.appendChild(node);
+      rtDom.flow[k] = { node, sub };
+    }
+
+    function addArrow() {
+      const a = document.createElement("div");
+      a.className = "arrow";
+      a.textContent = "→";
+      row.appendChild(a);
+    }
+
+    addNode("collector", "采集器");
+    addArrow();
+    addNode("nats", "NATS");
+    addArrow();
+    addNode("worker", "处理器");
+    addArrow();
+    addNode("pg", "Postgres");
+    addNode("qdrant", "Qdrant");
+    addNode("minio", "MinIO");
+
+    rtDom.inited = true;
+  }
+
+  for (const [key, _label, getVal, series] of metricsSpec) {
+    const m = rtDom.metrics[key];
+    if (!m) continue;
+    m.v.textContent = getVal();
+    setSpark(m.pl, series);
+  }
+
   const d = st.dependencies || {};
-  const node = (name, ok2, extra) => {
-    const cls = ok2 ? "node ok" : "node bad";
-    const ex = extra ? `<div class="node-sub">${escapeHtml(extra)}</div>` : "";
-    return `<div class="${cls}"><div class="node-title">${escapeHtml(name)}</div>${ex}</div>`;
-  };
   const qdrantInfo = st.qdrant || {};
   const s3Info = st.s3 || {};
-  flow.innerHTML = `
-    <div class="flow-row">
-      ${node("Collector", true, "feeds NATS")}
-      <div class="arrow">→</div>
-      ${node("NATS", !!(d.nats && d.nats.ok), `pending=${fmt(pending)}`)}
-      <div class="arrow">→</div>
-      ${node("Worker", true, "Celery tasks")}
-      <div class="arrow">→</div>
-      ${node("Postgres", !!(d.postgres && d.postgres.ok), `articles=${fmt((st.counts||{}).articles)}`)}
-      ${node("Qdrant", !!(d.qdrant && d.qdrant.ok), `collection=${escapeHtml(qdrantInfo.collection||"-")}`)}
-      ${node("MinIO", !!(d.minio && d.minio.ok), `bucket=${escapeHtml(s3Info.bucket||"-")}`)}
-    </div>
-  `;
+  const setNode = (k, ok2, subText) => {
+    const x = rtDom.flow[k];
+    if (!x) return;
+    x.node.className = "node " + (ok2 ? "ok" : "bad");
+    x.sub.textContent = subText || "-";
+  };
+  setNode("collector", true, "发布到 NATS");
+  setNode("nats", !!(d.nats && d.nats.ok), `pending=${fmt(pending)}`);
+  setNode("worker", true, "执行任务链");
+  setNode("pg", !!(d.postgres && d.postgres.ok), `articles=${fmt((st.counts || {}).articles)}`);
+  setNode("qdrant", !!(d.qdrant && d.qdrant.ok), `collection=${qdrantInfo.collection || "-"}`);
+  setNode("minio", !!(d.minio && d.minio.ok), `bucket=${s3Info.bucket || "-"}`);
 }
 
 async function refreshDeps() {
@@ -315,10 +380,17 @@ function renderLogs(text) {
   const level = qs("logLevel").value || "ALL";
   const search = String(qs("logSearch").value || "").trim().toLowerCase();
 
+  const key = `${wrap ? 1 : 0}|${level}|${search}`;
+  const tail = String(text || "");
+  if (logState.lastTail === tail && logState.lastKey === key) return;
+  logState.lastTail = tail;
+  logState.lastKey = key;
+
   const minRank = level === "ALL" ? 0 : levelRank(level);
-  const lines = String(text || "").split("\\n");
+  const lines = tail.split("\\n");
   const el = qs("logTail");
   el.className = "log-view" + (wrap ? " wrap" : "");
+  const prevScroll = el.scrollTop;
 
   const out = [];
   for (const line of lines) {
@@ -333,6 +405,7 @@ function renderLogs(text) {
   }
   el.innerHTML = out.join("");
   if (follow) el.scrollTop = el.scrollHeight;
+  else el.scrollTop = prevScroll;
 }
 
 async function refreshLog() {
