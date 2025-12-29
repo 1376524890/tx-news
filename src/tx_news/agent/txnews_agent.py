@@ -310,7 +310,7 @@ class TxNewsAgent:
             },
         ]
 
-    def run(self, *, messages: list[dict[str, str]], max_steps: int = 6, recent_minutes: int = 180) -> dict[str, Any]:
+    def run(self, *, messages: list[dict[str, str]], max_steps: int = 16, recent_minutes: int = 180) -> dict[str, Any]:
         if not messages:
             raise AgentChatError("messages is empty")
 
