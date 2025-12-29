@@ -9,7 +9,7 @@
 架构（≤3行）：
 - 纯静态页面（无构建/无 Node），由 `apps/api/main.py` 挂载。
 - 对话页调用 `/chat/stream`（SSE 流式输出）、信号面板调用 `/signals`，管理台调用 `/admin/*`。
-- UI 只展示结构化结果与链接，不显示新闻正文全文。
+- UI 只展示结构化结果与链接，不显示新闻正文全文；调试可查看浏览器 Console 的 `[txnews] chatStream ...` 日志。
 
 ## 文件
 

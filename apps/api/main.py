@@ -7,6 +7,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import logging
+import time
+import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +25,7 @@ import nats
 
 from tx_news.agent.txnews_agent import AgentChatError, TxNewsAgent
 from tx_news.embedding.embedder import DEFAULT_EMBEDDING_MODEL, build_embedder
+from tx_news.logging import configure_logging
 from tx_news.settings import get_settings
 from tx_news.storage.postgres import (
     get_a_share,
@@ -35,6 +39,9 @@ from tx_news.storage.postgres import (
 )
 from tx_news.storage.qdrant import QdrantStore, scored_point_canonical_id
 
+
+configure_logging()
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="tx-news API", version="0.1.0")
 
@@ -593,10 +600,23 @@ def chat_agent_stream(req: ChatRequest) -> StreamingResponse:
     model = llm.get("model") or "qwen3-max"
     base_url = llm.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
     timeout_seconds = int(llm.get("timeout_seconds") or 60)
+    trace_id = secrets.token_hex(4)
 
     def gen():
+        started = time.time()
+        user_chars = sum(len(m.content or "") for m in req.messages if m.role == "user")
+        logger.info(
+            "chat_stream start trace=%s model=%s base_url=%s timeout=%ss user_chars=%s msgs=%s",
+            trace_id,
+            model,
+            base_url,
+            timeout_seconds,
+            user_chars,
+            len(req.messages),
+        )
         yield _sse("ready", {"ok": True})
         if not api_key:
+            logger.warning("chat_stream no api key trace=%s", trace_id)
             yield _sse(
                 "done",
                 {
@@ -616,6 +636,8 @@ def chat_agent_stream(req: ChatRequest) -> StreamingResponse:
                 base_url=str(base_url),
                 timeout_seconds=timeout_seconds,
             )
+            first_delta_at: float | None = None
+            delta_chars = 0
             for ev in agent.run_stream(
                 messages=[m.model_dump() for m in req.messages],
                 max_steps=req.max_steps,
@@ -623,22 +645,57 @@ def chat_agent_stream(req: ChatRequest) -> StreamingResponse:
             ):
                 t = ev.get("type")
                 if t == "delta":
-                    yield _sse("delta", {"content": ev.get("content") or ""})
+                    chunk = ev.get("content") or ""
+                    if chunk:
+                        delta_chars += len(chunk)
+                        if first_delta_at is None:
+                            first_delta_at = time.time()
+                            logger.info(
+                                "chat_stream first_delta trace=%s ttfb=%.2fs",
+                                trace_id,
+                                first_delta_at - started,
+                            )
+                        # Avoid log spam: only log progress on DEBUG level.
+                        if logger.isEnabledFor(logging.DEBUG) and delta_chars % 400 < len(chunk):
+                            logger.debug("chat_stream progress trace=%s chars=%s", trace_id, delta_chars)
+                    yield _sse("delta", {"content": chunk})
                 elif t == "tool_call":
+                    logger.info(
+                        "chat_stream tool_call trace=%s name=%s arguments=%s",
+                        trace_id,
+                        ev.get("name"),
+                        ev.get("arguments"),
+                    )
                     yield _sse("tool", {"name": ev.get("name"), "arguments": ev.get("arguments")})
                 elif t == "done":
+                    done_at = time.time()
+                    msg = ev.get("message") or {}
+                    meta = msg.get("meta") if isinstance(msg, dict) else None
+                    tools_n = len((meta or {}).get("tools") or []) if isinstance(meta, dict) else 0
+                    ev_n = len((meta or {}).get("evidence") or []) if isinstance(meta, dict) else 0
+                    logger.info(
+                        "chat_stream done trace=%s elapsed=%.2fs delta_chars=%s tools=%s evidence=%s",
+                        trace_id,
+                        done_at - started,
+                        delta_chars,
+                        tools_n,
+                        ev_n,
+                    )
                     yield _sse("done", ev.get("message") or {})
                     return
+            logger.warning("chat_stream ended without done trace=%s", trace_id)
             yield _sse(
                 "done",
                 {"role": "assistant", "content": "对话失败：无返回", "meta": {"tools": [], "evidence": []}},
             )
         except AgentChatError as e:
+            logger.warning("chat_stream agent error trace=%s err=%s", trace_id, e)
             yield _sse(
                 "done",
                 {"role": "assistant", "content": f"对话失败：{e}", "meta": {"tools": [], "evidence": []}},
             )
         except Exception as e:
+            logger.exception("chat_stream exception trace=%s", trace_id)
             yield _sse(
                 "done",
                 {

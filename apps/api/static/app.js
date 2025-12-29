@@ -235,6 +235,11 @@ function parseSseBlock(block) {
 }
 
 async function chatStream(payload, handlers) {
+  const traceId = Math.random().toString(16).slice(2, 10);
+  const t0 = performance.now();
+  console.debug(`[txnews] chatStream start trace=${traceId}`, {
+    msgs: (payload && payload.messages && payload.messages.length) || 0,
+  });
   const res = await fetch("/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -242,6 +247,7 @@ async function chatStream(payload, handlers) {
   });
   if (!res.ok) {
     const text = await res.text();
+    console.warn(`[txnews] chatStream http_error trace=${traceId}`, res.status, text);
     throw new Error(text || `HTTP ${res.status}`);
   }
   if (!res.body) throw new Error("stream not supported");
@@ -249,6 +255,8 @@ async function chatStream(payload, handlers) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buf = "";
+  let deltaChars = 0;
+  let firstDeltaMs = null;
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -266,11 +274,28 @@ async function chatStream(payload, handlers) {
       } catch {
         obj = { raw: data };
       }
+      if (event === "delta" && obj && obj.content) {
+        deltaChars += String(obj.content).length;
+        if (firstDeltaMs === null) firstDeltaMs = performance.now() - t0;
+      }
+      if (event === "tool") console.debug(`[txnews] chatStream tool trace=${traceId}`, obj);
+      if (event === "done") {
+        console.debug(`[txnews] chatStream done trace=${traceId}`, {
+          elapsed_ms: Math.round(performance.now() - t0),
+          first_delta_ms: firstDeltaMs ? Math.round(firstDeltaMs) : null,
+          delta_chars: deltaChars,
+        });
+      }
       if (handlers && handlers[event]) {
         await handlers[event](obj);
       }
     }
   }
+  console.debug(`[txnews] chatStream end trace=${traceId}`, {
+    elapsed_ms: Math.round(performance.now() - t0),
+    first_delta_ms: firstDeltaMs ? Math.round(firstDeltaMs) : null,
+    delta_chars: deltaChars,
+  });
 }
 
 async function sendMessage(text) {
@@ -288,16 +313,22 @@ async function sendMessage(text) {
     let acc = "";
     let finalMsg = null;
 
+    const warnTimer = setTimeout(() => {
+      console.warn("[txnews] chatStream still waiting for first token (>15s)");
+    }, 15000);
+
     await chatStream(payload, {
       ready: async () => {},
       delta: async (d) => {
         const chunk = (d && d.content) || "";
         if (!chunk) return;
+        clearTimeout(warnTimer);
         acc += chunk;
         ui.setContent(acc);
       },
       tool: async () => {},
       done: async (m) => {
+        clearTimeout(warnTimer);
         finalMsg = m;
       },
     });
