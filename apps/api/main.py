@@ -360,6 +360,8 @@ def admin_status() -> dict[str, Any]:
         "dependencies": deps,
         "counts": counts,
         "latest": latest_out,
+        "s3": {"endpoint": settings.s3_endpoint, "bucket": settings.s3_bucket},
+        "qdrant": {"url": settings.qdrant_url, "collection": settings.qdrant_collection},
         "nats_jetstream": js_stats,
     }
 

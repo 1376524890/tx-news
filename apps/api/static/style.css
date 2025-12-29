@@ -1,5 +1,5 @@
 /* Input: 浏览器渲染引擎（CSS 变量与布局规则） */
-/* Output: 对话页/管理台的统一视觉样式 */
+/* Output: 对话页/管理台的统一视觉样式（含 Markdown / Dashboard） */
 /* Pos: 前端样式表（变更时同步更新以上注释与所属目录 FOLDER.md） */
 
 :root {
@@ -13,6 +13,7 @@
   --danger: #ef4444;
   --ok: #22c55e;
   --warn: #f59e0b;
+  --purple: #a78bfa;
 }
 
 * {
@@ -181,6 +182,76 @@ body {
   line-height: 1.5;
   font-size: 14px;
 }
+
+.bubble .content.md {
+  white-space: normal;
+}
+.bubble .content.md p {
+  margin: 0 0 10px 0;
+}
+.bubble .content.md p:last-child {
+  margin-bottom: 0;
+}
+.bubble .content.md h1,
+.bubble .content.md h2,
+.bubble .content.md h3 {
+  margin: 10px 0 8px 0;
+  line-height: 1.2;
+}
+.bubble .content.md h1 {
+  font-size: 18px;
+}
+.bubble .content.md h2 {
+  font-size: 16px;
+}
+.bubble .content.md h3 {
+  font-size: 15px;
+}
+.bubble .content.md ul {
+  margin: 6px 0 10px 20px;
+  padding: 0;
+}
+.bubble .content.md li {
+  margin: 4px 0;
+}
+.bubble .content.md blockquote {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-left: 3px solid rgba(147, 197, 253, 0.55);
+  background: rgba(147, 197, 253, 0.06);
+  border-radius: 10px;
+  color: rgba(230, 237, 243, 0.92);
+}
+.bubble .content.md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+.bubble .content.md pre.code {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(8, 10, 14, 0.7);
+  overflow: auto;
+}
+.bubble .content.md pre.code code {
+  display: block;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  white-space: pre;
+}
+.bubble .content.md a {
+  color: #93c5fd;
+  text-decoration: none;
+}
+.bubble .content.md a:hover {
+  text-decoration: underline;
+}
 .meta {
   margin-top: 10px;
   border-top: 1px dashed rgba(255, 255, 255, 0.12);
@@ -284,4 +355,172 @@ body {
 }
 .card a:hover {
   text-decoration: underline;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+.badge-ok {
+  color: rgba(134, 239, 172, 0.95);
+  border-color: rgba(34, 197, 94, 0.3);
+  background: rgba(34, 197, 94, 0.08);
+}
+.badge-warn {
+  color: rgba(253, 230, 138, 0.95);
+  border-color: rgba(245, 158, 11, 0.3);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.grid-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+@media (max-width: 1100px) {
+  .grid-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.metric {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+  background: rgba(15, 20, 28, 0.55);
+  min-height: 86px;
+}
+.metric-k {
+  color: var(--muted);
+  font-size: 12px;
+}
+.metric-v {
+  margin-top: 4px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+.metric-s {
+  margin-top: 6px;
+}
+.metric-h {
+  margin-top: 6px;
+  color: rgba(154, 167, 181, 0.9);
+  font-size: 11px;
+}
+.spark {
+  opacity: 0.9;
+}
+
+.flow {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+  background: rgba(15, 20, 28, 0.45);
+}
+.flow-row {
+  display: grid;
+  grid-template-columns: 1fr 34px 1fr 34px 1fr 34px 1fr 1fr 1fr;
+  gap: 10px;
+  align-items: center;
+}
+@media (max-width: 1100px) {
+  .flow-row {
+    grid-template-columns: 1fr;
+  }
+  .flow-row .arrow {
+    display: none;
+  }
+}
+.node {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 10px;
+  background: rgba(8, 10, 14, 0.55);
+}
+.node.ok {
+  border-color: rgba(34, 197, 94, 0.22);
+  background: rgba(34, 197, 94, 0.06);
+}
+.node.bad {
+  border-color: rgba(239, 68, 68, 0.22);
+  background: rgba(239, 68, 68, 0.06);
+}
+.node-title {
+  font-weight: 700;
+  font-size: 13px;
+}
+.node-sub {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.arrow {
+  color: rgba(154, 167, 181, 0.7);
+  text-align: center;
+  font-size: 20px;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  user-select: none;
+}
+.toggle input {
+  accent-color: var(--accent);
+}
+
+.log-view {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px;
+  background: rgba(8, 10, 14, 0.55);
+  max-height: 420px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre;
+}
+.log-view.wrap {
+  white-space: pre-wrap;
+}
+.log-line {
+  display: flex;
+  gap: 10px;
+  padding: 2px 4px;
+  border-radius: 8px;
+}
+.log-line:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.log-line .lv {
+  min-width: 64px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+.lvl-DEBUG .lv {
+  color: rgba(167, 243, 208, 0.9);
+}
+.lvl-INFO .lv {
+  color: rgba(147, 197, 253, 0.9);
+}
+.lvl-WARNING .lv {
+  color: rgba(253, 230, 138, 0.95);
+}
+.lvl-ERROR .lv,
+.lvl-CRITICAL .lv {
+  color: rgba(252, 165, 165, 0.95);
 }

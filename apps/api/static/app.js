@@ -1,5 +1,5 @@
-// Input: 浏览器 UI 事件 + /chat/stream、/signals、/admin/status 等 API
-// Output: 对话页渲染、请求封装与本地会话存储
+// Input: 浏览器 UI 事件 + /chat/stream、/signals、/admin/status 等 API + Markdown 文本
+// Output: 对话页渲染（含 Markdown）、请求封装与本地会话存储
 // Pos: 对话页前端逻辑（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 const STORAGE_KEY = "txnews_chat_v1";
@@ -19,6 +19,146 @@ function escapeHtml(text) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function safeHref(href) {
+  const raw = String(href || "").trim();
+  if (!raw) return "#";
+  if (raw.startsWith("http://") || raw.startsWith("https://")) return raw;
+  return "#";
+}
+
+function renderEmphasisEscaped(html) {
+  // Minimal, safe subset: **bold**
+  return String(html || "").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+}
+
+function renderInlineMarkdown(raw) {
+  // Split by inline code spans to avoid interpreting markdown inside code.
+  const parts = String(raw || "").split(/(`[^`]+`)/g);
+  const out = [];
+  for (const part of parts) {
+    if (part.startsWith("`") && part.endsWith("`")) {
+      out.push(`<code>${escapeHtml(part.slice(1, -1))}</code>`);
+      continue;
+    }
+
+    // Links: [text](url)
+    const seg = String(part || "");
+    const re = /\[([^\]]+)\]\(([^)]+)\)/g;
+    let idx = 0;
+    let m;
+    while ((m = re.exec(seg))) {
+      const before = seg.slice(idx, m.index);
+      out.push(renderEmphasisEscaped(escapeHtml(before)));
+      const text = renderEmphasisEscaped(escapeHtml(m[1]));
+      const href = safeHref(m[2]);
+      out.push(`<a href="${escapeHtml(href)}" target="_blank" rel="noreferrer">${text}</a>`);
+      idx = re.lastIndex;
+    }
+    out.push(renderEmphasisEscaped(escapeHtml(seg.slice(idx))));
+  }
+  return out.join("");
+}
+
+function renderMarkdown(md) {
+  const lines = String(md || "").replaceAll("\r\n", "\n").split("\n");
+  const out = [];
+
+  let inCode = false;
+  let codeLang = "";
+  let codeLines = [];
+  let para = [];
+  let list = [];
+
+  function flushPara() {
+    if (!para.length) return;
+    const text = para.join("\n").trimEnd();
+    if (!text) {
+      para = [];
+      return;
+    }
+    const html = renderInlineMarkdown(text).replaceAll("\n", "<br />");
+    out.push(`<p>${html}</p>`);
+    para = [];
+  }
+
+  function flushList() {
+    if (!list.length) return;
+    const items = list.map((x) => `<li>${renderInlineMarkdown(x)}</li>`).join("");
+    out.push(`<ul>${items}</ul>`);
+    list = [];
+  }
+
+  function flushCode() {
+    const code = escapeHtml(codeLines.join("\n"));
+    const lang = escapeHtml(codeLang || "");
+    out.push(
+      `<pre class="code"><code data-lang="${lang}">${code}</code></pre>`
+    );
+    codeLines = [];
+    codeLang = "";
+  }
+
+  for (const lineRaw of lines) {
+    const line = String(lineRaw || "");
+    const fence = line.match(/^```(\w+)?\s*$/);
+    if (fence) {
+      if (inCode) {
+        flushCode();
+        inCode = false;
+      } else {
+        flushPara();
+        flushList();
+        inCode = true;
+        codeLang = fence[1] || "";
+      }
+      continue;
+    }
+
+    if (inCode) {
+      codeLines.push(line);
+      continue;
+    }
+
+    const h = line.match(/^(#{1,3})\s+(.*)$/);
+    if (h) {
+      flushPara();
+      flushList();
+      const lvl = h[1].length;
+      out.push(`<h${lvl}>${renderInlineMarkdown(h[2])}</h${lvl}>`);
+      continue;
+    }
+
+    const li = line.match(/^\s*[-*]\s+(.*)$/);
+    if (li) {
+      flushPara();
+      list.push(li[1]);
+      continue;
+    }
+
+    const quote = line.match(/^\s*>\s?(.*)$/);
+    if (quote) {
+      flushPara();
+      flushList();
+      const html = renderInlineMarkdown(quote[1]);
+      out.push(`<blockquote>${html}</blockquote>`);
+      continue;
+    }
+
+    if (!line.trim()) {
+      flushPara();
+      flushList();
+      continue;
+    }
+
+    para.push(line);
+  }
+
+  if (inCode) flushCode();
+  flushPara();
+  flushList();
+  return out.join("\n");
 }
 
 function loadMessages() {
@@ -50,8 +190,12 @@ function appendMessage(role, content, meta) {
   bubble.className = "bubble " + (role === "user" ? "user" : "assistant");
 
   const contentEl = document.createElement("div");
-  contentEl.className = "content";
-  contentEl.textContent = content || "";
+  contentEl.className = "content" + (role === "assistant" ? " md" : "");
+  if (role === "assistant") {
+    contentEl.innerHTML = renderMarkdown(content || "");
+  } else {
+    contentEl.textContent = content || "";
+  }
 
   bubble.appendChild(contentEl);
 
@@ -106,7 +250,7 @@ function appendStreamingAssistant() {
   bubble.className = "bubble assistant";
 
   const contentEl = document.createElement("div");
-  contentEl.className = "content";
+  contentEl.className = "content md";
   contentEl.textContent = "";
   bubble.appendChild(contentEl);
 
@@ -116,8 +260,10 @@ function appendStreamingAssistant() {
   chat.scrollTop = chat.scrollHeight;
 
   return {
-    setContent: (text) => {
-      contentEl.textContent = text || "";
+    setContent: (text, mode) => {
+      const t = text || "";
+      if (mode === "md") contentEl.innerHTML = renderMarkdown(t);
+      else contentEl.textContent = t;
       chat.scrollTop = chat.scrollHeight;
     },
     setMeta: (meta) => {
@@ -324,7 +470,8 @@ async function sendMessage(text) {
         if (!chunk) return;
         clearTimeout(warnTimer);
         acc += chunk;
-        ui.setContent(acc);
+        // During streaming, keep it plain text to avoid heavy markdown re-render on each token.
+        ui.setContent(acc, "text");
       },
       tool: async () => {},
       done: async (m) => {
@@ -339,7 +486,7 @@ async function sendMessage(text) {
       ts: nowIso(),
       meta: (finalMsg && finalMsg.meta) || null,
     };
-    ui.setContent(assistant.content);
+    ui.setContent(assistant.content, "md");
     ui.setMeta(assistant.meta);
     saveMessages([...next, assistant]);
   } finally {
