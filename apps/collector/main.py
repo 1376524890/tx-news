@@ -1,3 +1,7 @@
+# Input: config/sources.txt + infra 连接信息（NATS/Postgres/MinIO）
+# Output: 抓取 raw 内容并发布 NATS raw 消息，触发后续 pipeline
+# Pos: Collector 进程入口（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import time
@@ -45,4 +49,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

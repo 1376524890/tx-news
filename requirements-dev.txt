@@ -1,3 +1,6 @@
+# Input: pip 安装器
+# Output: 开发/测试工具依赖列表
+# Pos: 开发依赖清单（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 pytest>=8.2.2
 ruff>=0.6.2
-

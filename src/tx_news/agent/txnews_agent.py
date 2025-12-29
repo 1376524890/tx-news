@@ -1,3 +1,7 @@
+# Input: DashScope LLM 返回的消息 + TxNewsTools 工具查询结果
+# Output: 对话回答文本 + 工具调用轨迹 + 证据链接列表
+# Pos: 工具增强对话 Agent（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import json

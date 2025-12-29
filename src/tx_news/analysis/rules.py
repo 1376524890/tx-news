@@ -1,3 +1,7 @@
+# Input: 新闻标题/正文与事件窗口配置
+# Output: event_type、stable_event_id、窗口起点等规则计算结果
+# Pos: 规则分析组件（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import hashlib
@@ -58,4 +62,3 @@ class EventWindowPlanner:
         epoch_min = int(dt.timestamp() // 60)
         start_min = (epoch_min // minutes) * minutes
         return datetime.fromtimestamp(start_min * 60, tz=dt.tzinfo or timezone.utc)
-

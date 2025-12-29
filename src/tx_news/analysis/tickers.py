@@ -1,3 +1,7 @@
+# Input: A 股 name_map（name→ts_code）与待匹配文本
+# Output: ticker 实体列表（type/name/ts_code）
+# Pos: 朴素 ticker 匹配器（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,4 +22,3 @@ class TickerMatcher:
                 if len(hits) >= max_hits:
                     break
         return hits
-

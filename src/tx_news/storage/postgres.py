@@ -1,3 +1,7 @@
+# Input: Postgres DSN/Engine 与 ORM 模型
+# Output: 建表与 CRUD/查询函数（articles/versions/analysis/signals/a_share 等）
+# Pos: Postgres 数据访问层（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 from contextlib import contextmanager

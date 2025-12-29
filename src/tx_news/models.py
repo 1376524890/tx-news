@@ -1,3 +1,7 @@
+# Input: 外部 payload/业务字段（dict/datetime 等）与 Pydantic
+# Output: RawDocument/NormalizedArticle/CanonicalArticle/AnalysisResult 等数据模型
+# Pos: DTO/协议模型层（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -56,4 +60,3 @@ class AnalysisResult(BaseModel):
     evidence: list[dict[str, Any]] = Field(default_factory=list)
     llm_used: bool = False
     created_at: datetime
-

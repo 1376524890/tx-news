@@ -1,3 +1,7 @@
+# Input: SQLAlchemy 声明式模型依赖与字段定义
+# Output: Base/Source/RawDoc/Article/Analysis/Signal/AShareBasic 等 ORM 模型
+# Pos: Postgres 数据模型定义（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 from datetime import datetime

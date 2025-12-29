@@ -1,3 +1,7 @@
+# Input: 本地运行参数（crawler/retention/embedding/llm/tushare 等）
+# Output: 供 tx_news.settings.FileSettings 加载的 YAML 配置
+# Pos: 主配置文件（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 # v0 固定配置（单机起步）
 
 crawler:

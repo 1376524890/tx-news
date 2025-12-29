@@ -1,3 +1,7 @@
+/* Input: 浏览器渲染引擎（CSS 变量与布局规则） */
+/* Output: 对话页/管理台的统一视觉样式 */
+/* Pos: 前端样式表（变更时同步更新以上注释与所属目录 FOLDER.md） */
+
 :root {
   --bg: #0b0f14;
   --panel: #121822;
@@ -281,4 +285,3 @@ body {
 .card a:hover {
   text-decoration: underline;
 }
-

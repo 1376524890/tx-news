@@ -1,3 +1,7 @@
+# Input: canonical 文章内容 + Qdrant 相似检索 + DashScope API（可选）
+# Output: 深分析后的结构化结果写回 analyses，并发出 signal
+# Pos: Deep Path 任务（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import logging

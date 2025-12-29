@@ -1,3 +1,7 @@
+# Input: URL 与抓取超时/重试配置
+# Output: FetchResult（status/headers/body/checksum）与 root 链接列表
+# Pos: HTTP 抓取与链接提取组件（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import hashlib
@@ -88,4 +92,3 @@ def extract_links(root_url: str, html: bytes, *, max_links: int = 100) -> list[s
         if len(links) >= max_links:
             break
     return links
-

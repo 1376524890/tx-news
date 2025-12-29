@@ -1,3 +1,7 @@
+# Input: 来源 root_urls、Fetcher、S3Client、Postgres DSN、NATS URL
+# Output: raw 内容写入 MinIO、元数据写入 Postgres、并发布 NATS raw 消息
+# Pos: 采集编排器（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import asyncio

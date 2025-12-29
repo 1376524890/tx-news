@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Input: 本地 Python/Docker 环境 + config/.env 配置
+# Output: 启动 v0 单机栈（infra + worker/collector/api），并写入 var/log 与 .run
+# Pos: 运维启动脚本（变更时同步更新以上注释与所属目录 FOLDER.md）
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

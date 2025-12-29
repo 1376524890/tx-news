@@ -1,3 +1,7 @@
+<!-- Input: 微调/推理服务的外部工具与本地模型/数据路径 -->
+<!-- Output: finetune/ 目录的使用说明与执行入口 -->
+<!-- Pos: finetune 文档（变更时同步更新以上注释与所属目录 FOLDER.md） -->
+
 # Finetune starter (LLaMA-Factory)
 
 This repo does **not** run finetuning automatically, but provides a ready-to-fill template so you can start SFT quickly.
@@ -18,4 +22,3 @@ This repo does **not** run finetuning automatically, but provides a ready-to-fil
 
 ## Serving
 `finetune/serve_vllm.sh` is a helper to start `vLLM` OpenAI-compatible server after you have a trained model/adapter.
-

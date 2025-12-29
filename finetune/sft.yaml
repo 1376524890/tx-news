@@ -1,3 +1,7 @@
+# Input: 使用者填写的模型/数据/输出路径与训练参数
+# Output: LLaMA-Factory 可读取的 SFT 配置
+# Pos: SFT 配置模板（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 # LLaMA-Factory SFT template (fill paths and params)
 # Notes:
 # - This file is intentionally conservative; adjust per your GPU/CPU and LLaMA-Factory version.
@@ -35,4 +39,3 @@ lora_alpha: 16
 lora_dropout: 0.05
 
 report_to: none
-

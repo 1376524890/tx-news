@@ -1,3 +1,7 @@
+# Input: tushare.token/网络/缓存 + retention.raw_days + MinIO/Postgres 连接
+# Output: A 股主数据入库、raw TTL 清理结果
+# Pos: 维护任务集合（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import logging

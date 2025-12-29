@@ -1,0 +1,20 @@
+<!-- Input: stdin JSON-RPC 请求 + 本地数据库/向量库 -->
+<!-- Output: stdout JSON-RPC 响应（tools/list, tools/call 等） -->
+<!-- Pos: MCP 工具服务目录索引（变更时同步更新以上注释与本文件内容） -->
+
+# `apps/mcp/` 目录
+
+> 一旦我所属的文件夹有所变化，请更新我。
+
+架构（≤3行）：
+- 通过 stdio 提供最小 MCP/JSON-RPC 工具服务（无需 HTTP）。
+- 工具底层复用 Qdrant（向量检索）与 Postgres（元数据/分析结果）。
+- 用于把“检索/分析/时间线/主数据查询”暴露给外部 Agent。
+
+## 文件
+
+| 文件 | 地位 | 功能 |
+| --- | --- | --- |
+| `__init__.py` | 包标识 | 标记 `apps.mcp` 为包。 |
+| `server.py` | 服务入口 | 解析 JSON-RPC，分发工具调用并输出结果。 |
+| `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |

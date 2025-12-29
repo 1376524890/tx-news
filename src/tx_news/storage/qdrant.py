@@ -1,3 +1,7 @@
+# Input: Qdrant url、collection 与向量/payload
+# Output: collection 初始化、向量 upsert 与 search 结果
+# Pos: Qdrant 访问封装（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -69,4 +73,3 @@ class QdrantStore:
             limit=limit,
             with_payload=True,
         )
-

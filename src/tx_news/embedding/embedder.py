@@ -1,3 +1,7 @@
+# Input: embedding 模型名/路径 + 文本
+# Output: 归一化向量 list[float]
+# Pos: embedding 计算封装（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import logging

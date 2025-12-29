@@ -1,3 +1,7 @@
+# Input: Settings(redis_url) 与任务模块列表
+# Output: celery_app（含路由/队列/注册策略）
+# Pos: Celery 应用配置入口（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 from celery import Celery

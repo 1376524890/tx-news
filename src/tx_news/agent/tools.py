@@ -1,3 +1,7 @@
+# Input: Postgres/Qdrant/embedding 模型与查询参数
+# Output: search/list/timeline/profile 等工具方法返回结构化结果
+# Pos: Agent 工具实现层（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 from dataclasses import dataclass

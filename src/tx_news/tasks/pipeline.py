@@ -1,3 +1,7 @@
+# Input: NATS raw payload + Postgres/MinIO/Qdrant/embedding/LLM（可选）
+# Output: canonical 入库、向量 upsert、analysis upsert、signals 写入
+# Pos: 主流水线任务定义（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import hashlib

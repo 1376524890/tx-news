@@ -1,3 +1,7 @@
+# Input: HTTP 请求 + Postgres/Qdrant/Redis/NATS 等依赖
+# Output: FastAPI 路由与静态 UI（/、/admin、/search、/chat 等）
+# Pos: API 进程入口（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import asyncio

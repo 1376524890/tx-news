@@ -1,3 +1,7 @@
+# Input: MinIO/S3 endpoint/credentials + bytes
+# Output: 对象存储 key 与 bytes 读写能力
+# Pos: S3 客户端封装（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import hashlib
@@ -49,4 +53,3 @@ class S3Client:
 
     def delete_key(self, key: str) -> None:
         self._client().delete_object(Bucket=self.bucket, Key=key)
-

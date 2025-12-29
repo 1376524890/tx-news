@@ -1,3 +1,7 @@
+# Input: Tushare token/网络 + 本地缓存文件
+# Output: A 股主数据 rows 列表（并写入 var/cache/a_share/stock_basic.json）
+# Pos: Tushare/AkShare 集成与缓存（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import json

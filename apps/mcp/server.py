@@ -1,3 +1,7 @@
+# Input: stdin JSON-RPC 请求 + 本地 Postgres/Qdrant 数据
+# Output: stdout JSON-RPC 响应（tools/list, tools/call）
+# Pos: MCP 工具服务入口（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import json

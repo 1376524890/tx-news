@@ -1,3 +1,7 @@
+// Input: 浏览器 UI 事件 + /admin/* API
+// Output: 管理台渲染（依赖健康/进程/流水线/日志/主数据缓存）
+// Pos: 管理台前端逻辑（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 function qs(id) {
   return document.getElementById(id);
 }

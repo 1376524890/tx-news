@@ -1,3 +1,7 @@
+# Input: DashScope API key、模型名、messages/tools 等请求参数
+# Output: LLM chat 结果（json 或 message dict）
+# Pos: 在线 LLM 客户端封装（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import json

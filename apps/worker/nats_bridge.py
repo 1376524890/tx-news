@@ -1,3 +1,7 @@
+# Input: NATS JetStream raw 消息流 + Redis(Celery broker)
+# Output: 调用 tx_news.tasks.pipeline.ingest_raw 入队 Celery
+# Pos: NATS→Celery 桥接进程入口（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import asyncio
@@ -49,4 +53,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

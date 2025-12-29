@@ -1,3 +1,7 @@
+# Input: 环境变量（TXNEWS_*）+ config/config.yaml + config/sources.txt
+# Output: Settings/FileSettings（包含 infra/模型/源列表等配置）
+# Pos: 全局配置加载入口（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -58,4 +62,3 @@ class Settings(BaseSettings):
 
 def get_settings() -> Settings:
     return Settings()
-

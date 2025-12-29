@@ -1,3 +1,7 @@
+# Input: 文本内容与 canonical_id，及本地索引文件路径
+# Output: 近重复候选 canonical_id 与持久化 LSH 索引
+# Pos: MinHash LSH 去重实现（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import os

@@ -1,3 +1,7 @@
+// Input: 浏览器 UI 事件 + /chat、/signals、/admin/status 等 API
+// Output: 对话页渲染、请求封装与本地会话存储
+// Pos: 对话页前端逻辑（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 const STORAGE_KEY = "txnews_chat_v1";
 
 function qs(id) {
@@ -221,4 +225,3 @@ function bootstrap() {
 }
 
 bootstrap();
-

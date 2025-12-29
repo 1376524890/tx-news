@@ -1,3 +1,7 @@
+# Input: 新闻来源入口 URL（每行一个，支持 # 注释）
+# Output: Collector 的抓取根 URL 列表
+# Pos: 数据源清单（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 https://finance.sina.com.cn/
 https://finance.eastmoney.com/
 https://www.10jqka.com.cn/

@@ -1,3 +1,7 @@
+# Input: 本地 Docker 环境与镜像拉取权限
+# Output: Postgres/Redis/NATS/MinIO/Qdrant 的本地编排
+# Pos: 本地基础设施定义（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 services:
   postgres:
     image: postgres:16
@@ -49,4 +53,3 @@ volumes:
   redis_data:
   minio_data:
   qdrant_data:
-

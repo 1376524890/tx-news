@@ -1,3 +1,7 @@
+# Input: pip 安装器
+# Output: 运行时 Python 依赖列表
+# Pos: 运行依赖清单（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 

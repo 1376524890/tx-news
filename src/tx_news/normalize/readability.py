@@ -1,3 +1,7 @@
+# Input: HTML bytes（网页正文）
+# Output: title/text/checksum 的抽取结果
+# Pos: Readability 正文抽取器（变更时同步更新以上注释与所属目录 FOLDER.md）
+
 from __future__ import annotations
 
 import hashlib

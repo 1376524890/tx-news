@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Input: .run/*.pid（由 scripts/start.sh 生成）
+# Output: 停止本地后台进程（不自动停止 Docker services）
+# Pos: 运维停止脚本（变更时同步更新以上注释与所属目录 FOLDER.md）
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
