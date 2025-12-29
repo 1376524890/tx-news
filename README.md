@@ -2,9 +2,9 @@
 <!-- Output: 面向使用者与开发者的使用说明（快速开始/API/UI/架构/方案/取舍/路线图） -->
 <!-- Pos: 根目录主文档（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
-# tx-news（v0）
+# TX-news 高时效经济新闻拉取与分析系统（v0）
 
-天心：高时效经济新闻拉取与分析系统。目标是在单机可自托管的前提下，完成 **采集 → 清洗 → 去重 → 入库 → 向量检索 → 结构化分析 → 信号/对话** 的闭环（UI/API/MCP）。
+*目标是在单机可自托管的前提下，完成 **采集 → 清洗 → 去重 → 入库 → 向量检索 → 结构化分析 → 信号/对话** 的闭环（UI/API/MCP）。*
 
 核心约束：
 - 尽量自建/自托管：Postgres/Redis/NATS/MinIO/Qdrant 本地可跑。
@@ -189,7 +189,7 @@ curl -s "http://localhost:8000/search?q=央行%20降准&limit=10" | jq .
   - `event_type`：分析产出的事件类型
   - `tickers`：分析产出的相关标的（结构化 JSON）
 
-- `GET /articles/{canonical_id}`：文章元信息 + 分析结果（不返回原文）
+- `GET /articles/{canonical_id}`：文章元信息 + 分析结果
 ```bash
 curl -s "http://localhost:8000/articles/<canonical_id>" | jq .
 ```
@@ -242,7 +242,7 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 ## 3. 用户界面（UI）说明
 
 ### 3.1 对话页（`/`）
-- 基于本地数据库与向量库检索当天新闻证据，再给出结构化总结（不展示全文）
+- 基于本地数据库与向量库检索当天新闻证据，再给出结构化总结
 - 对话走 `/chat/stream` SSE 流式输出，体验上“边生成边显示”
 - 助手回复支持 Markdown 渲染（安全子集：标题/列表/引用/代码块/链接/表格/加粗）
 
