@@ -9,13 +9,13 @@
 架构（≤3行）：
 - 单机 v0 数据流：`apps/collector` → NATS → `apps/worker`(Celery) → Postgres/Qdrant/MinIO。
 - 运行入口在 `apps/`，可复用库在 `src/tx_news/`，配置在 `config/`。
-- 运维脚本在 `scripts/`，日志与运行态文件在 `var/`、`.run/`（均为本地目录/忽略提交）。
+- 运维脚本在 `scripts/`；日志与缓存在 `var/`（gitignored）；进程 pid 在 `.run/`（用于管理台进程状态，尽量不要把运行态变更纳入提交）。
 
 ## 文件
 
 | 文件 | 地位 | 功能 |
 | --- | --- | --- |
-| `README.md` | 主文档 | 系统目标/架构/设计说明。 |
+| `README.md` | 主文档 | 快速开始、API/UI 使用、架构与技术细节、取舍与路线图。 |
 | `AGENTS.md` | 贡献指南 | 本仓库的开发与协作约定。 |
 | `REQUIREMENTS.md` | 运维文档 | 环境/依赖/网络与密钥要求。 |
 | `docker-compose.yml` | 基础设施编排 | 本地启动 Postgres/Redis/NATS/MinIO/Qdrant。 |

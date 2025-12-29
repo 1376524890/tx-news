@@ -1,511 +1,531 @@
-<!-- Input: 项目背景/目标/架构设计信息 -->
-<!-- Output: 面向使用者与开发者的设计与使用说明 -->
+<!-- Input: 项目背景/目标/架构设计信息 + v0 已实现的功能与部署方式 -->
+<!-- Output: 面向使用者与开发者的使用说明（快速开始/API/UI/架构/方案/取舍/路线图） -->
 <!-- Pos: 根目录主文档（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
-# tx-news
-天心：高时效经济新闻拉取与分析系统（设计文档）
+# tx-news（v0）
 
-> 目标：尽可能自建/自托管地完成“秒级~分钟级”的新闻采集、清洗、结构化、分析、检索与告警；除在线 LLM 外尽量减少对外部数据源依赖。本文档可作为后续实现的工程蓝图与 README。
+天心：高时效经济新闻拉取与分析系统。目标是在单机可自托管的前提下，完成 **采集 → 清洗 → 去重 → 入库 → 向量检索 → 结构化分析 → 信号/对话** 的闭环（UI/API/MCP）。
 
----
+核心约束：
+- 尽量自建/自托管：Postgres/Redis/NATS/MinIO/Qdrant 本地可跑。
+- LLM 可选：无 API Key 时走规则降级；有 Key 时增强结构化分析与对话。
+- 合规：系统保存 raw 全文用于审计/回放；UI/API 不展示新闻全文，仅展示结构化结果与链接。
 
-## 0. 目标、约束与关键指标
-
-### 0.1 目标
-- 多源新闻拉取（RSS/站点/内部接口/文件投递）→ 统一结构化 → 实时分析（主题/实体/事件/影响评分）→ 检索与看板 → 告警推送。
-- 支持回放与版本演进：任意阶段可重跑新版本规则/模型，结果可追溯。
-
-### 0.2 约束
-- 外部依赖最小化：消息队列、对象存储、数据库、检索、向量库、监控优先自托管。
-- 在线 LLM 仅用于增强：必须提供“无 LLM 降级路径”（规则/传统 NLP/本地模型）。
-
-### 0.3 建议指标（按“1 小时内响应”目标拆分）
-- 发现与入库：从“源可见”到“可检索”≤ 10 分钟（目标值，便于后续 RAG/分析调用）。
-- 初步分析与告警：≤ 30 分钟（可先给“事件类型/涉及标的/影响方向/置信度”的轻量结论）。
-- 完整分析与响应：≤ 60 分钟（补齐跨源归并、时间线、解释性因素与结构化标注）。
-- 去重准确率：> 95%（跨源同稿/转载/轻改写）。
-- 可追溯：每条新闻从抓取→解析→特征→结论→告警全链路审计。
-
-### 0.4 已确认需求（v0）
-1) 数据源：外网抓取为主（保留内部投递通道用于补充与离线回放）。  
-2) 时效：当天突发新闻 1 小时内完成分析并响应（响应=入库可检索 + 分析结果写库）。  
-3) 部署：单机本地起步，后续迁移 K8s。  
-4) 市场：A 股为主。  
-5) 检索：向量检索为主（`Qdrant`），全文检索兜底（`Postgres FTS`）。  
-6) LLM：基础路径 + 在线增强都实现；在线使用 DashScope `qwen3-max`。  
-7) 合规：存全文用于审计/回放，但 UI/API 不展示全文。  
-8) 抓取并发：单机全局并发上限为 1。  
-9) 事件归并窗口：按事件类型动态配置。  
-10) A 股主数据：通过 Tushare（或同类免费平台）拉取，API Key 写入配置文件。  
-11) Raw 全文保留：7 天；不做审计删除逻辑（仅按 TTL 清理）。  
+快速导航：
+- 快速开始：一键部署/启动/验证
+- API：检索/对话（含 SSE 流式）/管理台接口
+- UI：对话页（Markdown）与管理台（实时监控/日志）
+- 架构：调用链、数据流、关键模块与取舍
+- v1：可优化方向清单
 
 ---
 
-## 1. 系统分块（与五大板块对齐）
+## 1. 快速开始（单机 v0）
 
-本系统拆为五大板块（与最初设想一致），同时在工程上进一步细化为可部署的服务/agent：
+### 1.1 前置条件
+- Python >= 3.10
+- Docker + Docker Compose
+- （可选）NVIDIA GPU（用于 embedding 加速；无 GPU 也可跑）
+- 网络：需要拉取 Docker 镜像；首次运行可能需要下载 embedding 模型与（可选）torch wheel
 
-1) **LLM 服务（DashScope `qwen3-max`）**  
-2) **高时效新闻知识库（采集/清洗/分析/标签/向量/检索）**  
-3) **前端与交互（OpenWebUI 二开或自研 Dashboard）**  
-4) **对外 API 服务（结构化与推荐/信号输出）**  
-5) **调度与 Agent 系统（自动化流水线 + 分析编排）**
+### 1.2 一键启动
+1) 配置环境变量：
+- `cp .env.example .env`
+- 按需填写：
+  - LLM：优先 `TXNEWS_LLM_API_KEY`（OpenAI 兼容），或兼容 `DASHSCOPE_API_KEY`
+  - （可选）`HF_ENDPOINT=https://hf-mirror.com`（HuggingFace 镜像）
+  - （调试）`TXNEWS_LOG_LEVEL=DEBUG`（打开流式对话与管理台关键路径日志）
 
----
+2) 配置采集源与本地参数：
+- 编辑 `config/sources.txt`：每行一个入口 URL（支持 `#` 注释）
+- 编辑 `config/config.yaml`：crawler/embedding/llm/tushare 等
 
-## 2. 总体架构与调用关系（含图）
-
-### 2.1 数据流架构
-```mermaid
-graph LR
-  S[Sources] --> C[Collector]
-  C --> BUS[NATS JetStream]
-  BUS --> N[Normalizer]
-  N --> D[Deduper]
-  D --> E[Enrichment]
-  E --> OLTP[Postgres]
-  E --> OBJ[MinIO]
-  E --> VDB[Qdrant]
-  E --> IDX[Postgres FTS]
-  E --> SIG[Signals DB]
-  API[API Gateway (REST/MCP)] --> OLTP
-  API --> IDX
-  API --> VDB
-  UI[Dashboard] --> API
+3) 启动：
+```bash
+bash scripts/start.sh
 ```
 
-### 2.2 单条新闻的时序（从发现到告警）
+启动脚本会：
+- 创建 `.venv` 并安装依赖（可自动安装合适的 torch CPU/CUDA 版本）
+- 设置 HuggingFace 镜像/缓存并做 embedding 预检（提前下载/加载模型）
+- `docker compose up -d` 启动 Postgres/Redis/NATS/MinIO/Qdrant
+- 启动后台进程：Celery worker、NATS bridge、Collector、API
+
+常用启动参数（写入 `.env`）：
+- `AUTO_TORCH=0/1`：是否自动安装 torch
+- `TORCH_VARIANT=cpu|cu121|cu124`：强制 torch 版本选择
+- `PREFLIGHT_EMBEDDING=0/1`：是否启动前预检 embedding（建议开启）
+- `HF_HOME=var/hf`：HuggingFace cache 目录
+
+多 GPU（例如 4090×2）建议：
+- v0 是“多进程”模型：worker/API/collector 都是独立进程；如要分卡运行，推荐手动启动并为不同进程设置 `CUDA_VISIBLE_DEVICES`。
+- `config/config.yaml: embedding.model_name` 默认选用较大中文向量模型；若你更关注速度或显存占用，可换为 `BAAI/bge-small-zh-v1.5`（质量/速度权衡）。
+
+4) 打开页面：
+- 对话 UI：`http://localhost:8000/`
+- 管理台：`http://localhost:8000/admin`
+- 健康检查：`http://localhost:8000/health`
+
+### 1.3 快速验证
+```bash
+curl -s http://localhost:8000/health
+curl -s http://localhost:8000/admin/status | jq .
+```
+管理台“实时监控”会展示窗口吞吐与数据流健康。
+
+### 1.4 停止
+```bash
+bash scripts/stop.sh
+```
+（仅停止 `start.sh` 拉起的本地进程；Docker infra 仍在运行，需手动 `docker compose down` 才会停止）
+
+### 1.5 手动启动（仅 infra 或开发模式）
+- 仅启动基础设施：
+```bash
+docker compose up -d
+```
+- 单独启动 API：
+```bash
+uvicorn apps.api.main:app --reload --port 8000
+```
+- 单独启动 worker：
+```bash
+celery -A tx_news.tasks.celery_app.celery_app worker -l INFO --pool=solo --concurrency=1
+```
+
+### 1.6 推荐配置（GPU 方案 / CPU 方案）
+
+#### A) GPU 方案（推荐：4090×2）
+目标：embedding 全程走 GPU，API/Worker 可分卡，保证吞吐与时延稳定。
+
+`.env` 推荐：
+```bash
+HF_ENDPOINT=https://hf-mirror.com
+HF_HOME=var/hf
+AUTO_TORCH=1
+TORCH_VARIANT=cu121
+PREFLIGHT_EMBEDDING=1
+TXNEWS_LOG_LEVEL=INFO
+```
+
+`config/config.yaml` 推荐：
+```yaml
+embedding:
+  model_name: BAAI/bge-large-zh-v1.5
+  device: auto
+  use_fp16: true
+  qdrant_collection_strategy: auto
+
+crawler:
+  max_concurrency: 1
+
+llm:
+  max_concurrency: 2
+  timeout_seconds: 60
+```
+
+分卡建议（手动启动时）：
+- GPU0 跑 worker：`CUDA_VISIBLE_DEVICES=0 celery -A tx_news.tasks.celery_app.celery_app worker -l INFO --pool=solo --concurrency=1`
+- GPU1 跑 API：`CUDA_VISIBLE_DEVICES=1 uvicorn apps.api.main:app --port 8000`
+
+模型选择建议：
+- 更稳更快：`BAAI/bge-large-zh-v1.5`（默认）
+- 更强但更慢/更大：`BAAI/bge-m3`（首次下载更慢；适合更高质量召回）
+
+#### B) CPU 方案（无 GPU / 仅 CPU）
+目标：降低下载体积与 CPU 压力，保证“可跑通 + 低资源占用”。
+
+`.env` 推荐：
+```bash
+HF_ENDPOINT=https://hf-mirror.com
+HF_HOME=var/hf
+AUTO_TORCH=1
+TORCH_VARIANT=cpu
+PREFLIGHT_EMBEDDING=1
+TXNEWS_LOG_LEVEL=INFO
+```
+
+`config/config.yaml` 推荐：
+```yaml
+embedding:
+  model_name: BAAI/bge-small-zh-v1.5
+  device: cpu
+  use_fp16: false
+  qdrant_collection_strategy: auto
+
+crawler:
+  max_concurrency: 1
+
+llm:
+  max_concurrency: 1
+  timeout_seconds: 60
+```
+
+---
+
+## 2. API 使用方法（HTTP）
+
+API 由 `apps/api/main.py` 提供，默认端口 `8000`。
+
+FastAPI OpenAPI：
+- Swagger UI：`http://localhost:8000/docs`
+- ReDoc：`http://localhost:8000/redoc`
+
+### 2.1 基础接口
+- `GET /health`：存活
+```bash
+curl -s http://localhost:8000/health
+```
+
+- `GET /search?q=...&limit=10`：向量检索（不返回原文）
+```bash
+curl -s "http://localhost:8000/search?q=央行%20降准&limit=10" | jq .
+```
+
+- `/search` 响应字段（`SearchHit`）：
+  - `canonical_id`：归并后的文章 ID（去重后稳定）
+  - `score`：Qdrant 相似度分数（越大越相似）
+  - `title/url/published_at`：最新版本标题与链接
+  - `event_type`：分析产出的事件类型
+  - `tickers`：分析产出的相关标的（结构化 JSON）
+
+- `GET /articles/{canonical_id}`：文章元信息 + 分析结果（不返回原文）
+```bash
+curl -s "http://localhost:8000/articles/<canonical_id>" | jq .
+```
+
+- `GET /signals?limit=50`：最新信号（breaking/analysis_updated 等）
+```bash
+curl -s "http://localhost:8000/signals?limit=50" | jq .
+```
+
+- `GET /events/{event_id}?limit=50`：事件时间线（按 analysis.event_id 聚合）
+
+- `GET /entities/{ts_code}`：A 股主数据（来自本地 DB；由 Tushare/AkShare 同步）
+
+### 2.2 对话接口（SSE 流式）
+对话建议使用流式接口（避免长时间无响应）：
+- `POST /chat/stream`：`text/event-stream`
+  - `event: delta`：增量 token
+  - `event: tool`：工具调用
+  - `event: done`：最终消息（含 meta.tools/meta.evidence）
+
+示例（仅展示首屏，实际是流式）：
+```bash
+curl -N -X POST "http://localhost:8000/chat/stream" \\
+  -H "Content-Type: application/json" \\
+  -d '{"messages":[{"role":"user","content":"总结今天股市新动向"}],"max_steps":6,"recent_minutes":180}'
+```
+
+兼容保留：
+- `POST /chat`：同步一次性返回（不推荐用于 UI）
+
+对话请求参数（`ChatRequest`）：
+- `messages`：对话消息数组（`{role,content}`），建议只发送必要上下文
+- `recent_minutes`：系统提示词里“优先检索最近 N 分钟”的窗口（默认 180）
+- `max_steps`：最多工具回合数（默认 6，过大可能更慢/更贵）
+
+对话响应结构（`done` 的 `message`）：
+- `content`：助手输出（Markdown 文本）
+- `meta.tools`：工具调用轨迹（便于排障/审计）
+- `meta.evidence`：证据链接列表（canonical_id/url/published_at）
+
+### 2.3 管理台与运维接口
+- `GET /admin/status`：依赖健康 + 基础计数 + JetStream consumer 状态
+- `GET /admin/processes`：后台进程状态（基于 `.run/*.pid`）
+- `GET /admin/pipeline?minutes=60`：窗口内吞吐、lag 与最新条目
+- `GET /admin/masterdata`：主数据缓存状态
+- `GET /admin/logs/{name}?n=200`：日志 tail（api/collector/nats_bridge/celery_worker/bootstrap）
+
+---
+
+## 3. 用户界面（UI）说明
+
+### 3.1 对话页（`/`）
+- 基于本地数据库与向量库检索当天新闻证据，再给出结构化总结（不展示全文）
+- 对话走 `/chat/stream` SSE 流式输出，体验上“边生成边显示”
+- 助手回复支持 Markdown 渲染（安全子集：标题/列表/引用/代码块/链接/表格/加粗）
+
+### 3.2 管理台（`/admin`）
+管理台用于实时观测各板块状态与数据流：
+- **实时监控**：窗口内吞吐（raw/versions/analyses）、lag、JetStream pending（含 sparkline）
+- **数据流**：Collector → NATS → Worker → Postgres/Qdrant/MinIO 的健康概览
+- **依赖健康**：Postgres/Redis/NATS/MinIO/Qdrant
+- **进程状态**：worker/bridge/collector/api（基于 `.run/*.pid`）
+- **抓取/分析进度**：近 30/60/180/24h 的计数与最新条目
+- **主数据缓存**：A 股 stock_basic 缓存来源/时间/行数
+- **日志视图**：跟随/换行/级别筛选/搜索（来自 `/admin/logs/{name}`）
+
+管理台核心指标（汉化）：
+- 原始抓取 / 窗口：指定时间窗口内 `raw_documents` 总数
+- 版本入库 / 窗口：窗口内 `article_versions` 总数
+- 分析产出 / 窗口：窗口内 `analyses` 总数
+- 延迟（秒）：`raw.created_at` 最新时间 - `analyses.created_at` 最新时间（负值代表分析更快/或系统时间差异）
+- 队列积压：JetStream consumer 的 `num_pending`
+
+---
+
+## 4. 项目结构与技术栈
+
+### 4.1 目录结构（核心）
+- `apps/`
+  - `apps/collector/`：采集进程（sources → raw → NATS）
+  - `apps/worker/`：NATS → Celery 桥接 + worker 运行
+  - `apps/api/`：FastAPI + 静态 UI（对话/管理台）
+  - `apps/mcp/`：MCP server（stdio JSON-RPC），用于外部 Agent 工具接入
+- `src/tx_news/`：核心可复用库（crawler/normalize/dedup/embedding/storage/tasks/agent）
+- `config/`：本地配置（`config.yaml` + `sources.txt`）
+- `scripts/`：本地一键启动/停止
+- `var/`：运行态日志与缓存（gitignored）
+
+### 4.2 技术栈（v0）
+- 语言：Python 3.10+
+- API：FastAPI + Uvicorn
+- 异步任务：Celery（broker/backend：Redis）
+- 事件总线：NATS JetStream
+- OLTP：PostgreSQL（SQLAlchemy）
+- 对象存储：MinIO（S3 API）
+- 向量库：Qdrant
+- Embedding：sentence-transformers（支持 GPU/FP16；模型可本地路径或 HF 下载）
+- LLM：OpenAI-compatible Chat Completions（默认 DashScope compatible-mode；可替换其它兼容服务）
+- 前端：纯静态（无 Node/无构建），SSE + 原生 JS + CSS
+
+### 4.3 端口与服务（默认）
+- API/UI：`http://localhost:8000`
+- Postgres：`localhost:5432`
+- Redis：`localhost:6379`
+- NATS：`localhost:4222`（监控 `http://localhost:8222`）
+- MinIO：`http://localhost:9000`（console `http://localhost:9001`）
+- Qdrant：`http://localhost:6333`
+
+---
+
+## 5. 调用链与数据流（v0 实现）
+
+### 5.1 高层数据流
+```mermaid
+graph LR
+  S[Sources] --> C[apps/collector]
+  C -->|publish txnews.raw| JS[NATS JetStream]
+  JS --> B[apps/worker/nats_bridge]
+  B -->|ingest_raw.delay| Q[Celery/Redis]
+  Q --> W[Celery Worker]
+  W --> P[(Postgres)]
+  W --> M[(MinIO)]
+  W --> V[(Qdrant)]
+  API[apps/api] --> P
+  API --> V
+  UI[static UI] --> API
+```
+
+### 5.2 单条新闻的任务链
 ```mermaid
 sequenceDiagram
   participant Collector
-  participant Bus as EventBus
-  participant Norm as Normalizer
-  participant Dedup as Deduper
-  participant Enrich as Enricher
-  participant Store as DBIndex
-  participant Signals as SignalsDB
-
-  Collector->>Bus: publish RawDocument
-  Bus->>Norm: consume RawDocument
-  Norm->>Bus: publish NormalizedArticle
-  Bus->>Dedup: consume NormalizedArticle
-  Dedup->>Bus: publish CanonicalArticle
-  Bus->>Enrich: consume CanonicalArticle
-  Enrich->>Store: upsert entities/events/features/index
-  Enrich->>Signals: upsert signals (DB)
+  participant NATS as NATS JetStream
+  participant Bridge as NATS Bridge
+  participant Celery as Celery Worker
+  participant S3 as MinIO
+  participant PG as Postgres
+  participant Q as Qdrant
+  Collector->>S3: put raw bytes
+  Collector->>NATS: publish raw metadata (s3_key)
+  Bridge->>Celery: ingest_raw.delay(raw)
+  Celery->>S3: get raw bytes
+  Celery->>PG: upsert raw/article/version/analysis/signal
+  Celery->>Q: search/upsert vector
 ```
 
-### 2.3 协议栈建议（系统间调用）
-- 采集层：HTTPS（优先 HTTP/2）+ 条件请求（ETag/If-Modified-Since）+ 源级限速/熔断。
-- 对外服务：REST（OpenAPI）+ MCP（stdio）。
-- 事件总线：NATS JetStream。
-- 存储：Postgres wire；MinIO（S3 API）；Qdrant gRPC/HTTP。
-- LLM：在线 `DashScope API（Qwen3-Max）` + 本地推理（embedding）。
-- 给 LLM 的工具接口：MCP（Model Context Protocol）服务化暴露“检索/时间线/告警解释”等能力。
+### 5.3 代码级调用链（从采集到分析）
+- `apps/collector/main.py`：周期性抓取 → `tx_news.crawler.collector.Collector.run_once()`
+- `apps/worker/nats_bridge.py`：订阅 `${TXNEWS_NATS_STREAM}.raw` → `tx_news.tasks.pipeline.ingest_raw.delay()`
+- `src/tx_news/tasks/pipeline.py`：
+  - `normalize_raw`：从 MinIO 读取 raw bytes，抽取正文
+  - `dedup_store`：LSH 近重复 + Qdrant 语义去重 + 写入 Postgres/Qdrant
+  - `analyze`：规则分析 +（可选）LLM JSON 增强 + 写入 analyses/signals
+  - `deep_analysis`：仅对新 canonical 且 LLM 可用触发深分析（二次推理）
+
+关键消息与任务名（便于对齐“数据流/调用链”）：
+- NATS subject：`${TXNEWS_NATS_STREAM}.raw`（默认 `txnews.raw`）
+- Celery 任务（示例）：`tx_news.tasks.pipeline.ingest_raw` / `normalize_raw` / `dedup_store` / `analyze`
 
 ---
 
-## 3. 各模块实现细节与技术栈（多方案与优缺点）
+## 6. 核心模块与技术细节
 
-### 3.1 数据采集系统（Collector）
-**职责**
-- 多源拉取：RSS/Atom、站点 HTML、JSON API、邮件/IM webhook、文件目录投递（离线可用）、内部数据源桥接。
-- 统一输出 `RawDocument`：`source_id/url/fetch_time/headers/raw_html_or_text/checksum/storage_ref`。
+### 6.1 采集（Collector）
+- 输入：`config/sources.txt`
+- 输出：raw bytes → MinIO；raw metadata → NATS（subject: `${TXNEWS_NATS_STREAM}.raw`）
+- v0 策略：每 60 秒 `run_once()`；可用 `crawler.max_concurrency` 控制并发与 `max_retries` 控制重试
 
-**外网抓取为主时的关键工程点（v0 必做）**
-- 源配置化：每个 `source_id` 维护独立的抓取策略（更新频率、入口页/列表页、正文页规则、UA、代理策略、超时与重试）。
-- 站点礼貌与反封禁：按域名做并发与 QPS 限制；对 `429/503` 自适应退避；优先使用条件请求（ETag/If-Modified-Since）。
-- 解析失败兜底：正文抽取失败时，至少保留 `raw_html` 与基础元信息，进入“人工/离线重跑队列”。
-- Headless 仅作为兜底：默认走静态抓取；遇到强 JS 渲染源再按源启用 `playwright`，并在单机环境下严格限流。
+### 6.2 清洗与正文抽取（Normalize）
+- `readability-lxml` 抽取正文；尽量产出 `title/text/checksum/published_at`
+- 失败时 raw 仍保留在 MinIO，可回放重跑
 
-**v0 选择（固定）**
-- 实现：`Python + asyncio + httpx`；RSS：`feedparser`
-- 反爬兜底：允许按 source 配置启用 `playwright`（严格限流，只对必须 JS 渲染的源开启）
-- 抽取：见 `README.md:3.2`（`readability-lxml`）
-- 缓存：ETag/Last-Modified + 内容 hash（减少重复请求）
+### 6.3 去重（LSH + 语义）
+目标：把跨源转载/同稿归并到 `canonical_id`，并保留版本链路。
 
-### 3.2 解析与规范化（Normalizer）
-**职责**
-- HTML→正文抽取、语言识别、时间/作者/栏目提取、链接展开、编码修复。
-- 输出 `NormalizedArticle`：稳定 schema（建议版本化 `schema_version`）。
+流水线（v0）：
+1) LSH（MinHash）近重复：快速过滤同稿/轻微改写
+2) embedding 语义去重：对非近重复候选计算向量，Qdrant 搜索 top1，相似度超过阈值则归并
 
-**建议栈（Python，v0 选择 `readability-lxml`）**
-- 内容抽取：`readability-lxml`（轻量、可控；适合单机起步与高吞吐抓取）。
-- 时间解析：`dateparser` + 源站规则（每源一套轻量 parser）。
-- Schema：`Pydantic` + JSONSchema 导出（供多语言消费者使用）。
+关键参数（v0 默认）：
+- LSH 阈值：`0.85`（见 `src/tx_news/dedup/lsh.py`）
+- 语义归并阈值：`score >= 0.92`（见 `src/tx_news/tasks/pipeline.py`）
 
-### 3.3 去重与版本归并（Dedup & Canonicalization）
-**目标**
-- 同稿多源、转载、改标题、轻微改写的归并；保留版本便于追溯。
+### 6.4 Embedding（GPU/CPU）
+- 配置项在 `config/config.yaml:embedding`：
+  - `model_name`：HF repo id 或本地目录
+  - `device`：`auto/cpu/cuda/cuda:0`
+  - `use_fp16`：GPU 建议开启
+  - `qdrant_collection_strategy`：`auto/base/scoped`
+- Qdrant 兼容：
+  - point id：Qdrant 只接受 `int/uuid`，v0 使用确定性 UUID（uuid5）写入，同时把原 `canonical_id` 放入 payload，检索时优先从 payload 取回 canonical_id。
+  - collection：若换模型导致向量维度变化，`auto` 会自动切换到 `base__<model>__<dim>`，避免维度不匹配直接报错。
 
-**v0 选择的去重流水线（兼顾速度与语义覆盖）**
-1) URL 规范化 + `checksum(normalized_text)` 粗去重（秒级）  
-2) SimHash/MinHash（LSH）近重复（快，减少后续向量计算量）  
-3) 语义去重：仅对 LSH 判定为“不重复”的候选计算 embedding，再做相似度判定（对改写/同义表述更鲁棒）  
-4) 归并：生成 `canonical_id`（文章权威 ID），并把不同来源/版本写入 `versions[]`（审计与回放）
+Embedding 启动前预检（preflight）：
+- 目标：把“下载/加载模型”前置到启动阶段，避免 worker 运行到一半才报错。
+- 建议：保持 `PREFLIGHT_EMBEDDING=1`；并设置 `HF_ENDPOINT=https://hf-mirror.com` 与 `HF_HOME=var/hf` 以提升稳定性。
 
-**embedding 复用（用于“语义去重”与“向量检索/RAG”节约算力）**
-- 计算一次，多处复用：对每个 `canonical_id` 计算并缓存 `embedding(model_version, text_fingerprint)`。
-- 存储位置：向量库（`Qdrant`）存向量；Postgres 存元信息（模型版本、文本指纹、生成时间）。
-- 复用策略：
-  - 语义去重阶段：优先查缓存向量；不存在才计算并写入。
-  - 向量检索阶段：直接复用同一向量（或对 `event timeline summary` 另算一条“事件级向量”）。
-- 注意：如果用于检索的 chunk 向量与用于去重的“整文向量”不同，需要分别缓存（但仍可共享同一 embedding 模型与推理服务）。
+### 6.5 分析（规则 + 可选 LLM）
+- 无 LLM：规则分类/事件窗口/实体匹配仍可跑通主流程
+- 有 LLM：对 `analyze` 与 `deep_analysis` 进行 JSON 结构化增强
+- LLM 配置优先级：
+  1) `.env`：`TXNEWS_LLM_BASE_URL/TXNEWS_LLM_MODEL_NAME/TXNEWS_LLM_API_KEY`
+  2) `.env` 兼容：`DASHSCOPE_API_KEY/OPENAI_API_KEY`
+  3) `config/config.yaml: llm.*`
 
-**优缺点**
-- SimHash/MinHash：速度快、离线友好；对深度改写弱。
-- 向量去重：对改写强；成本高，需向量库与算力。
-
-### 3.4 实时处理与消息系统（Event Bus / Stream）
-**v0 选择（固定）：NATS JetStream**
-- 承载 `raw -> normalized -> canonical -> enriched -> signals` 的消息流。
-- 与调度分工：NATS 负责数据事件；Celery 负责任务执行与资源治理（见 `README.md:4.5`）。
-
-### 3.5 存储（对象 + OLTP + OLAP）
-**v0 存储分层（固定）**
-- 对象存储：`MinIO`（自托管 S3）存 raw/html/pdf/snapshots（**保存全文**，用于审计与回放）。
-- OLTP：`PostgreSQL` 存文章元数据、实体/事件关系、任务状态、审计、A 股主数据表（代码/简称/行业/别名等）。
-- 向量库：`Qdrant`（向量检索 + 语义去重 embedding 复用）
-
-**低依赖替代**
-- 仅 Postgres：组件最少，但高频聚合与海量日志会吃力。
-
-### 3.6 检索（全文/结构化/向量）
-检索的意义不只是“给人搜新闻”，还决定了：
-- RAG 能否拿到正确上下文（否则 LLM 再强也会被错误证据带偏）。
-- 事件聚类/相似新闻发现是否稳定（影响 Fast Path 的“突发归并”和 Deep Path 的“时间线”）。
-- 对外 API 的可用性（按时间/来源/标的/事件类型检索，支撑“1 小时内响应”的工作流）。
-
-下面按“你更倾向向量检索”的方向，给出实现方式与多方案对比。
-
-#### 3.6.1 向量检索（Vector Search，v0 主检索）
-**它解决什么问题**
-- 用户不知道准确关键词时：用语义相近召回（例如“央行降准”≈“释放流动性”）。
-- 跨来源不同表述：同一事件的不同写法仍能召回。
-- 适合 RAG：给 LLM 提供“语义相关证据”，降低漏检。
-
-**它不擅长什么**
-- 精确条件：例如“只要包含某个精确数字/代码/日期”的检索，关键词/结构化过滤更可靠。
-- 召回质量受 embedding 模型、分段策略、时间窗口影响很大；必须配合过滤与重排。
-
-**工程实现要点（v0 固定，先跑通流程）**
-- 向量对象（两级）：
-  - 文章级：`canonical_id_embedding`（用于相似检索、语义去重复用）
-  - 事件级：`event_timeline_embedding`（用于 Event-Centric RAG，降低噪声）
-- v0 不做正文分段向量（chunking），避免组件与计算复杂化；后续如需提高证据定位与召回率，再补 `chunk_embeddings`。
-- 元数据过滤（强烈建议）：时间窗口（近 24h/7d）、来源白名单、实体/股票代码、事件类型；过滤能显著提升“突发新闻”检索质量。
-- 重排（v0）：规则重排（时间新鲜度 + 来源多样性 + 去重）提升精度。
-
-**v0 向量库（固定）**
-- `Qdrant`：过滤能力强、性能稳定，适合“向量检索为主”的新闻场景。
-
-#### 3.6.2 全文检索（Full-Text Search，用于精确召回与审计）
-即使主检索走向量，也建议保留一条“全文检索/关键词召回”的能力作为兜底与审计入口：
-- 找精确实体、数字、公告标题、股票代码、政策条款时更可靠。
-- 处理“向量误召回/漏召回”时便于人工核查与修正。
-
-**v0 兜底实现（固定）**
-- `Postgres FTS + pg_trgm`：组件最少，满足精确关键词/数字/代码的召回与审计。
-
-#### 3.6.3 混合检索（Hybrid Search，最佳效果但复杂度更高）
-在新闻场景里，最稳妥的做法通常是：**向量召回（高召回） + 关键词/过滤/重排（高精度）**。
-
-推荐的 v0 查询流程（向量为主）：
-1) 元数据过滤（时间窗口、A 股标的/行业、来源等）
-2) 向量召回 TopK（优先 `event timeline`，其次 `canonical article`，最后 `chunks`）
-3) 去重与多样性约束（同一事件簇最多 N 条、来源覆盖至少 M 个）
-4) 规则重排：新鲜度 + 置信度 + 证据密度（v0 不引入重排模型）
-5) 返回给 UI/API：只返回摘要/结构化结果/引用链接，不返回全文（版权要求）
-
-### 3.7 分析层（NLP/规则/本地模型/在线 LLM）
-**任务**
-- 实体识别与链接：公司/机构/人/国家/宏观指标（CPI/PMI/利率等）
-- 事件抽取：加息/降息/并购/制裁/破产/财报超预期
-- 影响评分：对大盘/行业/个股/商品/汇率的潜在影响（尽量可解释）
-- 聚类与主题演化：热点事件聚类、跨源时间线
-
-**“无 LLM”基础路径（建议必须可用）**
-- 词典+规则：行业/公司别名、宏观指标模板、事件触发词与正则模式
-- 传统 NLP（中文优先）：`HanLP`（分词/实体/依存等）+ 金融领域词典；分类器可用轻量模型微调
-- Embedding（v0，CPU 友好）：`BAAI/bge-small-zh-v1.5`（或本地模型目录路径；用于聚类/相似检索/语义去重/向量检索；后续可无缝升级到 GPU/更大模型）
-
-**在线 LLM 增强（v0：DashScope `qwen3-max`）**
-- 用于结构化标注、影响推理、跨源归并解释、生成“可读的分析报告”
-- 必须缓存输出（按 `canonical_id/event_id + prompt_version` 幂等存储），避免重复调用与降低成本
-
----
-
-## 4. 调度系统与 Agent 设计（实现方案与调用逻辑）
-
-### 4.1 Agent 划分（建议）
-**采集类**
-- `SourceWatcherAgent`：按源策略触发拉取（cron/事件/自适应频率）
-- `FetcherAgent`：请求/重试/限速/缓存/落地 MinIO
-
-**处理类**
-- `NormalizeAgent`：正文抽取与字段规范化
-- `DedupAgent`：近重复检测与 canonical 归并
-- `EntityAgent`：实体识别与链接（词典/模型/LLM）
-- `EventAgent`：事件抽取（规则/分类器/LLM）
-- `EmbeddingAgent`：向量化写入向量库
-- `ImpactScoringAgent`：影响评分与可解释因子生成
-- `SummarizeAgent`：多粒度摘要（1句/要点/时间线）
-
-**业务类**
-- `AlertAgent`：规则/模型触发告警，支持抑制（silence）与告警去重
-- `TimelineAgent`：热点聚类与时间线维护
-
-### 4.2 调度：控制面/数据面
-```mermaid
-graph TB
-  REG[Agent Registry] --> SCH[Scheduler]
-  STATE[Task State DB (Postgres)] --> SCH
-  SCH --> Q[Task Queue (Celery + Redis)]
-  Q --> WCPU[Worker Pool (CPU)]
-  WCPU --> STATE
+LLM “OpenAI 兼容三件套”示例（适配任意兼容服务）：
+```bash
+TXNEWS_LLM_BASE_URL="https://<your-openai-compatible-host>/v1"
+TXNEWS_LLM_MODEL_NAME="<model-name>"
+TXNEWS_LLM_API_KEY="<api-key>"
 ```
 
-### 4.3 任务模型（强烈建议幂等 + 引用传递）
-- `Task`：`task_id/agent/input_ref/priority/deadline/retries/idempotency_key/agent_version`
-- 输入输出尽量用引用（对象存储 key、数据库 id），避免把大正文放入队列。
-- 幂等键建议：`hash(canonical_id, agent, agent_version, prompt_version)`；写入端用 upsert 保证可重试。
+### 6.6 A 股主数据（Tushare/AkShare）
+- 缓存文件：`var/cache/a_share/stock_basic.json`
+- 默认 TTL：12 小时（`tushare.cache_ttl_hours`）；未过期直接使用缓存入库，避免频繁请求
+- 失败回退：Tushare → AkShare → 本地 cache
 
-### 4.4 编排与降级
-- 核心 DAG：`Fetch -> Normalize -> Dedup -> Enrich -> (Index/Alert)`
-- 旁路允许失败不阻塞：`Embedding/Summary` 失败不影响 `Alert`。
-- 优先级：突发/关键源/关键实体提升 priority；告警链路优先于耗时聚类/长摘要。
-- SLA（按 1 小时目标拆层）：  
-  - T+10m：入库可检索（用于后续 RAG/回放/人工确认）  
-  - T+30m：初步标签与信号（事件类型/涉及标的/影响方向/置信度）  
-  - T+60m：完整分析报告（跨源归并、时间线、解释因子、结构化落库与告警抑制）  
+维护入口（手动触发）：
+- `python -m apps.sync_tushare`：同步/刷新主数据缓存并入库（通常不需要频繁运行）
 
-### 4.6 “1 小时内响应”的双通道策略（推荐）
-为兼顾时效与质量，建议把分析拆成 **Fast Path** 与 **Deep Path** 两条通道：
+### 6.6.1 Raw 保留与清理（Retention）
+- `retention.raw_days` 控制 raw 全文与抓取记录的保留天数（默认 7 天）
+- 维护任务：`tx_news.tasks.maintenance.cleanup_raw`（删除过期 raw 记录与 MinIO 对应对象）
 
-- **Fast Path（用于 T+30m 内响应）**  
-  - 触发点：`Normalize + Dedup` 完成后立即进入  
-  - 内容：规则/轻量模型先跑；对疑似高影响（或低置信度）的样本再调用在线 LLM（`qwen3-max`）补齐标注与推理，输出“事件类型、涉及实体/个股、影响方向、置信度、触发原因（证据引用）”  
-  - 产物：`BreakingSignal`（可直接驱动告警/看板/对外 API）
+### 6.7 MCP 工具服务（stdio）
+`apps/mcp/server.py` 提供最小 MCP/JSON-RPC 工具接口，适合外部 Agent/编排器通过 stdio 集成检索能力。
+```bash
+python -m apps.mcp.server
+```
 
-- **Deep Path（用于 T+60m 内完整分析）**  
-  - 触发点：事件簇聚合（`event_id`）形成后  
-  - 内容：跨源时间线、分歧点、影响链路解释；必要时走 Agentic RAG（LangGraph）生成“分析报告 + 结构化落库”  
-  - 产物：`AnalysisReport`（报告）+ `Annotations`（结构化标注）+ `EventTimeline`（时间线）
+### 6.8 数据模型（v0：核心表）
+（以 `src/tx_news/db.py` 的 ORM 为准；这里给出理解调用链所需的最小心智模型）
+- `raw_documents`：抓取记录（url/status/checksum/s3_key/created_at）
+- `articles`：canonical 文章（canonical_id/title/text/checksum/embedding_ref/embedding_dim/…）
+- `article_versions`：来源版本链（canonical_id/source_id/url/fetched_at/published_at/…）
+- `analyses`：结构化分析结果（event_type/data/json/llm_used/created_at）
+- `signals`：系统信号（breaking/analysis_updated/deep_analysis_updated 等）
+- `a_share_basic`：A 股主数据（ts_code/name/aliases/…）
 
-**单机运行时的调度要点**
-- 使用优先级队列：Fast Path 任务优先；Deep Path 可在低峰或空闲资源运行。
-- Worker 分池（v0）：CPU 池跑抓取/解析/规则/embedding/推理（DashScope 调用并发单独限流）。
-- 强幂等：所有产物以 `canonical_id/event_id + version` 做 upsert，确保可重试与可回放。
+### 6.9 配置参考（v0 常用项）
+推荐只改这两处：`config/config.yaml`（业务参数）与 `.env`（连接串/密钥/运行开关）。
 
-### 4.5 调度实现方案（v0 选择：方案 C）
-**方案 C：Celery + Redis（单机优先）**
-- 定位：作为调度与任务执行引擎（抓取、解析、去重、embedding、写库、Deep Path 分析链的分步执行）。
-- 与消息系统分工：`NATS JetStream` 承载数据事件流（raw/normalized/canonical/enriched）；Celery 负责把这些事件转换成可控的后台任务并执行（重试/限流/并发）。
-- 建议部署：`Celery + Redis`（broker/result backend）+ 分 worker 队列（CPU 队列、LLM 队列、embedding 队列），用优先级保证 Fast Path 先跑。
-- Deep Path（Agentic RAG）：作为 Celery 的一个“任务链/子流程”运行，结束后以幂等 upsert 回写优化结构化结果。
+`.env`（常用）：
+- `TXNEWS_PG_DSN`/`TXNEWS_REDIS_URL`/`TXNEWS_NATS_URL`/`TXNEWS_S3_*`/`TXNEWS_QDRANT_*`：基础设施连接
+- `TXNEWS_LLM_BASE_URL`/`TXNEWS_LLM_MODEL_NAME`/`TXNEWS_LLM_API_KEY`：LLM（OpenAI 兼容）
+- `DASHSCOPE_API_KEY`：兼容旧方式（未设置 `TXNEWS_LLM_API_KEY` 时会回退）
+- `HF_ENDPOINT`/`HF_HOME`：Embedding 模型下载镜像与缓存目录
 
----
-
-## 5. LLM 服务与 RAG（板块 1/2/3 的关键接口）
-
-### 5.1 在线 LLM（v0 固定）
-- 在线服务：`DashScope API`
-- 模型：`qwen3-max`
-- 用法定位：作为“标注与推理增强层”，所有关键输出必须结构化（JSON Schema）且可缓存可回放。
-
-### 5.1.1 本地模型（v0 固定）
-- Embedding：本地运行，用于语义去重与向量检索（见 `README.md:3.3`、`README.md:3.6`）。
-
-### 5.2 RAG 方案（先进可选，并给出取舍）
-
-#### 方案 A：时间感知的 Hybrid RAG（推荐作为 v0 默认）
-**核心思路**
-- 检索：全文（Postgres FTS）+ 向量（Qdrant）混合召回（以向量为主，全文兜底）。
-- 时间加权：对“越近的新闻/事件簇”施加更高权重（recency bias），避免旧闻污染。
-- 重排：规则约束（必须包含发布时间、来源多样性等）。
-- 组装上下文：以“事件簇/时间线”为单位拼上下文，而非逐条新闻堆叠。
-
-**优点**
-- 组件与实现复杂度适中，单机可跑，效果稳定，可逐步增强。
-
-**缺点**
-- 对“跨事件推理/隐含关系”能力有限，需要后续引入图结构或 agent 流程增强。
-
-#### 方案 B：事件中心 RAG（Event-Centric RAG，适合新闻/突发）
-**核心思路**
-- 先把新闻归并到 `event_id`（聚类/规则/语义相似 + 时间窗口），并维护每个事件的“时间线摘要”。
-- 检索时优先检索事件（event）而非文章（article）：返回 `event timeline + top sources + key entities + key claims`。
-- 生成回答时引用“事件时间线”，同时给出“最新进展/确认程度/分歧点”。
-
-**优点**
-- 噪声低、可解释强，非常贴合“突发新闻 1 小时响应”的工作方式。
-
-**缺点**
-- 需要先把聚类与事件建模做扎实；冷启动阶段事件质量依赖规则/聚类参数。
-
-#### 方案 D：Agentic RAG（用于 Deep Path 的逻辑化分析）
-**核心思路**
-- 以 LangGraph 把流程固化为：`检索→归并→证据检查→标注→生成报告→自检→写回`。
-- LLM 只做“推理与表达”，检索/归并/计算/验证全部工具化（MCP/内部 API）。
-
-**优点**
-- 对“分析推理 + 结构化落库 + 报告生成”这类复杂任务最贴合。
-
-**缺点**
-- 调试成本高；需要严格的结构化输出约束与缓存，否则成本与不稳定性会上升。
-
-#### 选择建议（结合已确认需求）
-- v0：**方案 A（时间感知 Hybrid）+ 方案 B（事件中心）** 用于“短平快突发处理”（Fast Path，快速入库可检索 + 初步信号）。
-- v0：同时引入 **方案 D（Agentic RAG / LangGraph）** 用于“逻辑化深度分析”（Deep Path），并在分析结束后以幂等 upsert 的方式**优化/覆盖数据库中的结构化结果**。
-
-#### 工具接口（给 LLM 的最小集合）
-- `search_news(query, time_range, sources, top_k)`
-- `get_event_timeline(event_id)`
-- `get_entity_profile(entity_id)`（公司/行业/宏观指标画像）
-- `write_annotations(canonical_id, schema_version, payload)`
-
-### 5.3 “在线 LLM”最小化策略
-- 仅用于高价值环节：深度摘要、影响解释、跨源归因与报告生成
-- 强缓存：按输入引用与 prompt 版本缓存输出；失败自动降级到规则/抽取式摘要
-- DashScope 调用治理：对 `qwen3-max` 设定并发上限、超时与重试策略；对输出做 JSON Schema 校验，不合格则走“重试/降级/人工复核队列”。
-
-### 5.4 结构化标注与推理输出（面向“个股列表 + 大盘变动”）
-
-为支持“自动标注、分析推理、生成个股列表与大盘变动结论”，建议统一一套可版本化的结构化输出（写入 Postgres/向量库均可引用同一 `canonical_id/event_id`）。
-
-**建议输出要素**
-- `event_type`：政策/宏观数据/公司事件/地缘政治/行业供需/市场流动性等
-- `entities`：公司/行业/宏观指标/国家/机构（必须做链接：与本地 A 股“个股/指数/行业”主数据表对齐）
-- `impact`：`scope`（大盘/行业/个股/商品/汇率）、`direction`（利好/利空/不确定）、`horizon`（短/中/长）、`confidence`
-- `tickers`：个股列表（来自“本地 A 股主数据表”，含理由与证据引用；允许为空但必须说明原因）
-- `index_view`：大盘变动判断（新闻驱动的方向性/情景化判断，非实时行情涨跌；包含驱动因素/不确定性/风险点）
-- `evidence`：引用的新闻/数据点列表（`source_id/url/publish_time/quote_span`）
-
-**关键约束**
-- 必须“可解释”：影响结论要能追溯到证据与规则/模型输出。
-- 必须“可回放”：同一输入在同一 `prompt_version/agent_version` 下可稳定复现（或至少可审计差异）。
+`config/config.yaml`（常用）：
+- `crawler.max_concurrency/per_domain_min_interval_seconds`：抓取并发与限速
+- `embedding.model_name/device/use_fp16`：向量模型与设备策略
+- `tushare.cache_ttl_hours`：主数据缓存 TTL（默认 12h）
+- `event_windows_minutes.*`：事件归并窗口（按 `event_type` 分类）
 
 ---
 
-## 6. 对外服务（API + MCP）
+## 7. 关键组件取舍（v0 的选择与优缺点）
 
-### 6.1 API 服务
-- 面向前端与外部系统：新闻检索、事件时间线、影响评分、信号/告警查询、推荐信号输出。
-- 形式：REST（OpenAPI）。
-- 版权策略（v0）：对象存储保留全文用于审计/回放；**对话界面与对外 API 不返回全文**，仅返回摘要/结构化标注/引用链接（必要时可返回短引用片段与定位信息）。
+### 7.1 NATS JetStream（事件流）
+优点：轻量、单机友好、延迟低、易运维；consumer pending 可观测。  
+缺点：生态/治理不如 Kafka 完整；大规模多租户时需要更强的隔离策略。
 
-### 6.2 MCP 服务（给 LLM 的“工具层”）
-- 把知识库能力（检索/时间线/实体画像/告警解释）以 MCP Server 形式暴露，供 OpenWebUI/自研对话前端的 LLM 调用。
+### 7.2 Celery + Redis（任务执行）
+优点：Python 生态成熟；重试/并发/任务链简单直接；与现有 Python 代码耦合成本低。  
+缺点：复杂编排与可观测性不如专门工作流引擎（Argo/Temporal）。
 
----
+### 7.3 Postgres（主存储）
+优点：组件最少、事务一致性强；适合元数据/分析结果/审计；运维成本低。  
+缺点：做复杂检索/聚合时可能需要外置 OLAP/搜索引擎。
 
-## 7. v0 已选落地组合（单机起步，可迁移 K8s）
-`Python(Collector/Workers) + NATS JetStream + Celery + Redis + Postgres + MinIO + Qdrant`  
-（Extractor：`readability-lxml`；去重：LSH→本地 embedding 语义去重；embedding 复用到向量检索；本地 embedding：`BAAI/bge-small-zh-v1.5`；在线 LLM：DashScope `qwen3-max`）
+### 7.4 Qdrant（向量库）
+优点：过滤能力强、性能稳定；适合“向量检索为主”的新闻召回。  
+缺点：需要额外组件；版本对齐与 schema 演进需要规范（collection/维度/point id）。
 
----
+### 7.5 MinIO（对象存储）
+优点：保留 raw 全文用于审计/回放；与 DB 解耦；成本低。  
+缺点：需要额外组件；需要 TTL/生命周期管理策略。
 
-## 8. 已确认的关键决策（v0）
+### 7.6 sentence-transformers 本地 embedding
+优点：可离线、自主可控；GPU 可显著提速；一处向量可复用于去重/检索。  
+缺点：模型下载与缓存管理需要规范；模型升级会带来向量维度/分布变化。
 
-1) 数据源：外网抓取为主。  
-2) 时效目标：当天突发新闻 **1 小时内完成分析并响应**；响应定义为“写入知识库可检索 + 分析结果更新到数据库”。  
-3) 部署形态：单机本地部署起步，后续考虑迁移 K8s。  
-4) 抽取：正文抽取使用 `readability-lxml`。  
-5) 去重：LSH 近重复去重后，对“未重复候选”做本地 embedding 语义去重，并复用 embedding 于向量检索。  
-6) 消息系统：使用 `NATS JetStream`。  
-7) 检索：以向量检索为主（`Qdrant`），并保留全文检索兜底（`Postgres FTS`）。  
-8) LLM：基础路径 + 在线增强都实现；在线为 DashScope `qwen3-max`，用于标注与推理并产出“个股列表/大盘变动（新闻驱动的方向性判断）”。  
-9) RAG：Fast Path 用方案 A+B；Deep Path 用 Agentic RAG（LangGraph）做逻辑化分析并回写优化结果。  
-10) 市场范围：A 股为主。  
-11) 版权：存全文用于审计/回放，但 UI/API 不展示全文。
-12) 抓取配置：站点通过配置文件按行列出根 URL（见 `config/sources.txt`）。  
-13) 并发：单机抓取全局并发上限为 1。  
-14) 事件归并：按事件类型动态窗口（见 `config/config.yaml`）。  
-15) 主数据：通过 Tushare 拉取，token 配置在 `config/config.yaml`。  
-16) 保留：raw 全文保留 7 天，不做审计逻辑。  
+### 7.7 常见替代方案对比（v0 取舍）
 
-## 9. 配置（v0 固定）
-
-### 9.1 站点配置
-- 文件：`config/sources.txt`
-- 格式：每行一个站点根 URL（例如 `https://finance.example.com/`），采集器按根 URL 加载对应抓取规则与限流策略。
-
-### 9.2 全局配置
-- 文件：`config/config.yaml`
-- 关键项：
-  - 抓取并发：`crawler.max_concurrency: 1`
-  - Raw 保留：`retention.raw_days: 7`
-  - 事件归并窗口：`event_windows_minutes`（按 `event_type` 动态配置）
-  - Tushare：`tushare.token`（用于拉取 A 股主数据）
+| 目标 | v0 方案 | 常见替代 | v0 取舍原因（简述） |
+| --- | --- | --- | --- |
+| 事件流 | NATS JetStream | Kafka/Redpanda | 单机起步更轻；延迟低；运维成本更小（大规模治理不如 Kafka）。 |
+| 任务编排 | Celery + Redis | Temporal/Argo/Airflow | Python 生态直连、改造成本低；复杂工作流/可观测性可在 v1 引入。 |
+| 向量检索 | Qdrant | pgvector/FAISS/ES kNN | Qdrant 过滤+性能更稳、独立扩展；pgvector 更省组件但检索/过滤能力受限。 |
+| raw 存储 | MinIO(S3) | 本地 FS/OSS | raw 用于审计/回放，S3 接口利于后续扩展；单机也能跑。 |
+| LLM | OpenAI-compatible API | 本地 vLLM/self-host | v0 默认“可选 LLM”：先把数据链路跑通；本地推理可在 v1 做成本与延迟优化。 |
 
 ---
 
-## 10. 运行方式（v0 单机）
+## 8. 运维与排障（Troubleshooting）
 
-### 10.1 启动依赖服务
-- `docker compose up -d`
+### 8.1 常见依赖问题
+- Qdrant `ApiException`：优先看 `/admin/status` 的 `qdrant.ok` 与错误信息；确认 `docker compose ps` 中 qdrant 正常、`TXNEWS_QDRANT_URL` 可达。
+- embedding 无法加载/超慢：设置 `HF_ENDPOINT=https://hf-mirror.com`、`HF_HOME=var/hf`，并开启 `PREFLIGHT_EMBEDDING=1`。
+- GPU 不生效：确认 `nvidia-smi` 可用；torch 是否为 CUDA 版本；必要时设置 `TORCH_VARIANT=cu121|cu124` 重新启动（或 `AUTO_TORCH=0` 自己管理 torch）。
 
-### 10.1.1 一键启动（Linux）
-- `bash scripts/start.sh`
-- 打开：
-  - Web UI（对话+信号展示）：`http://localhost:8000/`
-  - 管理台（模块健康/进度/日志）：`http://localhost:8000/admin`
-  - Tx-News API：`http://localhost:8000`
+### 8.2 对话“长时间无回复”
+- 建议使用 `/chat/stream`；并把 `TXNEWS_LOG_LEVEL=DEBUG` 打开以观察：
+  - API：`chat_stream start/first_delta/done`（TTFB、token 增量、工具调用）
+  - 工具：`tool_call name=...`（卡住通常在检索/向量化/DB/Qdrant）
 
-### 10.1.2 一键启动（Windows）
-- 启动：`scripts\start.cmd`（双击）或 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\start.ps1`
-- 停止：`scripts\stop.cmd`（双击）或 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\stop.ps1`
-
-### 10.2 Python 环境与依赖
-- `python -m venv .venv && source .venv/bin/activate`
-- `pip install -r requirements.txt`
-- `pip install -e .`
-- （可选）开发工具：`pip install -r requirements-dev.txt`
-
-### 10.3 配置
-- 复制环境变量：`cp .env.example .env` 并按需修改
-- 填写 `config/config.yaml`：
-  - `tushare.token`（必填，首次同步 A 股主数据）
-  - `llm.api_key` 或环境变量 `DASHSCOPE_API_KEY`（可选；不填则只走规则路径）
-- 站点列表：编辑 `config/sources.txt`（每行一个站点根 URL）
-
-### 10.4 初始化 A 股主数据（Tushare）
-- `python -m apps.sync_tushare`
-
-### 10.5 启动 Worker（Celery）与 NATS Bridge
-- 启动 Celery worker：`celery -A tx_news.tasks.celery_app.celery_app worker -l INFO`
-- 启动 NATS Bridge（把 `txnews.raw` 转成 Celery 流水线）：`python -m apps.worker.nats_bridge`
-
-### 10.6 启动采集器
-- `python -m apps.collector.main`
-
-### 10.7 启动 API
-- `uvicorn apps.api.main:app --host 0.0.0.0 --port 8000`
-- 打开 Web UI：`http://localhost:8000/`
-
-### 10.7.1 启动 MCP（stdio）
-- `python -m apps.mcp.server`
-
-### 10.8 常用 API
-- 健康检查：`GET /health`
-- 语义检索：`GET /search?q=...`
-- 单条分析：`GET /articles/{canonical_id}`（不返回全文）
-- 信号列表：`GET /signals`
-- 事件时间线：`GET /events/{event_id}`
-- 个股画像：`GET /entities/{ts_code}`
-- 对话（Agent）：`POST /chat`（服务端会调用检索/数据库工具，不返回新闻原文）
-
-### 10.9 维护任务
-- 同步 A 股主数据（可重复执行）：`python -m apps.sync_tushare`
-- 清理过期 raw（保留 7 天）：`python -c "from tx_news.tasks.maintenance import cleanup_raw; print(cleanup_raw.apply().get())"`
-- A 股主数据本地缓存：`var/cache/a_share/stock_basic.json`
-  - 优先 Tushare（字段更全），遇到频率限制/网络问题会自动尝试 AkShare，再不行回退本地缓存
+### 8.3 日志与定位
+- 日志目录：`var/log/`
+- 管理台日志：`/admin` → 日志视图（对应 `/admin/logs/{name}`）
+- 常用日志名：`api`、`collector`、`nats_bridge`、`celery_worker`、`bootstrap`
 
 ---
 
-## 11. 微调（仅提供启动模板）
+## 9. v1 可优化方向（路线图）
 
-真实微调不在本仓库自动执行；你可以使用 `finetune/` 下的模板快速启动：
-- 说明：`finetune/README.md`
-- 配置模板：`finetune/sft.yaml`
-- 启动脚本：`bash finetune/run_sft.sh finetune/sft.yaml`
+v1 建议聚焦“检索质量 + 可观测性 + 成本治理 + 规模化”：
+- 检索与证据定位
+  - chunking + chunk 向量（证据更精确）
+  - 混合检索（向量召回 + 关键词/过滤 + 重排）
+  - 事件级向量与时间线摘要向量（Event-Centric RAG）
+- 分析质量与可回放
+  - prompt/schema 版本化；输出幂等缓存与回放工具
+  - 规则/LLM 的 A/B 对比与质量评测集（离线评测）
+- 资源与吞吐
+  - 多进程/多队列：embedding 与 LLM 调用隔离；GPU worker pool
+  - 更细粒度限流与熔断（按 provider/模型/源站）
+- 可观测性与运维
+  - 指标体系（Prometheus/OpenTelemetry）与 tracing（替代仅日志）
+  - 更强的管理台：任务队列长度、重试率、失败分布、耗时分位数
+- 安全与产品化
+  - API Key/Auth、速率限制、审计日志
+  - 多租户/多市场扩展（A 股以外的实体库与规则集）
+
+---
+
+## 10. 开发与测试
+- 代码风格：`ruff`（`pyproject.toml`）
+  - `ruff check .`
+- 测试：`pytest -q`（如已安装 `requirements-dev.txt`）
