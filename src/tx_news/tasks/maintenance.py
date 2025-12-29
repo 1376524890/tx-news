@@ -28,10 +28,20 @@ def sync_tushare() -> dict:
     settings = get_settings()
     file_cfg = settings.load_file_settings()
     token = (file_cfg.tushare or {}).get("token") or ""
+    ttl_hours = int((file_cfg.tushare or {}).get("cache_ttl_hours", 12))
 
     engine = make_engine(settings.pg_dsn)
     init_db(engine)
     sync = TushareSync(token=token)
+
+    # Stock master data is slow-moving; prefer local cache if fresh.
+    ttl_seconds = max(1, ttl_hours) * 3600
+    if sync.cache_is_fresh(ttl_seconds=ttl_seconds):
+        cached = sync.load_cached_stock_basic() or []
+        if cached:
+            upsert_a_share_basic(engine, cached)
+            return {"rows": len(cached), "source": "cache_fresh", "ttl_hours": ttl_hours}
+
     source = "tushare"
     try:
         # prefer tushare for richer fields; can fail due to rate-limit/network
@@ -52,7 +62,7 @@ def sync_tushare() -> dict:
             rows = cached
             source = "cache"
     upsert_a_share_basic(engine, rows)
-    return {"rows": len(rows), "source": source}
+    return {"rows": len(rows), "source": source, "ttl_hours": ttl_hours}
 
 
 @celery_app.task(name="tx_news.tasks.maintenance.cleanup_raw")

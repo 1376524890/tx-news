@@ -1,4 +1,4 @@
-# Input: DashScope LLM 返回的消息 + TxNewsTools 工具查询结果
+# Input: OpenAI 兼容 LLM 返回的消息 + TxNewsTools 工具查询结果
 # Output: 对话回答文本 + 工具调用轨迹 + 证据链接列表
 # Pos: 工具增强对话 Agent（变更时同步更新以上注释与所属目录 FOLDER.md）
 
@@ -35,8 +35,17 @@ class ToolTrace:
 
 
 class TxNewsAgent:
-    def __init__(self, *, api_key: str, model: str = "qwen3-max") -> None:
-        self.client = DashScopeClient(api_key=api_key, model=model)
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str = "qwen3-max",
+        base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        timeout_seconds: int = 60,
+    ) -> None:
+        self.client = DashScopeClient(
+            api_key=api_key, model=model, base_url=base_url, timeout_seconds=timeout_seconds
+        )
         self.tools = TxNewsTools()
 
         self._tool_funcs: dict[str, Callable[..., Any]] = {

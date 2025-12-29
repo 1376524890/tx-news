@@ -28,7 +28,8 @@ def init_db(engine: Engine) -> None:
 
 @contextmanager
 def session_scope(engine: Engine):
-    session = Session(engine)
+    # Keep loaded ORM attributes accessible after commit/close (used by API/tool layers).
+    session = Session(engine, expire_on_commit=False)
     try:
         yield session
         session.commit()

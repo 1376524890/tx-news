@@ -7,9 +7,9 @@
 > 一旦我所属的文件夹有所变化，请更新我。
 
 架构（≤3行）：
-- `postgres.py`：SQLAlchemy 访问封装（建表、CRUD、查询）。
+- `postgres.py`：SQLAlchemy 访问封装（建表、CRUD、查询；Session 默认 `expire_on_commit=False` 便于 API/工具层安全读取）。
 - `minio.py`：S3 API 封装（raw 内容存取/删除）。
-- `qdrant.py`：向量 upsert/search 与 collection 初始化。
+- `qdrant.py`：向量 upsert/search 与 collection 初始化；兼容 `qdrant-client` 的 `query_points/search` API；point id 使用确定性 UUID（避免服务端不接受字符串 id）；并支持 embedding 维度变化时自动切换到“模型+维度隔离”的 collection。
 
 ## 文件
 

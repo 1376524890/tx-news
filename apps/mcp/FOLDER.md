@@ -9,7 +9,7 @@
 架构（≤3行）：
 - 通过 stdio 提供最小 MCP/JSON-RPC 工具服务（无需 HTTP）。
 - 工具底层复用 Qdrant（向量检索）与 Postgres（元数据/分析结果）。
-- 用于把“检索/分析/时间线/主数据查询”暴露给外部 Agent。
+- 工具检索同样使用本地 embedding 配置，并在向量维度变化时自动兼容 Qdrant collection。
 
 ## 文件
 

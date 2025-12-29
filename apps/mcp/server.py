@@ -8,7 +8,7 @@ import json
 import sys
 from typing import Any
 
-from tx_news.embedding.embedder import Embedder
+from tx_news.embedding.embedder import DEFAULT_EMBEDDING_MODEL, build_embedder
 from tx_news.settings import get_settings
 from tx_news.storage.postgres import (
     get_a_share,
@@ -19,7 +19,7 @@ from tx_news.storage.postgres import (
     init_db,
     make_engine,
 )
-from tx_news.storage.qdrant import QdrantStore
+from tx_news.storage.qdrant import QdrantStore, scored_point_canonical_id
 
 
 def _write(obj: dict[str, Any]) -> None:
@@ -81,13 +81,19 @@ def tool_call(name: str, arguments: dict[str, Any]) -> Any:
     if name == "search_news":
         q = str(arguments.get("query") or "")
         limit = int(arguments.get("limit") or 10)
-        model_name = (file_cfg.embedding or {}).get("model_name", "bge-small-zh-v1.5")
-        vector = Embedder(model_name_or_path=model_name).embed(q[:2000])
-        qdrant = QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection)
+        embedding_cfg = file_cfg.embedding or {}
+        embedder, qdrant_strategy = build_embedder(embedding_cfg)
+        model_name = str(embedding_cfg.get("model_name") or DEFAULT_EMBEDDING_MODEL)
+        vector = embedder.embed(q[:2000])
+        qdrant = QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection).resolve_collection_for_embedding(
+            vector_size=len(vector),
+            model_name_or_path=model_name,
+            strategy=qdrant_strategy,
+        )
         points = qdrant.search(vector=vector, limit=limit)
         out = []
         for p in points:
-            cid = str(p.id)
+            cid = scored_point_canonical_id(p) or str(p.id)
             a = get_article(engine, cid)
             v = get_latest_version(engine, cid)
             an = get_analysis(engine, cid)

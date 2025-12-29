@@ -9,7 +9,7 @@
 架构（≤3行）：
 - 聚合外部数据源访问（Tushare/AkShare）并做本地缓存。
 - 主数据写入由 `tasks/maintenance.py` 负责；这里专注“拉取+缓存”。
-- 缓存路径稳定在 `var/cache/a_share/stock_basic.json`。
+- 缓存路径稳定在 `var/cache/a_share/stock_basic.json`（默认 12h TTL，过期再更新）。
 
 ## 文件
 

@@ -19,8 +19,17 @@ retention:
   raw_days: 7
 
 embedding:
-  # v0 CPU 友好；后续可替换为更大模型或 GPU 推理服务
-  model_name: BAAI/bge-small-zh-v1.5
+  # 4090/3090 等 GPU：建议使用更大模型 + FP16；无 GPU 时 `device: auto` 会自动回落到 CPU。
+  # 备选：`BAAI/bge-m3`（更强/更大，初次下载更慢）
+  model_name: BAAI/bge-large-zh-v1.5
+  # auto / cpu / cuda / cuda:0（多卡可用 CUDA_VISIBLE_DEVICES 控制进程绑定）
+  device: auto
+  # GPU 上建议 true；CPU 上无影响
+  use_fp16: true
+  # 可选：指定 HuggingFace cache 目录（也可直接把 model_name 写成本地模型目录）
+  # cache_dir: var/hf_cache
+  # Qdrant collection 策略：auto(兼容旧库) / base(强制单 collection) / scoped(按模型+维度隔离)
+  qdrant_collection_strategy: auto
 
 llm:
   provider: dashscope
@@ -33,6 +42,8 @@ llm:
 tushare:
   # Tushare token（必填；用于拉取 A 股主数据）
   token: "cab8e22a8a441ce9d816359fa54b06dee2ccc1809bc4402197f71f4a"
+  # 主数据缓存过期时间（小时）；未过期则直接使用本地缓存文件，避免频繁请求
+  cache_ttl_hours: 12
 
 # 事件归并窗口（按 event_type 动态配置；单位分钟）
 # 说明：用于把新闻聚合为 event_id，并驱动 Event-Centric RAG 的时间线维护。

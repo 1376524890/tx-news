@@ -7,7 +7,7 @@
 > 一旦我所属的文件夹有所变化，请更新我。
 
 架构（≤3行）：
-- `start.sh`：准备 `.venv`/依赖 → 启动 Docker infra → 启动后台进程（worker/bridge/collector/api）。
+- `start.sh`：准备 `.venv`/依赖（可自动安装匹配的 torch）→ 预检 embedding（HF 镜像/模型加载）→ 启动 Docker infra → 启动后台进程。
 - `stop.sh`：停止 `.run/*.pid` 记录的后台进程（不自动 `docker compose down`）。
 - `start.ps1`：Windows PowerShell 一键启动（功能对齐 `start.sh`）。
 - `stop.ps1`：Windows PowerShell 停止 `.run/*.pid` 记录的后台进程。

@@ -9,7 +9,7 @@
 架构（≤3行）：
 - FastAPI 对外提供检索/对话/管理台等 HTTP 接口，并挂载 `static/` UI。
 - 依赖 Postgres/Qdrant/Redis/NATS（通过 `tx_news.settings` 读取连接信息）。
-- 只返回结构化结果与链接，不展示新闻全文。
+- 检索使用本地 embedding 配置（`embedding.device/use_fp16/...`），并在向量维度变化时自动兼容 Qdrant collection。
 
 ## 文件
 

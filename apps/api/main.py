@@ -21,7 +21,7 @@ from sqlalchemy import text
 import nats
 
 from tx_news.agent.txnews_agent import AgentChatError, TxNewsAgent
-from tx_news.embedding.embedder import Embedder
+from tx_news.embedding.embedder import DEFAULT_EMBEDDING_MODEL, build_embedder
 from tx_news.settings import get_settings
 from tx_news.storage.postgres import (
     get_a_share,
@@ -33,7 +33,7 @@ from tx_news.storage.postgres import (
     list_signals,
     make_engine,
 )
-from tx_news.storage.qdrant import QdrantStore
+from tx_news.storage.qdrant import QdrantStore, scored_point_canonical_id
 
 
 app = FastAPI(title="tx-news API", version="0.1.0")
@@ -82,11 +82,16 @@ def ui_admin() -> Response:
 def search(q: str = Query(min_length=1), limit: int = Query(default=10, ge=1, le=50)):
     settings = get_settings()
     file_cfg = settings.load_file_settings()
-    model_name = (file_cfg.embedding or {}).get("model_name", "BAAI/bge-small-zh-v1.5")
-    embedder = Embedder(model_name_or_path=model_name)
+    embedding_cfg = file_cfg.embedding or {}
+    embedder, qdrant_strategy = build_embedder(embedding_cfg)
+    model_name = str(embedding_cfg.get("model_name") or DEFAULT_EMBEDDING_MODEL)
     vector = embedder.embed(q[:2000])
 
-    qdrant = QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection)
+    qdrant = QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection).resolve_collection_for_embedding(
+        vector_size=len(vector),
+        model_name_or_path=model_name,
+        strategy=qdrant_strategy,
+    )
     points = qdrant.search(vector=vector, limit=limit)
 
     engine = make_engine(settings.pg_dsn)
@@ -94,7 +99,7 @@ def search(q: str = Query(min_length=1), limit: int = Query(default=10, ge=1, le
 
     hits: list[SearchHit] = []
     for p in points:
-        cid = str(p.id)
+        cid = scored_point_canonical_id(p) or str(p.id)
         a = get_article(engine, cid)
         v = get_latest_version(engine, cid)
         an = get_analysis(engine, cid)
@@ -527,20 +532,25 @@ class ChatResponse(BaseModel):
 def chat_agent(req: ChatRequest) -> ChatResponse:
     settings = get_settings()
     file_cfg = settings.load_file_settings()
-    api_key = settings.dashscope_api_key or ((file_cfg.llm or {}).get("api_key"))
-    model = (file_cfg.llm or {}).get("model", "qwen3-max")
+    llm = settings.resolve_llm(file_cfg)
+    api_key = llm.get("api_key")
+    model = llm.get("model") or "qwen3-max"
+    base_url = llm.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     if not api_key:
         return ChatResponse(
             message={
                 "role": "assistant",
-                "content": "未配置 DashScope API Key：请在环境变量 `DASHSCOPE_API_KEY` 或 `config/config.yaml` 的 `llm.api_key` 中配置后再试。",
+                "content": (
+                    "未配置 LLM API Key：请在环境变量 `TXNEWS_LLM_API_KEY`（或兼容的 `DASHSCOPE_API_KEY` / `OPENAI_API_KEY`），"
+                    "或 `config/config.yaml` 的 `llm.api_key` 中配置后再试。"
+                ),
                 "meta": {"tools": [], "evidence": []},
             }
         )
 
     try:
-        agent = TxNewsAgent(api_key=api_key, model=model)
+        agent = TxNewsAgent(api_key=str(api_key), model=str(model), base_url=str(base_url))
         out = agent.run(
             messages=[m.model_dump() for m in req.messages],
             max_steps=req.max_steps,

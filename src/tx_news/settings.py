@@ -1,4 +1,4 @@
-# Input: 环境变量（TXNEWS_*）+ config/config.yaml + config/sources.txt
+# Input: 环境变量（TXNEWS_* / DASHSCOPE_API_KEY / OpenAI兼容 LLM_*）+ config/config.yaml + config/sources.txt
 # Output: Settings/FileSettings（包含 infra/模型/源列表等配置）
 # Pos: 全局配置加载入口（变更时同步更新以上注释与所属目录 FOLDER.md）
 
@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -39,13 +39,72 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "txnews_articles"
 
-    # dashscope
-    dashscope_api_key: str | None = None
+    # LLM keys (backward-compatible)
+    # - preferred: TXNEWS_LLM_API_KEY (OpenAI-compatible services)
+    # - compatible: DASHSCOPE_API_KEY / TXNEWS_DASHSCOPE_API_KEY
+    dashscope_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DASHSCOPE_API_KEY", "TXNEWS_DASHSCOPE_API_KEY"),
+    )
+
+    llm_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TXNEWS_LLM_API_KEY",
+            "LLM_API_KEY",
+            "OPENAI_API_KEY",
+            "DASHSCOPE_API_KEY",
+        ),
+    )
+    llm_base_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TXNEWS_LLM_BASE_URL",
+            "LLM_BASE_URL",
+            "OPENAI_BASE_URL",
+        ),
+    )
+    llm_model_name: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TXNEWS_LLM_MODEL_NAME",
+            "LLM_MODEL_NAME",
+            "OPENAI_MODEL",
+        ),
+    )
 
     # local files
     config_dir: Path = Path("config")
     config_yaml: Path = Path("config/config.yaml")
     sources_txt: Path = Path("config/sources.txt")
+
+    def resolve_llm(self, file_cfg: "FileSettings") -> dict[str, Any]:
+        llm = file_cfg.llm or {}
+        base_url = (
+            (self.llm_base_url or "").strip()
+            or str(llm.get("base_url") or "").strip()
+            or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        )
+        model = (
+            (self.llm_model_name or "").strip()
+            or str(llm.get("model") or "").strip()
+            or "qwen3-max"
+        )
+        api_key = (
+            (self.llm_api_key or "").strip()
+            or (self.dashscope_api_key or "").strip()
+            or str(llm.get("api_key") or "").strip()
+            or None
+        )
+        timeout_seconds = int(llm.get("timeout_seconds") or 60)
+        provider = str(llm.get("provider") or "openai_compat")
+        return {
+            "provider": provider,
+            "base_url": base_url,
+            "model": model,
+            "api_key": api_key,
+            "timeout_seconds": timeout_seconds,
+        }
 
     def load_file_settings(self) -> FileSettings:
         if not self.config_yaml.exists():

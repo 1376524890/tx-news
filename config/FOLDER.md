@@ -9,7 +9,7 @@
 架构（≤3行）：
 - 以文件形式管理 v0 单机配置：crawler/retention/embedding/llm/tushare 等。
 - `sources.txt` 提供抓取入口 URL 列表（可注释/空行）。
-- 配置由 `src/tx_news/settings.py` 加载并注入各进程。
+- 配置由 `src/tx_news/settings.py` 加载并注入各进程（embedding 支持 `device/use_fp16/cache_dir` 等本地推理参数；Tushare 主数据支持缓存 TTL）。
 
 ## 文件
 

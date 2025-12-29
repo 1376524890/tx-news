@@ -17,7 +17,7 @@ from tx_news.analysis.rules import EventWindowPlanner, classify_event_type, pick
 from tx_news.analysis.tickers import TickerMatcher
 from tx_news.db import Article
 from tx_news.dedup.lsh import LshDeduper, LshIndex
-from tx_news.embedding.embedder import Embedder
+from tx_news.embedding.embedder import DEFAULT_EMBEDDING_MODEL, build_embedder
 from tx_news.normalize.metadata import extract_published_at
 from tx_news.normalize.readability import ReadabilityExtractor
 from tx_news.settings import get_settings
@@ -32,7 +32,7 @@ from tx_news.storage.postgres import (
     upsert_analysis,
     upsert_article,
 )
-from tx_news.storage.qdrant import QdrantStore
+from tx_news.storage.qdrant import QdrantStore, scored_point_canonical_id
 from tx_news.tasks.celery_app import celery_app
 from tx_news.tasks.deep_analysis import deep_optimize
 
@@ -93,13 +93,17 @@ def dedup_store(normalized: dict[str, Any]) -> dict[str, Any]:
 
     # Semantic dedup (only if not already a near-dup)
     embedding_cfg = file_cfg.embedding or {}
-    model_name = embedding_cfg.get("model_name", "BAAI/bge-small-zh-v1.5")
-    qdrant = QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection)
-    embedder = Embedder(model_name_or_path=model_name)
+    embedder, qdrant_strategy = build_embedder(embedding_cfg)
+    model_name = str(embedding_cfg.get("model_name") or DEFAULT_EMBEDDING_MODEL)
     vector = embedder.embed(normalized["text"][:4000])
+    qdrant = QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection).resolve_collection_for_embedding(
+        vector_size=len(vector),
+        model_name_or_path=model_name,
+        strategy=qdrant_strategy,
+    )
     hits = qdrant.search(vector=vector, limit=1)
     if hits and hits[0].score and hits[0].score >= 0.92:
-        canonical_id = str(hits[0].id)
+        canonical_id = scored_point_canonical_id(hits[0]) or str(hits[0].id)
 
     existing = get_article(engine, canonical_id)
     is_new_canonical = existing is None
@@ -112,7 +116,7 @@ def dedup_store(normalized: dict[str, Any]) -> dict[str, Any]:
             lsh_signature=None,
             embedding_model=model_name,
             embedding_dim=len(vector),
-            embedding_ref=f"qdrant:{settings.qdrant_collection}:{canonical_id}",
+            embedding_ref=f"qdrant:{qdrant.collection}:{qdrant.to_point_id(canonical_id)}",
             created_at=utcnow(),
             updated_at=utcnow(),
         )
@@ -182,10 +186,16 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
     }
 
     llm_used = False
-    api_key = settings.dashscope_api_key or ((file_cfg.llm or {}).get("api_key"))
+    llm = settings.resolve_llm(file_cfg)
+    api_key = llm.get("api_key")
     if api_key:
         llm_used = True
-        client = DashScopeClient(api_key=api_key, model=(file_cfg.llm or {}).get("model", "qwen3-max"))
+        client = DashScopeClient(
+            api_key=str(api_key),
+            model=str(llm.get("model") or "qwen3-max"),
+            base_url=str(llm.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            timeout_seconds=int(llm.get("timeout_seconds") or 60),
+        )
         system = (
             "你是金融新闻分析助手。请只输出一个 JSON 对象，不要输出任何多余文本。"
             "输出字段：event_type, entities, tickers, impact, index_view, evidence。"

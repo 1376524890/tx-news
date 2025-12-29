@@ -10,10 +10,10 @@ from typing import Any
 
 from tx_news.analysis.dashscope import DashScopeClient
 from tx_news.analysis.rules import EventWindowPlanner
-from tx_news.embedding.embedder import Embedder
+from tx_news.embedding.embedder import DEFAULT_EMBEDDING_MODEL, build_embedder
 from tx_news.settings import get_settings
 from tx_news.storage.postgres import get_analysis, get_article, get_latest_version, init_db, make_engine, upsert_analysis, insert_signal
-from tx_news.storage.qdrant import QdrantStore
+from tx_news.storage.qdrant import QdrantStore, scored_point_canonical_id
 from tx_news.tasks.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,8 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
     """
     settings = get_settings()
     file_cfg = settings.load_file_settings()
-    api_key = settings.dashscope_api_key or ((file_cfg.llm or {}).get("api_key"))
+    llm = settings.resolve_llm(file_cfg)
+    api_key = llm.get("api_key")
     if not api_key:
         return {"skipped": True, "reason": "no_api_key"}
 
@@ -42,16 +43,20 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
     init_db(engine)
 
     embedding_cfg = file_cfg.embedding or {}
-    model_name = embedding_cfg.get("model_name", "BAAI/bge-small-zh-v1.5")
-    embedder = Embedder(model_name_or_path=model_name)
-    qdrant = QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection)
+    embedder, qdrant_strategy = build_embedder(embedding_cfg)
+    model_name = str(embedding_cfg.get("model_name") or DEFAULT_EMBEDDING_MODEL)
 
     vector = embedder.embed(canonical["text"][:4000])
+    qdrant = QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection).resolve_collection_for_embedding(
+        vector_size=len(vector),
+        model_name_or_path=model_name,
+        strategy=qdrant_strategy,
+    )
     related = qdrant.search(vector=vector, limit=8)
 
     evidence: list[dict[str, Any]] = []
     for p in related:
-        cid = str(p.id)
+        cid = scored_point_canonical_id(p) or str(p.id)
         v = get_latest_version(engine, cid)
         a = get_article(engine, cid)
         if not a:
@@ -71,7 +76,12 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
     event_type = (current_analysis.event_type if current_analysis else "other")
     minutes = planner.window_minutes(event_type)
 
-    client = DashScopeClient(api_key=api_key, model=(file_cfg.llm or {}).get("model", "qwen3-max"))
+    client = DashScopeClient(
+        api_key=str(api_key),
+        model=str(llm.get("model") or "qwen3-max"),
+        base_url=str(llm.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        timeout_seconds=int(llm.get("timeout_seconds") or 60),
+    )
     system = (
         "你是金融新闻分析助手。请只输出一个 JSON 对象，不要输出任何多余文本。"
         "你需要在已有初步分析的基础上，结合相关证据进行二次推理与修正。"

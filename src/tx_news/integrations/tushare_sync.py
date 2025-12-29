@@ -24,7 +24,7 @@ class TushareSync:
     def _legacy_cache_path(self) -> Path:
         return Path("var/cache/tushare/stock_basic.json")
 
-    def load_cached_stock_basic(self) -> list[dict[str, Any]] | None:
+    def _read_cache_payload(self) -> dict[str, Any] | None:
         path = self._cache_path()
         if not path.exists():
             path = self._legacy_cache_path()
@@ -32,12 +32,34 @@ class TushareSync:
                 return None
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            rows = payload.get("rows")
-            if isinstance(rows, list):
-                return rows
+            return payload if isinstance(payload, dict) else None
         except Exception:
             return None
+
+    def load_cached_stock_basic(self) -> list[dict[str, Any]] | None:
+        payload = self._read_cache_payload()
+        if not payload:
+            return None
+        rows = payload.get("rows")
+        if isinstance(rows, list):
+            return rows
         return None
+
+    def cache_is_fresh(self, *, ttl_seconds: int) -> bool:
+        payload = self._read_cache_payload()
+        if not payload:
+            return False
+        fetched_at = payload.get("fetched_at")
+        if not fetched_at or not isinstance(fetched_at, str):
+            return False
+        try:
+            ts_dt = datetime.fromisoformat(fetched_at)
+        except Exception:
+            return False
+        if ts_dt.tzinfo is None:
+            ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+        age = datetime.now(timezone.utc) - ts_dt.astimezone(timezone.utc)
+        return age.total_seconds() <= int(ttl_seconds)
 
     def save_stock_basic_cache(self, rows: list[dict[str, Any]], *, source: str) -> None:
         path = self._cache_path()

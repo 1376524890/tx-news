@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy import desc, func, select
 
 from tx_news.db import Analysis, Article, ArticleVersion
-from tx_news.embedding.embedder import Embedder
+from tx_news.embedding.embedder import DEFAULT_EMBEDDING_MODEL, Embedder, build_embedder
 from tx_news.settings import get_settings
 from tx_news.storage.postgres import (
     get_a_share,
@@ -23,8 +23,10 @@ from tx_news.storage.postgres import (
     init_db,
     list_signals,
     make_engine,
+    session_scope,
 )
 from tx_news.storage.qdrant import QdrantStore
+from tx_news.storage.qdrant import scored_point_canonical_id
 
 
 def utcnow() -> datetime:
@@ -40,11 +42,13 @@ def _get_engine():
 
 
 @lru_cache(maxsize=1)
-def _get_embedder() -> Embedder:
+def _get_embedding_runtime() -> tuple[Embedder, str, str]:
     settings = get_settings()
     file_cfg = settings.load_file_settings()
-    model_name = (file_cfg.embedding or {}).get("model_name", "BAAI/bge-small-zh-v1.5")
-    return Embedder(model_name_or_path=model_name)
+    embedding_cfg = file_cfg.embedding or {}
+    embedder, qdrant_strategy = build_embedder(embedding_cfg)
+    model_name = str(embedding_cfg.get("model_name") or DEFAULT_EMBEDDING_MODEL)
+    return embedder, qdrant_strategy, model_name
 
 
 @lru_cache(maxsize=1)
@@ -57,6 +61,8 @@ def _get_qdrant() -> QdrantStore:
 class ToolContext:
     embedder: Embedder
     qdrant: QdrantStore
+    qdrant_strategy: str
+    embedding_model_name: str
 
     def __post_init__(self) -> None:
         self.engine = _get_engine()
@@ -64,17 +70,26 @@ class ToolContext:
 
 class TxNewsTools:
     def __init__(self) -> None:
+        embedder, qdrant_strategy, model_name = _get_embedding_runtime()
         self.ctx = ToolContext(
-            embedder=_get_embedder(),
+            embedder=embedder,
             qdrant=_get_qdrant(),
+            qdrant_strategy=qdrant_strategy,
+            embedding_model_name=model_name,
         )
 
     def search_news(self, *, q: str, limit: int = 10) -> list[dict[str, Any]]:
         vector = self.ctx.embedder.embed(q[:2000])
-        points = self.ctx.qdrant.search(vector=vector, limit=int(limit))
+        qdrant = self.ctx.qdrant.resolve_collection_for_embedding(
+            vector_size=len(vector),
+            model_name_or_path=self.ctx.embedding_model_name,
+            strategy=self.ctx.qdrant_strategy,
+        )
+        self.ctx.qdrant = qdrant
+        points = qdrant.search(vector=vector, limit=int(limit))
         out: list[dict[str, Any]] = []
         for p in points:
-            cid = str(p.id)
+            cid = scored_point_canonical_id(p) or str(p.id)
             a = get_article(self.ctx.engine, cid)
             v = get_latest_version(self.ctx.engine, cid)
             an = get_analysis(self.ctx.engine, cid)
@@ -97,14 +112,13 @@ class TxNewsTools:
 
     def list_recent(self, *, minutes: int = 180, limit: int = 30) -> list[dict[str, Any]]:
         cutoff = utcnow() - timedelta(minutes=int(minutes))
-        with self.ctx.engine.connect() as conn:
-            rows = conn.execute(
+        # Use ORM Session execution to ensure rows unpack as (ArticleVersion, Article, Analysis).
+        with session_scope(self.ctx.engine) as s:
+            rows = s.execute(
                 select(ArticleVersion, Article, Analysis)
                 .join(Article, Article.canonical_id == ArticleVersion.canonical_id)
                 .outerjoin(Analysis, Analysis.canonical_id == ArticleVersion.canonical_id)
-                .where(
-                    func.coalesce(ArticleVersion.published_at, ArticleVersion.fetched_at) >= cutoff
-                )
+                .where(func.coalesce(ArticleVersion.published_at, ArticleVersion.fetched_at) >= cutoff)
                 .order_by(desc(func.coalesce(ArticleVersion.published_at, ArticleVersion.fetched_at)))
                 .limit(int(limit))
             ).all()
