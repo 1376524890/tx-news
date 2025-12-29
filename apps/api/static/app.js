@@ -1,4 +1,4 @@
-// Input: 浏览器 UI 事件 + /chat、/signals、/admin/status 等 API
+// Input: 浏览器 UI 事件 + /chat/stream、/signals、/admin/status 等 API
 // Output: 对话页渲染、请求封装与本地会话存储
 // Pos: 对话页前端逻辑（变更时同步更新以上注释与所属目录 FOLDER.md）
 
@@ -93,6 +93,72 @@ function appendMessage(role, content, meta) {
   chat.scrollTop = chat.scrollHeight;
 }
 
+function appendStreamingAssistant() {
+  const chat = qs("chat");
+  const row = document.createElement("div");
+  row.className = "msg";
+
+  const roleEl = document.createElement("div");
+  roleEl.className = "role";
+  roleEl.textContent = "助手";
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble assistant";
+
+  const contentEl = document.createElement("div");
+  contentEl.className = "content";
+  contentEl.textContent = "";
+  bubble.appendChild(contentEl);
+
+  row.appendChild(roleEl);
+  row.appendChild(bubble);
+  chat.appendChild(row);
+  chat.scrollTop = chat.scrollHeight;
+
+  return {
+    setContent: (text) => {
+      contentEl.textContent = text || "";
+      chat.scrollTop = chat.scrollHeight;
+    },
+    setMeta: (meta) => {
+      if (!meta) return;
+      // Reuse render logic by removing and re-appending.
+      bubble.querySelectorAll(".meta").forEach((n) => n.remove());
+      const metaEl = document.createElement("div");
+      metaEl.className = "meta";
+
+      if (meta.tools && meta.tools.length) {
+        const title = document.createElement("div");
+        title.innerHTML = `<span class="pill">工具调用</span>`;
+        metaEl.appendChild(title);
+        for (const t of meta.tools) {
+          const item = document.createElement("div");
+          item.innerHTML = `<code>${escapeHtml(t.name)}(${escapeHtml(JSON.stringify(t.arguments || {}))})</code>`;
+          metaEl.appendChild(item);
+        }
+      }
+
+      if (meta.evidence && meta.evidence.length) {
+        const title = document.createElement("div");
+        title.style.marginTop = "8px";
+        title.innerHTML = `<span class="pill">证据</span>`;
+        metaEl.appendChild(title);
+        for (const e of meta.evidence) {
+          const item = document.createElement("div");
+          const url = e.url
+            ? `<a href="${escapeHtml(e.url)}" target="_blank" rel="noreferrer">${escapeHtml(e.url)}</a>`
+            : "-";
+          item.innerHTML = `<div>${escapeHtml(e.source_id || "-")} · ${escapeHtml(e.published_at || "-")} · ${url}</div>`;
+          metaEl.appendChild(item);
+        }
+      }
+
+      bubble.appendChild(metaEl);
+      chat.scrollTop = chat.scrollHeight;
+    },
+  };
+}
+
 async function api(path, options) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -157,6 +223,56 @@ async function refreshSignals() {
   }
 }
 
+function parseSseBlock(block) {
+  const lines = block.split("\n");
+  let event = "message";
+  const dataLines = [];
+  for (const line of lines) {
+    if (line.startsWith("event:")) event = line.slice("event:".length).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice("data:".length).trim());
+  }
+  return { event, data: dataLines.join("\n") };
+}
+
+async function chatStream(payload, handlers) {
+  const res = await fetch("/chat/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+  if (!res.body) throw new Error("stream not supported");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    while (true) {
+      const idx = buf.indexOf("\n\n");
+      if (idx < 0) break;
+      const block = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      const { event, data } = parseSseBlock(block);
+      if (!data) continue;
+      let obj = null;
+      try {
+        obj = JSON.parse(data);
+      } catch {
+        obj = { raw: data };
+      }
+      if (handlers && handlers[event]) {
+        await handlers[event](obj);
+      }
+    }
+  }
+}
+
 async function sendMessage(text) {
   const btn = qs("btnSend");
   btn.disabled = true;
@@ -168,17 +284,33 @@ async function sendMessage(text) {
     const payload = {
       messages: next.map((m) => ({ role: m.role, content: m.content })),
     };
-    const res = await api("/chat", { method: "POST", body: JSON.stringify(payload) });
+    const ui = appendStreamingAssistant();
+    let acc = "";
+    let finalMsg = null;
+
+    await chatStream(payload, {
+      ready: async () => {},
+      delta: async (d) => {
+        const chunk = (d && d.content) || "";
+        if (!chunk) return;
+        acc += chunk;
+        ui.setContent(acc);
+      },
+      tool: async () => {},
+      done: async (m) => {
+        finalMsg = m;
+      },
+    });
 
     const assistant = {
       role: "assistant",
-      content: (res.message && res.message.content) || "",
+      content: (finalMsg && finalMsg.content) || acc || "",
       ts: nowIso(),
-      meta: (res.message && res.message.meta) || null,
+      meta: (finalMsg && finalMsg.meta) || null,
     };
-    const final = [...next, assistant];
-    saveMessages(final);
-    appendMessage("assistant", assistant.content, assistant.meta);
+    ui.setContent(assistant.content);
+    ui.setMeta(assistant.meta);
+    saveMessages([...next, assistant]);
   } finally {
     btn.disabled = false;
   }

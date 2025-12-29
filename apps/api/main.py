@@ -1,5 +1,5 @@
 # Input: HTTP 请求 + Postgres/Qdrant/Redis/NATS 等依赖
-# Output: FastAPI 路由与静态 UI（/、/admin、/search、/chat 等）
+# Output: FastAPI 路由与静态 UI（/、/admin、/search、/chat、/chat/stream 等）
 # Pos: API 进程入口（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Query
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from redis import Redis
@@ -527,6 +527,10 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     message: dict[str, Any]
 
+def _sse(event: str, data: Any) -> str:
+    payload = json.dumps(data, ensure_ascii=False)
+    return f"event: {event}\ndata: {payload}\n\n"
+
 
 @app.post("/chat", response_model=ChatResponse, operation_id="chat_agent")
 def chat_agent(req: ChatRequest) -> ChatResponse:
@@ -578,3 +582,78 @@ def chat_agent(req: ChatRequest) -> ChatResponse:
                 "meta": {"tools": [], "evidence": []},
             }
         )
+
+
+@app.post("/chat/stream", operation_id="chat_agent_stream")
+def chat_agent_stream(req: ChatRequest) -> StreamingResponse:
+    settings = get_settings()
+    file_cfg = settings.load_file_settings()
+    llm = settings.resolve_llm(file_cfg)
+    api_key = llm.get("api_key")
+    model = llm.get("model") or "qwen3-max"
+    base_url = llm.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    timeout_seconds = int(llm.get("timeout_seconds") or 60)
+
+    def gen():
+        yield _sse("ready", {"ok": True})
+        if not api_key:
+            yield _sse(
+                "done",
+                {
+                    "role": "assistant",
+                    "content": (
+                        "未配置 LLM API Key：请在环境变量 `TXNEWS_LLM_API_KEY`（或兼容的 `DASHSCOPE_API_KEY` / `OPENAI_API_KEY`），"
+                        "或 `config/config.yaml` 的 `llm.api_key` 中配置后再试。"
+                    ),
+                    "meta": {"tools": [], "evidence": []},
+                },
+            )
+            return
+        try:
+            agent = TxNewsAgent(
+                api_key=str(api_key),
+                model=str(model),
+                base_url=str(base_url),
+                timeout_seconds=timeout_seconds,
+            )
+            for ev in agent.run_stream(
+                messages=[m.model_dump() for m in req.messages],
+                max_steps=req.max_steps,
+                recent_minutes=req.recent_minutes,
+            ):
+                t = ev.get("type")
+                if t == "delta":
+                    yield _sse("delta", {"content": ev.get("content") or ""})
+                elif t == "tool_call":
+                    yield _sse("tool", {"name": ev.get("name"), "arguments": ev.get("arguments")})
+                elif t == "done":
+                    yield _sse("done", ev.get("message") or {})
+                    return
+            yield _sse(
+                "done",
+                {"role": "assistant", "content": "对话失败：无返回", "meta": {"tools": [], "evidence": []}},
+            )
+        except AgentChatError as e:
+            yield _sse(
+                "done",
+                {"role": "assistant", "content": f"对话失败：{e}", "meta": {"tools": [], "evidence": []}},
+            )
+        except Exception as e:
+            yield _sse(
+                "done",
+                {
+                    "role": "assistant",
+                    "content": (
+                        "对话失败：系统检索/向量化/LLM 组件不可用。\n"
+                        f"错误：{e}\n"
+                        "请检查：`config/config.yaml` 的 `embedding.model_name`、Qdrant 是否正常运行，以及 LLM 的 base_url/api_key 配置。"
+                    ),
+                    "meta": {"tools": [], "evidence": []},
+                },
+            )
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
