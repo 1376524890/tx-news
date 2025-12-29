@@ -452,6 +452,10 @@ graph TB
   - 管理台（模块健康/进度/日志）：`http://localhost:8000/admin`
   - Tx-News API：`http://localhost:8000`
 
+### 10.1.2 一键启动（Windows）
+- 启动：`scripts\start.cmd`（双击）或 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\start.ps1`
+- 停止：`scripts\stop.cmd`（双击）或 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\stop.ps1`
+
 ### 10.2 Python 环境与依赖
 - `python -m venv .venv && source .venv/bin/activate`
 - `pip install -r requirements.txt`

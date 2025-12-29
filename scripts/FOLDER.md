@@ -9,6 +9,9 @@
 架构（≤3行）：
 - `start.sh`：准备 `.venv`/依赖 → 启动 Docker infra → 启动后台进程（worker/bridge/collector/api）。
 - `stop.sh`：停止 `.run/*.pid` 记录的后台进程（不自动 `docker compose down`）。
+- `start.ps1`：Windows PowerShell 一键启动（功能对齐 `start.sh`）。
+- `stop.ps1`：Windows PowerShell 停止 `.run/*.pid` 记录的后台进程。
+- `start.cmd`/`stop.cmd`：Windows 双击入口（调用对应 `.ps1`）。
 - 运行态输出：日志在 `var/log/`，PID 在 `.run/`。
 
 ## 文件
@@ -17,4 +20,8 @@
 | --- | --- | --- |
 | `start.sh` | 运维入口 | 一键启动本地开发/演示环境。 |
 | `stop.sh` | 运维入口 | 停止由 `start.sh` 启动的后台进程。 |
+| `start.ps1` | 运维入口 | Windows PowerShell 一键启动（对齐 `start.sh`）。 |
+| `stop.ps1` | 运维入口 | Windows PowerShell 停止由 `start.ps1` 启动的后台进程。 |
+| `start.cmd` | 运维入口 | Windows 双击启动（调用 `start.ps1`）。 |
+| `stop.cmd` | 运维入口 | Windows 双击停止（调用 `stop.ps1`）。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |
