@@ -89,16 +89,13 @@ def dedup_store(normalized: dict[str, Any]) -> dict[str, Any]:
 
     # Semantic dedup (only if not already a near-dup)
     embedding_cfg = file_cfg.embedding or {}
-    model_name = embedding_cfg.get("model_name", "bge-small-zh-v1.5")
+    model_name = embedding_cfg.get("model_name", "BAAI/bge-small-zh-v1.5")
     qdrant = QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection)
     embedder = Embedder(model_name_or_path=model_name)
     vector = embedder.embed(normalized["text"][:4000])
-    try:
-        hits = qdrant.search(vector=vector, limit=1)
-        if hits and hits[0].score and hits[0].score >= 0.92:
-            canonical_id = str(hits[0].id)
-    except Exception as e:
-        logger.warning("qdrant search failed (semantic dedup skipped): %s", e)
+    hits = qdrant.search(vector=vector, limit=1)
+    if hits and hits[0].score and hits[0].score >= 0.92:
+        canonical_id = str(hits[0].id)
 
     existing = get_article(engine, canonical_id)
     is_new_canonical = existing is None

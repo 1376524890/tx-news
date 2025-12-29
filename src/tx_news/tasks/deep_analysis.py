@@ -38,7 +38,7 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
     init_db(engine)
 
     embedding_cfg = file_cfg.embedding or {}
-    model_name = embedding_cfg.get("model_name", "bge-small-zh-v1.5")
+    model_name = embedding_cfg.get("model_name", "BAAI/bge-small-zh-v1.5")
     embedder = Embedder(model_name_or_path=model_name)
     qdrant = QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection)
 
@@ -92,4 +92,3 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
     upsert_analysis(engine, canonical["canonical_id"], event_type=str(result.get("event_type", event_type)), data=result, llm_used=True)
     insert_signal(engine, canonical["canonical_id"], "deep_analysis_updated", {"event_type": result.get("event_type", event_type)})
     return {"updated": True}
-

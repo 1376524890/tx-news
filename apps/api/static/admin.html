@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TX-News 管理台</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header class="header">
+      <div class="brand">
+        <div class="brand-title">TX-News 管理台</div>
+        <div class="brand-subtitle">模块健康 · 抓取/分析吞吐 · 日志</div>
+      </div>
+      <div class="panel-actions">
+        <a class="btn btn-ghost" href="/">返回对话</a>
+        <button class="btn btn-ghost" id="btnRefresh">刷新</button>
+      </div>
+    </header>
+
+    <main class="layout" style="grid-template-columns: 1fr 1fr">
+      <section class="panel">
+        <div class="panel-header">
+          <div class="panel-title">依赖健康</div>
+        </div>
+        <div class="side-body">
+          <div class="list" id="deps"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div class="panel-title">进程状态</div>
+        </div>
+        <div class="side-body">
+          <div class="list" id="procs"></div>
+        </div>
+      </section>
+
+      <section class="panel" style="grid-column: 1 / -1">
+        <div class="panel-header">
+          <div class="panel-title">抓取/分析进度</div>
+          <div class="panel-actions">
+            <select class="input" id="window" style="width: 180px; min-height: 40px">
+              <option value="30">近 30 分钟</option>
+              <option value="60" selected>近 60 分钟</option>
+              <option value="180">近 180 分钟</option>
+              <option value="1440">近 24 小时</option>
+            </select>
+          </div>
+        </div>
+        <div class="side-body">
+          <div class="kv">
+            <div class="k">raw_documents</div>
+            <div class="v" id="mRaw">-</div>
+            <div class="k">article_versions</div>
+            <div class="v" id="mVer">-</div>
+            <div class="k">analyses</div>
+            <div class="v" id="mAna">-</div>
+            <div class="k">lag(s)</div>
+            <div class="v" id="mLag">-</div>
+          </div>
+          <div class="list" id="latest"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div class="panel-title">A股主数据缓存（Tushare/AkShare）</div>
+        </div>
+        <div class="side-body">
+          <div class="list" id="tushare"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div class="panel-title">日志（tail）</div>
+          <div class="panel-actions">
+            <select class="input" id="logName" style="width: 190px; min-height: 40px">
+              <option value="api">api</option>
+              <option value="collector">collector</option>
+              <option value="nats_bridge">nats_bridge</option>
+              <option value="celery_worker">celery_worker</option>
+              <option value="bootstrap">bootstrap</option>
+            </select>
+          </div>
+        </div>
+        <div class="side-body">
+          <pre id="logTail" class="card" style="white-space: pre-wrap; overflow: auto; max-height: 420px"></pre>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/admin.js"></script>
+  </body>
+</html>

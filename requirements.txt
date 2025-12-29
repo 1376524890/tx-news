@@ -30,3 +30,4 @@ datasketch>=1.6.5
 sentence-transformers>=3.0.1
 
 tushare>=1.4.19
+akshare>=1.15.0

@@ -223,7 +223,7 @@ sequenceDiagram
 **“无 LLM”基础路径（建议必须可用）**
 - 词典+规则：行业/公司别名、宏观指标模板、事件触发词与正则模式
 - 传统 NLP（中文优先）：`HanLP`（分词/实体/依存等）+ 金融领域词典；分类器可用轻量模型微调
-- Embedding（v0 固定，CPU 友好）：`bge-small-zh-v1.5`（用于聚类/相似检索/语义去重/向量检索；后续可无缝升级到 GPU/更大模型）
+- Embedding（v0，CPU 友好）：`BAAI/bge-small-zh-v1.5`（或本地模型目录路径；用于聚类/相似检索/语义去重/向量检索；后续可无缝升级到 GPU/更大模型）
 
 **在线 LLM 增强（v0：DashScope `qwen3-max`）**
 - 用于结构化标注、影响推理、跨源归并解释、生成“可读的分析报告”
@@ -397,7 +397,7 @@ graph TB
 
 ## 7. v0 已选落地组合（单机起步，可迁移 K8s）
 `Python(Collector/Workers) + NATS JetStream + Celery + Redis + Postgres + MinIO + Qdrant`  
-（Extractor：`readability-lxml`；去重：LSH→本地 embedding 语义去重；embedding 复用到向量检索；本地 embedding：`bge-small-zh-v1.5`；在线 LLM：DashScope `qwen3-max`）
+（Extractor：`readability-lxml`；去重：LSH→本地 embedding 语义去重；embedding 复用到向量检索；本地 embedding：`BAAI/bge-small-zh-v1.5`；在线 LLM：DashScope `qwen3-max`）
 
 ---
 
@@ -443,6 +443,10 @@ graph TB
 
 ### 10.1.1 一键启动（Linux）
 - `bash scripts/start.sh`
+- 打开：
+  - Web UI（对话+信号展示）：`http://localhost:8000/`
+  - 管理台（模块健康/进度/日志）：`http://localhost:8000/admin`
+  - Tx-News API：`http://localhost:8000`
 
 ### 10.2 Python 环境与依赖
 - `python -m venv .venv && source .venv/bin/activate`
@@ -469,6 +473,7 @@ graph TB
 
 ### 10.7 启动 API
 - `uvicorn apps.api.main:app --host 0.0.0.0 --port 8000`
+- 打开 Web UI：`http://localhost:8000/`
 
 ### 10.7.1 启动 MCP（stdio）
 - `python -m apps.mcp.server`
@@ -480,10 +485,13 @@ graph TB
 - 信号列表：`GET /signals`
 - 事件时间线：`GET /events/{event_id}`
 - 个股画像：`GET /entities/{ts_code}`
+- 对话（Agent）：`POST /chat`（服务端会调用检索/数据库工具，不返回新闻原文）
 
 ### 10.9 维护任务
 - 同步 A 股主数据（可重复执行）：`python -m apps.sync_tushare`
 - 清理过期 raw（保留 7 天）：`python -c "from tx_news.tasks.maintenance import cleanup_raw; print(cleanup_raw.apply().get())"`
+- A 股主数据本地缓存：`var/cache/a_share/stock_basic.json`
+  - 优先 Tushare（字段更全），遇到频率限制/网络问题会自动尝试 AkShare，再不行回退本地缓存
 
 ---
 

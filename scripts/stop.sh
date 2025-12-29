@@ -16,5 +16,4 @@ for pidfile in "${RUN_DIR}"/*.pid; do
   rm -f "${pidfile}" || true
 done
 
-echo "Stopped."
-
+echo "Stopped. (Docker services are still running; use: docker compose down)"

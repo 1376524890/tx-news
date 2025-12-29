@@ -24,14 +24,31 @@ def sync_tushare() -> dict:
     settings = get_settings()
     file_cfg = settings.load_file_settings()
     token = (file_cfg.tushare or {}).get("token") or ""
-    if not token.strip():
-        raise RuntimeError("tushare.token is empty in config/config.yaml")
 
     engine = make_engine(settings.pg_dsn)
     init_db(engine)
-    rows = TushareSync(token=token).fetch_stock_basic()
+    sync = TushareSync(token=token)
+    source = "tushare"
+    try:
+        # prefer tushare for richer fields; can fail due to rate-limit/network
+        if token.strip():
+            rows = sync.fetch_stock_basic_tushare()
+        else:
+            raise RuntimeError("tushare.token is empty; skip tushare")
+    except Exception as e:
+        logger.warning("tushare fetch failed; try akshare then local cache: %s", e)
+        try:
+            rows = sync.fetch_stock_basic_akshare()
+            source = "akshare"
+        except Exception as e2:
+            logger.warning("akshare fetch failed; falling back to local cache: %s", e2)
+            cached = sync.load_cached_stock_basic()
+            if not cached:
+                raise
+            rows = cached
+            source = "cache"
     upsert_a_share_basic(engine, rows)
-    return {"rows": len(rows)}
+    return {"rows": len(rows), "source": source}
 
 
 @celery_app.task(name="tx_news.tasks.maintenance.cleanup_raw")
@@ -65,4 +82,3 @@ def cleanup_raw() -> dict:
         s.execute(delete(RawDoc).where(RawDoc.created_at < cutoff))
 
     return {"deleted_raw_docs": deleted, "cutoff": cutoff.isoformat()}
-

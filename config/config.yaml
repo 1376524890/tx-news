@@ -16,7 +16,7 @@ retention:
 
 embedding:
   # v0 CPU 友好；后续可替换为更大模型或 GPU 推理服务
-  model_name: bge-small-zh-v1.5
+  model_name: BAAI/bge-small-zh-v1.5
 
 llm:
   provider: dashscope
