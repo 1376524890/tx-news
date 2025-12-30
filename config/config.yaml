@@ -23,7 +23,7 @@ embedding:
   # 备选：`BAAI/bge-m3`（更强/更大，初次下载更慢）
   model_name: BAAI/bge-large-zh-v1.5
   # auto / cpu / cuda / cuda:0（多卡可用 CUDA_VISIBLE_DEVICES 控制进程绑定）
-  device: auto
+  device: cpu
   # GPU 上建议 true；CPU 上无影响
   use_fp16: true
   # 可选：指定 HuggingFace cache 目录（也可直接把 model_name 写成本地模型目录）

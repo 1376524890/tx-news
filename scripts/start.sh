@@ -250,6 +250,17 @@ trap stop_all INT TERM
 
 have "${PYTHON_BIN}" || die "python not found: ${PYTHON_BIN}"
 
+if ! have node || ! have npm; then
+  die "Node.js and npm are required for frontend build. Please install them."
+fi
+
+log "Step 0/10: Building frontend (apps/web)..."
+(
+  cd "${ROOT_DIR}/apps/web"
+  npm install --no-audit --no-fund --quiet
+  npm run build
+) || die "Frontend build failed."
+
 if [[ ! -d ".venv" ]]; then
   log "Step 1/10: Creating virtualenv in .venv (this may take a moment)..."
   "${PYTHON_BIN}" -m venv .venv

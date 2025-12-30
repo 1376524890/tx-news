@@ -45,7 +45,21 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="tx-news API", version="0.1.0")
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_DIR = Path(__file__).resolve().parents[2] / "apps" / "web" / "dist"
+
+# Mount /assets for Vue SPA
+if (STATIC_DIR / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
+
+
+@app.get("/vite.svg", include_in_schema=False)
+def vite_svg() -> Response:
+    f = STATIC_DIR / "vite.svg"
+    if f.exists():
+        return FileResponse(str(f))
+    return Response(status_code=404)
+
+
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -79,9 +93,9 @@ def ui_index() -> Response:
 
 @app.get("/admin", include_in_schema=False)
 def ui_admin() -> Response:
-    page = STATIC_DIR / "admin.html"
+    page = STATIC_DIR / "index.html"
     if not page.exists():
-        return HTMLResponse("<h1>TX-News Admin</h1><p>Admin UI not found.</p>")
+        return HTMLResponse("<h1>TX-News Admin</h1><p>UI build not found. Run npm run build.</p>")
     return FileResponse(str(page))
 
 

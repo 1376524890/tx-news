@@ -24,6 +24,7 @@
 
 ### 1.1 前置条件
 - Python >= 3.10
+- Node.js >= 18 (for frontend build)
 - Docker + Docker Compose
 - （可选）NVIDIA GPU（用于 embedding 加速；无 GPU 也可跑）
 - 网络：需要拉取 Docker 镜像；首次运行可能需要下载 embedding 模型与（可选）torch wheel
@@ -242,26 +243,17 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 ## 3. 用户界面（UI）说明
 
 ### 3.1 对话页（`/`）
-- 基于本地数据库与向量库检索当天新闻证据，再给出结构化总结
-- 对话走 `/chat/stream` SSE 流式输出，体验上“边生成边显示”
-- 助手回复支持 Markdown 渲染（安全子集：标题/列表/引用/代码块/链接/表格/加粗）
+- **v1 (Vue 3)**：基于 Vue 3 + TypeScript 重构的 SPA。
+  - 支持 SSE 流式对话，实时渲染 Markdown（`marked`）。
+  - 侧边栏实时展示信号（Polling），无需手动刷新。
+  - 工具调用（Tool Calls）实时可视化展示。
+- *v0 (Deprecated)*：原静态 HTML/JS 仍在 `apps/api/static`，但不再作为默认 UI。
 
 ### 3.2 管理台（`/admin`）
-管理台用于实时观测各板块状态与数据流：
-- **实时监控**：窗口内吞吐（raw/versions/analyses）、lag、JetStream pending（含 sparkline）
-- **数据流**：Collector → NATS → Worker → Postgres/Qdrant/MinIO 的健康概览
-- **依赖健康**：Postgres/Redis/NATS/MinIO/Qdrant
-- **进程状态**：worker/bridge/collector/api（基于 `.run/*.pid`）
-- **抓取/分析进度**：近 30/60/180/24h 的计数与最新条目
-- **主数据缓存**：A 股 stock_basic 缓存来源/时间/行数
-- **日志视图**：跟随/换行/级别筛选/搜索（来自 `/admin/logs/{name}`）
-
-管理台核心指标（汉化）：
-- 原始抓取 / 窗口：指定时间窗口内 `raw_documents` 总数
-- 版本入库 / 窗口：窗口内 `article_versions` 总数
-- 分析产出 / 窗口：窗口内 `analyses` 总数
-- 延迟（秒）：`raw.created_at` 最新时间 - `analyses.created_at` 最新时间（负值代表分析更快/或系统时间差异）
-- 队列积压：JetStream consumer 的 `num_pending`
+- **v1 (Vue 3)**：集成在 SPA 中的 `/admin` 路由。
+  - 实时监控（吞吐/Lag/NATS Pending）数据流。
+  - 日志 Tail 查看器（支持跟随/搜索/过滤）。
+  - 进程与依赖健康状态看板。
 
 ---
 
@@ -288,7 +280,7 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 - 向量库：Qdrant
 - Embedding：sentence-transformers（支持 GPU/FP16；模型可本地路径或 HF 下载）
 - LLM：OpenAI-compatible Chat Completions（默认 DashScope compatible-mode；可替换其它兼容服务）
-- 前端：纯静态（无 Node/无构建），SSE + 原生 JS + CSS
+- 前端：Vue 3 + TypeScript + Vite（SPA），由 API 进程挂载构建产物 `dist`。
 
 ### 4.3 端口与服务（默认）
 - API/UI：`http://localhost:8000`
@@ -529,6 +521,29 @@ v1 建议聚焦“检索质量 + 可观测性 + 成本治理 + 规模化”：
 - 代码风格：`ruff`（`pyproject.toml`）
   - `ruff check .`
 - 测试：`pytest -q`（如已安装 `requirements-dev.txt`）
+
+---
+
+## 11. 重构与更新说明 (2025-12-29)
+
+### 11.1 前端重构 (Frontend Refactor)
+- **架构变更**：从原生静态文件 (`apps/api/static/`) 迁移至现代前端工程 (`apps/web/`)。
+  - 技术栈：Vue 3 + TypeScript + Vite + Vue Router。
+  - 构建产物：`apps/web/dist/`，由 FastAPI 挂载于 `/` 和 `/static`。
+- **功能增强**：
+  - 动态路由：`/` (Chat) 与 `/admin` (Dashboard) 使用 Hash/History 模式切换。
+  - 交互优化：流式对话增加工具调用可视化；管理台增加自动刷新与日志实时跟随。
+- **运维集成**：
+  - `scripts/start.sh` 增加 Node.js 环境检查与自动构建步骤 (`npm install && npm run build`)。
+
+### 11.2 文档治理 (Documentation)
+- 全面补充了 `FOLDER.md` 目录索引，覆盖 `src/` 根目录及 `apps/web/` 各级子目录。
+- 确保每个关键模块（Views, Router, Components）都有架构说明。
+
+### 11.3 废弃/保留 (Deprecation)
+- `apps/api/static/`：原静态资源文件夹已不再被 API 默认引用，但保留用于参考或回滚。
+- 分析 LLM：目前支持通过 `.env` 配置本地 vLLM（OpenAI 兼容接口）以替代云端 API，从而降低 Token 消耗。
+
 
 
 ## 修改内容：

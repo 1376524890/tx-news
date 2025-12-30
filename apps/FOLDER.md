@@ -23,7 +23,8 @@
 
 | 子目录 | 地位 | 功能 |
 | --- | --- | --- |
-| `api/` | HTTP 服务 | FastAPI + 静态 UI。 |
+| `api/` | HTTP 服务 | FastAPI + 静态 UI 挂载。 |
+| `web/` | 前端 SPA | Vue 3 + TypeScript 源代码与构建。 |
 | `collector/` | 采集进程 | 拉取来源并发布 raw 事件。 |
 | `worker/` | 处理进程 | NATS→Celery 桥接与任务执行。 |
 | `mcp/` | 工具服务 | stdio JSON-RPC/MCP 工具接口。 |

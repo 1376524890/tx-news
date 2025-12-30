@@ -10,7 +10,8 @@
 - `apps/`: runnable entrypoints/services:
   - `apps/collector/`: pulls sources and publishes to NATS.
   - `apps/worker/`: NATS→Celery bridge + pipeline workers.
-  - `apps/api/`: FastAPI API + static UI (`apps/api/static/`).
+  - `apps/api/`: FastAPI API + serves `apps/web/dist` (frontend).
+  - `apps/web/`: Vue 3 + TypeScript frontend (SPA).
   - `apps/mcp/`: MCP server integration.
 - `config/`: local configuration (`config.yaml`) and source list (`sources.txt`).
 - `scripts/`: developer scripts (`start.sh`, `stop.sh`).
@@ -41,7 +42,7 @@
 ## Commit & Pull Request Guidelines
 
 - Commits follow a Conventional Commits-style prefix (e.g., `feat: ...`, `fix: ...`, `docs: ...`).
-- PRs include: what changed, how to run/verify (commands above), and UI screenshots when touching `apps/api/static/`.
+- PRs include: what changed, how to run/verify (commands above), and UI screenshots when touching `apps/web/` or `apps/api/static/`.
 
 ## Security & Configuration Tips
 
