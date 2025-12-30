@@ -1,0 +1,12 @@
+{
+  "txnews_deep_analysis_sft": {
+    "file_name": "txnews_deep_analysis_sft_alpaca.jsonl",
+    "formatting": "alpaca",
+    "columns": {
+      "instruction": "instruction",
+      "input": "input",
+      "output": "output"
+    }
+  }
+}
+

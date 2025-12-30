@@ -544,9 +544,32 @@ v1 建议聚焦“检索质量 + 可观测性 + 成本治理 + 规模化”：
 - `apps/api/static/`：原静态资源文件夹已不再被 API 默认引用，但保留用于参考或回滚。
 - 分析 LLM：目前支持通过 `.env` 配置本地 vLLM（OpenAI 兼容接口）以替代云端 API，从而降低 Token 消耗。
 
+### 11.4 大模型微调：深分析本地化、对话保留云端 (2025-12-30)
+
+修改范围（Scope）：
+- **仅替换“深度分析”模块的 LLM**：`src/tx_news/tasks/deep_analysis.py` 的二次推理与结构化回写计划切换到本地微调模型。
+- **用户对话保持 API 模型**：`/chat` 与 `/chat/stream` 仍使用云端/外部 OpenAI-compatible API，优先保证回答效果与稳定性。
+- **数据合规**：微调数据集只包含“改写后的摘要要点 + 链接/时间等元信息 + 结构化输出”，不包含新闻原文。
+
+实现方案（Implementation Plan）：
+1) **准备数据集（LLaMA-Factory）**：
+   - 数据目录：`finetune/datasets/`
+   - 数据集名：`txnews_deep_analysis_sft`（见 `finetune/datasets/dataset_info.json`）
+   - 训练文件：`finetune/datasets/txnews_deep_analysis_sft_alpaca.jsonl`
+2) **SFT 微调**：按 `finetune/sft.yaml` 配置 `dataset_dir=finetune/datasets`、`dataset=txnews_deep_analysis_sft`，运行 `bash finetune/run_sft.sh`。
+3) **本地推理服务**：用 `finetune/serve_vllm.sh` 启动 vLLM OpenAI-compatible 服务，得到 `base_url` 与 `model`。
+4) **队列级分流（推荐的最小改造方案）**：
+   - 将 `tx_news.tasks.deep_analysis.*` 路由到独立队列（例如 `deep`），启动 `deep-worker` 仅消费该队列，并把它的 LLM 指向本地 vLLM；
+   - 默认 `worker` 继续消费 `default` 队列（`pipeline.*` 包含 `analyze`），仍指向云端 API；
+   - API 进程的 chat 仍指向云端 API。
+   - 备注：如果不做队列拆分，而是仅用“进程级 env 分流”，由于 `analyze` 与 `deep_optimize` 同在 worker 侧，会一起切到本地模型（不符合“仅深分析本地化”的目标）。
+5) **代码级分流（推荐的后续改造）**：
+   - 在 `config/config.yaml` 与 env 中拆分 `llm.chat` / `llm.deep` 两套配置；
+   - `deep_analysis.py` 读取 `llm.deep`，`apps/api` 的 chat 读取 `llm.chat`；
+   - 保持 `DashScopeClient`（OpenAI-compatible）不变，仅切换 `base_url/model/api_key` 来源。
+
+预期收益：
+- 深分析输出格式更稳定（严格 JSON、事件类型/字段更贴合本项目）。
+- Token 成本可控：深分析链路由本地推理承担；对话仍用云端保障体验。
 
 
-## 修改内容：
-- 将前端静态页面更改为动态页面减少刷新
-- 将分析llm换为本地llm以节约token消耗（在这里可以使用经过微调的llm）
-- 彻底解决工具调用链问题，并在前端实时显示工具调用情况
