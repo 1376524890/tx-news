@@ -34,15 +34,12 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
     """
     settings = get_settings()
     file_cfg = settings.load_file_settings()
-    llm = settings.resolve_llm(file_cfg)
-    api_key = llm.get("api_key")
-    if not api_key:
-        return {"skipped": True, "reason": "no_api_key"}
+    llm = settings.resolve_llm_deep(file_cfg)
 
     engine = make_engine(settings.pg_dsn)
     init_db(engine)
 
-    embedding_cfg = file_cfg.embedding or {}
+    embedding_cfg = settings.resolve_embedding_cfg(file_cfg)
     embedder, qdrant_strategy = build_embedder(embedding_cfg)
     model_name = str(embedding_cfg.get("model_name") or DEFAULT_EMBEDDING_MODEL)
 
@@ -77,10 +74,10 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
     minutes = planner.window_minutes(event_type)
 
     client = DashScopeClient(
-        api_key=str(api_key),
-        model=str(llm.get("model") or "qwen3-max"),
-        base_url=str(llm.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        timeout_seconds=int(llm.get("timeout_seconds") or 60),
+        api_key=str(llm.get("api_key")) if llm.get("api_key") else None,
+        model=str(llm.get("model") or "deepseekr1-merged"),
+        base_url=str(llm.get("base_url") or "http://127.0.0.1:9999/v1"),
+        timeout_seconds=int(llm.get("timeout_seconds") or 120),
     )
     system = (
         "你是金融新闻分析助手。请只输出一个 JSON 对象，不要输出任何多余文本。"
@@ -96,7 +93,11 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
         f"请在 {minutes} 分钟的事件窗口假设下进行逻辑化分析，修正与补全结构化结果。"
     )
 
-    out = client.chat_json(system=system, user=user)
+    try:
+        out = client.chat_json(system=system, user=user)
+    except Exception as e:
+        logger.warning("deep_analysis llm failed; skipped canonical_id=%s err=%s", canonical["canonical_id"], e)
+        return {"skipped": True, "reason": "llm_failed", "error": str(e)}
     result = {
         **(current_analysis.data if current_analysis else {}),
         **out,

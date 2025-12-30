@@ -12,17 +12,35 @@ from collections.abc import Iterator
 import httpx
 
 
+def _extract_json_object(text: str) -> str | None:
+    s = (text or "").strip()
+    if not s:
+        return None
+    if s.startswith("{") and s.endswith("}"):
+        return s
+    i = s.find("{")
+    j = s.rfind("}")
+    if i < 0 or j < 0 or j <= i:
+        return None
+    return s[i : j + 1]
+
+
 @dataclass(frozen=True)
 class DashScopeClient:
-    api_key: str
+    api_key: str | None = None
     model: str = "qwen3-max"
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     timeout_seconds: int = 60
 
+    def _headers(self) -> dict[str, str]:
+        if not self.api_key:
+            return {}
+        return {"Authorization": f"Bearer {self.api_key}"}
+
     def chat_json(self, *, system: str, user: str) -> dict[str, Any]:
         url = f"{self.base_url}/chat/completions"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        payload = {
+        headers = self._headers()
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system},
@@ -33,10 +51,17 @@ class DashScopeClient:
         }
         with httpx.Client(timeout=self.timeout_seconds) as client:
             r = client.post(url, headers=headers, json=payload)
+            if r.status_code in {400, 422}:
+                # Some OpenAI-compatible services (or older vLLM) may not support response_format.
+                payload.pop("response_format", None)
+                r = client.post(url, headers=headers, json=payload)
             r.raise_for_status()
             data = r.json()
         content = data["choices"][0]["message"]["content"]
-        return json.loads(content)
+        obj = _extract_json_object(content)
+        if not obj:
+            raise ValueError("LLM did not return a JSON object")
+        return json.loads(obj)
 
     def _iter_sse_json(self, *, url: str, headers: dict[str, str], payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
         with httpx.Client(timeout=self.timeout_seconds) as client:
@@ -58,7 +83,7 @@ class DashScopeClient:
 
     def chat(self, *, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         url = f"{self.base_url}/chat/completions"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        headers = self._headers()
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -81,7 +106,7 @@ class DashScopeClient:
         Yields parsed JSON payloads for each `data: {...}` line (excluding [DONE]).
         """
         url = f"{self.base_url}/chat/completions"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        headers = self._headers()
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,

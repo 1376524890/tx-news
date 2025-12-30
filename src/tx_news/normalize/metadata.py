@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from bs4 import BeautifulSoup
 from dateutil import parser as dateparser

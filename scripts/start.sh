@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Input: 本地 Python/Docker/NVIDIA 环境 + config/.env + HuggingFace 镜像/缓存配置
-# Output: 自动安装匹配的 torch、预检 embedding 下载/加载、启动 v0 单机栈并写入 var/log 与 .run
+# Input: 本地 Python/Docker/NVIDIA 环境 + config/.env + HuggingFace 镜像/缓存配置 + (可选) conda env `vllm`
+# Output: 自动安装匹配的 torch、预检 embedding 下载/加载、可选启动 vLLM、本地栈拉起并做启动健康检查
 # Pos: 运维启动脚本（变更时同步更新以上注释与所属目录 FOLDER.md）
 set -euo pipefail
 
@@ -126,18 +126,19 @@ preflight_embedding() {
 import os
 import time
 
-import yaml
-from pathlib import Path
+from tx_news.settings import get_settings
 
-cfg_path = Path("config/config.yaml")
-cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
-embedding_cfg = (cfg.get("embedding") or {}) if isinstance(cfg, dict) else {}
+settings = get_settings()
+file_cfg = settings.load_file_settings()
+embedding_cfg = settings.resolve_embedding_cfg(file_cfg)
 
 device_cfg = str(embedding_cfg.get("device", "auto")).strip().lower()
 model_name = str(embedding_cfg.get("model_name") or "").strip()
 
 print("HF_ENDPOINT =", os.environ.get("HF_ENDPOINT"))
 print("HF_HOME     =", os.environ.get("HF_HOME"))
+print("TXNEWS_ACCELERATOR      =", os.environ.get("TXNEWS_ACCELERATOR"))
+print("TXNEWS_EMBEDDING_DEVICE =", os.environ.get("TXNEWS_EMBEDDING_DEVICE"))
 
 try:
     import torch
@@ -159,7 +160,7 @@ if device_cfg in {"auto"} or device_cfg.startswith("cuda"):
     if not torch.cuda.is_available():
         raise SystemExit(
             "ERROR: embedding.device expects CUDA, but torch.cuda.is_available() is False. "
-            "Fix your torch CUDA build/driver, or set embedding.device=cpu."
+            "Fix your torch CUDA build/driver, or set TXNEWS_ACCELERATOR=cpu / TXNEWS_EMBEDDING_DEVICE=cpu."
         )
 
 from tx_news.embedding.embedder import build_embedder
@@ -170,6 +171,7 @@ vec = embedder.embed("embedding 预检")
 dt = time.time() - t0
 
 print("embedding.model_name    =", model_name)
+print("embedding.device        =", device_cfg)
 print("embedding.dim           =", len(vec))
 print("qdrant.strategy         =", strategy)
 print(f"embedding.preflight_sec = {dt:.2f}")
@@ -206,6 +208,32 @@ while time.time() < deadline:
     time.sleep(1)
 print("TIMEOUT", file=sys.stderr)
 sys.exit(1)
+PY
+}
+
+wait_http() {
+  local url="$1"
+  local name="$2"
+  local timeout="${3:-60}"
+  log "Waiting for ${name} HTTP ${url} (timeout ${timeout}s)..."
+  "${PYTHON_BIN}" - <<PY
+import time
+import urllib.request
+
+url="${url}"
+deadline=time.time()+int("${timeout}")
+last_err=None
+while time.time() < deadline:
+  try:
+    with urllib.request.urlopen(url, timeout=3) as r:  # noqa: S310
+      status = int(getattr(r, "status", 200))
+      if 200 <= status < 300:
+        print("OK")
+        raise SystemExit(0)
+  except Exception as e:
+    last_err=e
+    time.sleep(1)
+raise SystemExit(f"TIMEOUT: {last_err}")
 PY
 }
 
@@ -254,7 +282,7 @@ if ! have node || ! have npm; then
   die "Node.js and npm are required for frontend build. Please install them."
 fi
 
-log "Step 0/10: Building frontend (apps/web)..."
+log "Step 0/11: Building frontend (apps/web)..."
 (
   cd "${ROOT_DIR}/apps/web"
   npm install --no-audit --no-fund --quiet
@@ -262,25 +290,25 @@ log "Step 0/10: Building frontend (apps/web)..."
 ) || die "Frontend build failed."
 
 if [[ ! -d ".venv" ]]; then
-  log "Step 1/10: Creating virtualenv in .venv (this may take a moment)..."
+  log "Step 1/11: Creating virtualenv in .venv (this may take a moment)..."
   "${PYTHON_BIN}" -m venv .venv
   log "Virtualenv created."
 else
-  log "Step 1/10: Virtualenv already exists (.venv)."
+  log "Step 1/11: Virtualenv already exists (.venv)."
 fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
-log "Step 2/10: Upgrading pip..."
+log "Step 2/11: Upgrading pip..."
 python -m pip install --upgrade pip 2>&1 | tee -a "${BOOTSTRAP_LOG}"
 
-log "Step 3/10: Auto-installing torch (CPU/CUDA)..."
+log "Step 3/11: Auto-installing torch (CPU/CUDA)..."
 install_torch_auto
 
-log "Step 4/10: Installing Python dependencies (requirements.txt)..."
+log "Step 4/11: Installing Python dependencies (requirements.txt)..."
 pip install -r requirements.txt 2>&1 | tee -a "${BOOTSTRAP_LOG}"
 
-log "Step 5/10: Installing this repo as editable package (pip install -e .)..."
+log "Step 5/11: Installing this repo as editable package (pip install -e .)..."
 pip install -e . 2>&1 | tee -a "${BOOTSTRAP_LOG}"
 log "Python deps installed. (bootstrap log: ${BOOTSTRAP_LOG})"
 
@@ -306,10 +334,10 @@ set -a
 source .env
 set +a
 
-log "Step 6/10: Preflight embedding (HF mirror + model load)..."
+log "Step 6/11: Preflight embedding (HF mirror + model load)..."
 preflight_embedding
 
-log "Step 7/10: Starting Docker services (postgres/redis/nats/minio/qdrant)..."
+log "Step 7/11: Starting Docker services (postgres/redis/nats/minio/qdrant)..."
 compose up -d
 
 wait_port "127.0.0.1" "5432" "Postgres" 90
@@ -320,7 +348,7 @@ wait_port "127.0.0.1" "6333" "Qdrant" 60
 log "Docker services are ready."
 
 # Optional: sync A-share master data if tushare.token is configured.
-log "Step 8/10: Optional Tushare A-share master data sync..."
+log "Step 8/11: Optional Tushare A-share master data sync..."
 TUSHARE_TOKEN="$("${PYTHON_BIN}" - <<'PY'
 import yaml
 from pathlib import Path
@@ -336,7 +364,24 @@ else
   log "WARN: tushare.token is empty; skip A-share master data sync."
 fi
 
-log "Step 9/10: Starting background processes (Celery worker / NATS bridge / Collector / API)..."
+if [[ "${TXNEWS_ACCELERATOR:-cpu}" == "gpu" ]]; then
+  log "Step 9/11: Starting vLLM (GPU0) for deep analysis..."
+  VLLM_SCRIPT="${TXNEWS_VLLM_SCRIPT:-finetune/result_model/deepseekr1_merged/serve_vllm_gpu0_9999.sh}"
+  VLLM_PORT="${TXNEWS_VLLM_PORT:-9999}"
+  VLLM_TIMEOUT="${TXNEWS_VLLM_TIMEOUT_SECONDS:-600}"
+  if [[ ! -x "${VLLM_SCRIPT}" ]]; then
+    die "TXNEWS_ACCELERATOR=gpu but vLLM script not found/executable: ${VLLM_SCRIPT}"
+  fi
+  start_bg "vllm" \
+    "cd '${ROOT_DIR}' && PORT='${VLLM_PORT}' bash '${VLLM_SCRIPT}'" \
+    "${LOG_DIR}/vllm.log"
+  wait_http "http://127.0.0.1:${VLLM_PORT}/v1/models" "vLLM" "${VLLM_TIMEOUT}"
+  log "vLLM is ready."
+else
+  log "Step 9/11: Skip vLLM (TXNEWS_ACCELERATOR=${TXNEWS_ACCELERATOR:-cpu})."
+fi
+
+log "Step 10/11: Starting background processes (Celery worker / NATS bridge / Collector / API)..."
 start_bg "celery_worker" \
   "cd '${ROOT_DIR}' && source .venv/bin/activate && celery -A tx_news.tasks.celery_app.celery_app worker -l INFO --pool=solo --concurrency=1" \
   "${LOG_DIR}/celery_worker.log"
@@ -353,10 +398,21 @@ start_bg "api" \
   "cd '${ROOT_DIR}' && source .venv/bin/activate && uvicorn apps.api.main:app --host 0.0.0.0 --port 8000" \
   "${LOG_DIR}/api.log"
 
-log "Step 10/10: Startup complete."
+log "Step 11/11: Startup checks..."
+wait_http "http://127.0.0.1:8000/health" "API /health" 60
+if [[ "${TXNEWS_ACCELERATOR:-cpu}" == "gpu" ]]; then
+  VLLM_PORT="${TXNEWS_VLLM_PORT:-9999}"
+  wait_http "http://127.0.0.1:${VLLM_PORT}/v1/models" "vLLM /v1/models" 10
+fi
+log "Startup checks passed."
+
+log "Startup complete."
 log "Web UI: http://localhost:8000/"
 log "Admin UI: http://localhost:8000/admin"
 log "API: http://localhost:8000 (health: /health, search: /search?q=...)"
+if [[ "${TXNEWS_ACCELERATOR:-cpu}" == "gpu" ]]; then
+  log "vLLM: http://localhost:${TXNEWS_VLLM_PORT:-9999}/v1 (models: /v1/models)"
+fi
 log "Logs: ${LOG_DIR}/ (bootstrap: ${BOOTSTRAP_LOG})"
 log "Stop: Ctrl+C here, or run: bash scripts/stop.sh"
 log "Container services remain running until: docker compose down"

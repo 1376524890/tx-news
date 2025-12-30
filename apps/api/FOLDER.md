@@ -9,7 +9,7 @@
 架构（≤3行）：
 - FastAPI 对外提供检索/对话/管理台等 HTTP 接口。
 - 静态挂载 `apps/web/dist` (Vue 3 SPA) 作为前端 UI（服务端为 `/`、`/admin`、`/dashboard` 提供刷新入口）。
-- 依赖 Postgres/Qdrant/Redis/NATS（通过 `tx_news.settings` 读取连接信息）。
+- 依赖 Postgres/Qdrant/Redis/NATS（通过 `tx_news.settings` 读取连接信息；chat 默认读取 `llm.chat`）。
 
 补充：
 - `/chat/stream` 使用 SSE 逐步输出 `delta`（文本增量）、`tool`/`tool_result`（工具调用进度）与 `done`（最终消息）。

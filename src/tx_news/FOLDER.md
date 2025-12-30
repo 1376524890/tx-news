@@ -18,7 +18,7 @@
 | `__init__.py` | 包入口 | 包版本与导出符号。 |
 | `db.py` | ORM 模型 | SQLAlchemy 表结构与关系定义。 |
 | `models.py` | DTO 模型 | Pydantic 数据结构（Raw/Normalized/Canonical/Analysis）。 |
-| `settings.py` | 配置入口 | 环境变量（含 OpenAI 兼容 LLM 参数）+ `config/` 文件加载与默认值。 |
+| `settings.py` | 配置入口 | 环境变量（含 `llm.chat`/`llm.deep` 分流）+ `config/` 文件加载与默认值。 |
 | `logging.py` | 基础设施 | 统一日志格式与等级配置。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |
 

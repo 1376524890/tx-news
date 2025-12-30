@@ -7,20 +7,21 @@
 # - This file is intentionally conservative; adjust per your GPU/CPU and LLaMA-Factory version.
 # - For LoRA/QLoRA, set the corresponding fields and ensure your environment supports it.
 
-model_name_or_path: /path/to/base-model
+model_name_or_path: /home/codeserver/Qwen3-8B
 
 stage: sft
 do_train: true
 finetuning_type: lora
 
-dataset_dir: /path/to/sft-datasets
-dataset: your_dataset_name
+# Set to the local dataset directory in this repo (or a mounted path, e.g. /datasets).
+dataset_dir: finetune/txdatasets
+dataset: txnews_deep_analysis_sft
 
 template: default
 cutoff_len: 4096
 max_samples: 200000
 
-output_dir: /path/to/output-lora
+output_dir: ./sft-qwen3
 overwrite_output_dir: true
 
 per_device_train_batch_size: 1

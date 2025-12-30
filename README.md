@@ -49,14 +49,19 @@ bash scripts/start.sh
 启动脚本会：
 - 创建 `.venv` 并安装依赖（可自动安装合适的 torch CPU/CUDA 版本）
 - 设置 HuggingFace 镜像/缓存并做 embedding 预检（提前下载/加载模型）
+- （可选）当 `.env` 设置 `TXNEWS_ACCELERATOR=gpu` 时，启动本地 vLLM（用于 `deep_analysis`）
 - `docker compose up -d` 启动 Postgres/Redis/NATS/MinIO/Qdrant
 - 启动后台进程：Celery worker、NATS bridge、Collector、API
+- 启动完成后做健康检查（API `/health`；若启用 vLLM 则检查 `/v1/models`）
 
 常用启动参数（写入 `.env`）：
 - `AUTO_TORCH=0/1`：是否自动安装 torch
 - `TORCH_VARIANT=cpu|cu121|cu124`：强制 torch 版本选择
 - `PREFLIGHT_EMBEDDING=0/1`：是否启动前预检 embedding（建议开启）
 - `HF_HOME=var/hf`：HuggingFace cache 目录
+- `TXNEWS_ACCELERATOR=cpu|gpu|auto`：CPU/GPU 模式（`gpu` 会尝试启动本地 vLLM，并让深分析优先走 `llm.deep`）
+- `TXNEWS_EMBEDDING_DEVICE=cpu|cuda:1|...`：embedding 设备显式指定（推荐双卡 `cuda:1`）
+- `TXNEWS_VLLM_SCRIPT=...` / `TXNEWS_VLLM_PORT=...`：一键启动时 vLLM 启动脚本与端口（默认 `9999`）
 
 多 GPU（例如 4090×2）建议：
 - v0 是“多进程”模型：worker/API/collector 都是独立进程；如要分卡运行，推荐手动启动并为不同进程设置 `CUDA_VISIBLE_DEVICES`。
@@ -107,13 +112,18 @@ AUTO_TORCH=1
 TORCH_VARIANT=cu121
 PREFLIGHT_EMBEDDING=1
 TXNEWS_LOG_LEVEL=INFO
+TXNEWS_ACCELERATOR=gpu
+TXNEWS_EMBEDDING_DEVICE=cuda:1
+# (optional) if you use the bundled vLLM script:
+# TXNEWS_VLLM_PORT=9999
 ```
 
 `config/config.yaml` 推荐：
 ```yaml
 embedding:
   model_name: BAAI/bge-large-zh-v1.5
-  device: auto
+  # device 推荐交给 `.env` 控制（TXNEWS_EMBEDDING_DEVICE / TXNEWS_ACCELERATOR）
+  device: cpu
   use_fp16: true
   qdrant_collection_strategy: auto
 
@@ -144,6 +154,7 @@ AUTO_TORCH=1
 TORCH_VARIANT=cpu
 PREFLIGHT_EMBEDDING=1
 TXNEWS_LOG_LEVEL=INFO
+TXNEWS_ACCELERATOR=cpu
 ```
 
 `config/config.yaml` 推荐：
@@ -553,23 +564,25 @@ v1 建议聚焦“检索质量 + 可观测性 + 成本治理 + 规模化”：
 
 实现方案（Implementation Plan）：
 1) **准备数据集（LLaMA-Factory）**：
-   - 数据目录：`finetune/datasets/`
-   - 数据集名：`txnews_deep_analysis_sft`（见 `finetune/datasets/dataset_info.json`）
-   - 训练文件：`finetune/datasets/txnews_deep_analysis_sft_alpaca.jsonl`
-2) **SFT 微调**：按 `finetune/sft.yaml` 配置 `dataset_dir=finetune/datasets`、`dataset=txnews_deep_analysis_sft`，运行 `bash finetune/run_sft.sh`。
-3) **本地推理服务**：用 `finetune/serve_vllm.sh` 启动 vLLM OpenAI-compatible 服务，得到 `base_url` 与 `model`。
+   - 数据目录：`finetune/txdatasets/`
+   - 数据集名：`txnews_deep_analysis_sft`（见 `finetune/txdatasets/dataset_info.json`）
+   - 训练文件：`finetune/txdatasets/txnews_deep_analysis_sft_alpaca.jsonl`
+2) **SFT 微调**：按 `finetune/sft.yaml` 配置 `dataset_dir=finetune/txdatasets`、`dataset=txnews_deep_analysis_sft`，运行 `bash finetune/run_sft.sh`。
+3) **本地推理服务**：用 `finetune/result_model/deepseekr1_merged/serve_vllm_gpu0_9999.sh` 启动 vLLM（conda env: `vllm`），默认：
+   - `CUDA_VISIBLE_DEVICES=0`（GPU0）
+   - `PORT=9999`（`base_url=http://127.0.0.1:9999/v1`）
+   - `SERVED_MODEL_NAME=deepseekr1-merged`（`model=deepseekr1-merged`）
 4) **队列级分流（推荐的最小改造方案）**：
    - 将 `tx_news.tasks.deep_analysis.*` 路由到独立队列（例如 `deep`），启动 `deep-worker` 仅消费该队列，并把它的 LLM 指向本地 vLLM；
    - 默认 `worker` 继续消费 `default` 队列（`pipeline.*` 包含 `analyze`），仍指向云端 API；
    - API 进程的 chat 仍指向云端 API。
    - 备注：如果不做队列拆分，而是仅用“进程级 env 分流”，由于 `analyze` 与 `deep_optimize` 同在 worker 侧，会一起切到本地模型（不符合“仅深分析本地化”的目标）。
-5) **代码级分流（推荐的后续改造）**：
-   - 在 `config/config.yaml` 与 env 中拆分 `llm.chat` / `llm.deep` 两套配置；
-   - `deep_analysis.py` 读取 `llm.deep`，`apps/api` 的 chat 读取 `llm.chat`；
-   - 保持 `DashScopeClient`（OpenAI-compatible）不变，仅切换 `base_url/model/api_key` 来源。
+5) **代码级分流（已落地）**：
+   - `deep_analysis.py` 读取 `llm.deep`，`apps/api` 与 `pipeline.analyze()` 读取 `llm.chat`；
+   - env 支持：`TXNEWS_LLM_CHAT_*` 与 `TXNEWS_LLM_DEEP_*`（兼容旧的 `TXNEWS_LLM_*` / `DASHSCOPE_API_KEY`）；
+   - 双卡建议：在 `.env` 设置 `TXNEWS_ACCELERATOR=gpu`，并用 `TXNEWS_EMBEDDING_DEVICE=cuda:1` 把 embedding 固定到 GPU1（GPU0 留给 vLLM）。
+   - CPU 保底：在 `.env` 设置 `TXNEWS_ACCELERATOR=cpu`，深分析自动回退到在线 LLM（与 `llm.chat` 一致）。
 
 预期收益：
 - 深分析输出格式更稳定（严格 JSON、事件类型/字段更贴合本项目）。
 - Token 成本可控：深分析链路由本地推理承担；对话仍用云端保障体验。
-
-

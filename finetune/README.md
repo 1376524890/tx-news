@@ -16,22 +16,41 @@ This repo does **not** run finetuning automatically, but provides a ready-to-fil
   - a base model directory (local path)
   - SFT dataset file(s) (local path; JSON/JSONL as required by your LLaMA-Factory version)
 
+## Install LLaMA-Factory (repo clone)
+This project keeps finetune tooling optional. A simple way to install LLaMA-Factory into your current `.venv`:
+```bash
+mkdir -p var/vendor
+git clone https://github.com/hiyouga/LLaMA-Factory.git var/vendor/LLaMA-Factory
+pip install -e var/vendor/LLaMA-Factory
+```
+
 ## Dataset (Deep Analysis)
 This repo includes a starter dataset and dataset registry for LLaMA-Factory:
-- Dataset directory: `finetune/datasets/`
+- Dataset directory: `finetune/txdatasets/`
 - Dataset name: `txnews_deep_analysis_sft`
-- Dataset file: `finetune/datasets/txnews_deep_analysis_sft_alpaca.jsonl`
+- Dataset file: `finetune/txdatasets/txnews_deep_analysis_sft_alpaca.jsonl`
 
 ## Quick start
 1) Copy and edit `finetune/sft.yaml`:
    - set `model_name_or_path`
-   - set `dataset_dir` to `finetune/datasets` and `dataset` to `txnews_deep_analysis_sft`
+   - set `dataset_dir` to `finetune/txdatasets` and `dataset` to `txnews_deep_analysis_sft`
    - set `output_dir`
 2) Run:
    - `bash finetune/run_sft.sh`
 
 ## Serving
-`finetune/serve_vllm.sh` is a helper to start `vLLM` OpenAI-compatible server after you have a trained model/adapter.
+This repo assumes you run vLLM from a dedicated conda env `vllm`.
+
+- Generic helper: `finetune/serve_vllm.sh` (fill `MODEL_DIR`, choose a port).
+- For the bundled merged model (GPU0 + port 9999): `finetune/result_model/deepseekr1_merged/serve_vllm_gpu0_9999.sh`
+
+After vLLM is up, point **deep analysis only** to it via `config/config.yaml`:
+- `llm.deep.base_url: http://127.0.0.1:9999/v1`
+- `llm.deep.model: deepseekr1-merged`
+- keep chat on cloud via `llm.chat.*`
+You can also control CPU/GPU behavior via `.env`:
+- `TXNEWS_ACCELERATOR=gpu`: deep analysis uses local vLLM; embedding defaults to GPU (recommended set `TXNEWS_EMBEDDING_DEVICE=cuda:1`)
+- `TXNEWS_ACCELERATOR=cpu`: deep analysis falls back to online LLM (`llm.chat`) as a safe baseline
 
 ## How to use it for Deep Analysis only (recommended)
 To keep chat and normal analysis on API LLM while running **deep analysis** on local model, the recommended wiring is:

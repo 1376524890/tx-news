@@ -10,4 +10,20 @@ set -euo pipefail
 CFG="${1:-finetune/sft.yaml}"
 echo "Running SFT with config: ${CFG}"
 
-llamafactory-cli train "${CFG}"
+if command -v llamafactory-cli >/dev/null 2>&1; then
+  llamafactory-cli train "${CFG}"
+  exit 0
+fi
+
+if python -c "import llamafactory" >/dev/null 2>&1; then
+  python -m llamafactory.cli train "${CFG}"
+  exit 0
+fi
+
+echo "[ERROR] LLaMA-Factory is not installed (missing 'llamafactory-cli' and python module 'llamafactory')." >&2
+echo "Install it first, for example:" >&2
+echo "  mkdir -p var/vendor" >&2
+echo "  git clone https://github.com/hiyouga/LLaMA-Factory.git var/vendor/LLaMA-Factory" >&2
+echo "  pip install -e var/vendor/LLaMA-Factory" >&2
+exit 127
+

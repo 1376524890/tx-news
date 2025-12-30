@@ -23,6 +23,7 @@ embedding:
   # 备选：`BAAI/bge-m3`（更强/更大，初次下载更慢）
   model_name: BAAI/bge-large-zh-v1.5
   # auto / cpu / cuda / cuda:0（多卡可用 CUDA_VISIBLE_DEVICES 控制进程绑定）
+  # 建议通过 `.env` 设置 `TXNEWS_ACCELERATOR` / `TXNEWS_EMBEDDING_DEVICE` 控制 CPU/GPU
   device: cpu
   # GPU 上建议 true；CPU 上无影响
   use_fp16: true
@@ -32,12 +33,25 @@ embedding:
   qdrant_collection_strategy: auto
 
 llm:
-  provider: dashscope
-  model: qwen3-max
-  # DashScope API Key 建议通过环境变量注入；若必须写配置文件，可放在这里
-  # api_key: ""
+  # chat：API/UI 对话（保持云服务）
+  chat:
+    provider: dashscope
+    model: qwen3-max
+    # base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    # DashScope API Key 建议通过环境变量注入；若必须写配置文件，可放在这里
+    # api_key: ""
+    timeout_seconds: 60
+
+  # deep：worker 深分析（推荐：本地 vLLM 微调模型）
+  deep:
+    provider: openai_compat
+    base_url: http://127.0.0.1:9999/v1
+    model: deepseekr1-merged
+    # 本地 vLLM 通常不需要 key；如你在网关上开启鉴权，可在此配置
+    # api_key: "local"
+    timeout_seconds: 120
+
   max_concurrency: 2
-  timeout_seconds: 60
 
 tushare:
   # Tushare token（必填；用于拉取 A 股主数据）

@@ -2,6 +2,7 @@
 # Output: 忽略本地运行态/缓存/密钥文件
 # Pos: 仓库维护配置（变更时同步更新以上注释与所属目录 FOLDER.md）
 
+result_model/
 .venv/
 __pycache__/
 *.pyc

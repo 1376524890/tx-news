@@ -693,7 +693,7 @@ def _sse(event: str, data: Any) -> str:
 def chat_agent(req: ChatRequest) -> ChatResponse:
     settings = get_settings()
     file_cfg = settings.load_file_settings()
-    llm = settings.resolve_llm(file_cfg)
+    llm = settings.resolve_llm_chat(file_cfg)
     api_key = llm.get("api_key")
     model = llm.get("model") or "qwen3-max"
     base_url = llm.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -704,7 +704,7 @@ def chat_agent(req: ChatRequest) -> ChatResponse:
                 "role": "assistant",
                 "content": (
                     "未配置 LLM API Key：请在环境变量 `TXNEWS_LLM_API_KEY`（或兼容的 `DASHSCOPE_API_KEY` / `OPENAI_API_KEY`），"
-                    "或 `config/config.yaml` 的 `llm.api_key` 中配置后再试。"
+                    "或 `config/config.yaml` 的 `llm.chat.api_key`（兼容 `llm.api_key`）中配置后再试。"
                 ),
                 "meta": {"tools": [], "evidence": []},
             }
@@ -745,7 +745,7 @@ def chat_agent(req: ChatRequest) -> ChatResponse:
 def chat_agent_stream(req: ChatRequest) -> StreamingResponse:
     settings = get_settings()
     file_cfg = settings.load_file_settings()
-    llm = settings.resolve_llm(file_cfg)
+    llm = settings.resolve_llm_chat(file_cfg)
     api_key = llm.get("api_key")
     model = llm.get("model") or "qwen3-max"
     base_url = llm.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -772,8 +772,8 @@ def chat_agent_stream(req: ChatRequest) -> StreamingResponse:
                 {
                     "role": "assistant",
                     "content": (
-                        "未配置 LLM API Key：请在环境变量 `TXNEWS_LLM_API_KEY`（或兼容的 `DASHSCOPE_API_KEY` / `OPENAI_API_KEY`），"
-                        "或 `config/config.yaml` 的 `llm.api_key` 中配置后再试。"
+                    "未配置 LLM API Key：请在环境变量 `TXNEWS_LLM_API_KEY`（或兼容的 `DASHSCOPE_API_KEY` / `OPENAI_API_KEY`），"
+                    "或 `config/config.yaml` 的 `llm.chat.api_key`（兼容 `llm.api_key`）中配置后再试。"
                     ),
                     "meta": {"tools": [], "evidence": []},
                 },

@@ -92,7 +92,7 @@ def dedup_store(normalized: dict[str, Any]) -> dict[str, Any]:
         canonical_id = canonical_candidate
 
     # Semantic dedup (only if not already a near-dup)
-    embedding_cfg = file_cfg.embedding or {}
+    embedding_cfg = settings.resolve_embedding_cfg(file_cfg)
     embedder, qdrant_strategy = build_embedder(embedding_cfg)
     model_name = str(embedding_cfg.get("model_name") or DEFAULT_EMBEDDING_MODEL)
     vector = embedder.embed(normalized["text"][:4000])
@@ -186,7 +186,7 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
     }
 
     llm_used = False
-    llm = settings.resolve_llm(file_cfg)
+    llm = settings.resolve_llm_chat(file_cfg)
     api_key = llm.get("api_key")
     if api_key:
         llm_used = True
@@ -220,9 +220,14 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
     upsert_analysis(engine, canonical["canonical_id"], event_type=str(result.get("event_type", event_type)), data=result, llm_used=llm_used)
     insert_signal(engine, canonical["canonical_id"], "analysis_updated", {"event_type": result.get("event_type", event_type), "event_id": event_id})
 
-    # Deep Path: only for newly created canonical articles, and only if LLM is available.
-    if canonical.get("is_new_canonical") and api_key:
-        deep_optimize.delay(canonical)
+    # Deep Path: only for newly created canonical articles, and only if deep LLM is available.
+    if canonical.get("is_new_canonical"):
+        deep_llm = settings.resolve_llm_deep(file_cfg)
+        deep_base_url = str(deep_llm.get("base_url") or "")
+        deep_api_key = deep_llm.get("api_key")
+        is_local = deep_base_url.startswith(("http://127.0.0.1", "http://localhost"))
+        if deep_api_key or is_local:
+            deep_optimize.delay(canonical)
 
     return result
 

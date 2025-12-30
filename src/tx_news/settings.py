@@ -24,6 +24,19 @@ class FileSettings(BaseModel):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TXNEWS_", env_file=".env", extra="ignore")
 
+    # Compute mode (used to choose local vLLM vs cloud fallback, and embedding device defaults)
+    # Values: cpu | gpu | auto
+    accelerator: str = Field(
+        default="cpu",
+        validation_alias=AliasChoices("TXNEWS_ACCELERATOR", "TXNEWS_DEVICE_MODE", "TXNEWS_GPU_MODE"),
+    )
+
+    # Embedding overrides (optional; prefer setting via env for multi-GPU binding)
+    embedding_device: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TXNEWS_EMBEDDING_DEVICE", "EMBEDDING_DEVICE"),
+    )
+
     # infra
     pg_dsn: str = "postgresql+psycopg://txnews:txnews@localhost:5432/txnews"
     redis_url: str = "redis://localhost:6379/0"
@@ -73,31 +86,97 @@ class Settings(BaseSettings):
         ),
     )
 
+    # LLM (role split): chat vs deep-analysis
+    llm_chat_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TXNEWS_LLM_CHAT_API_KEY",
+            "LLM_CHAT_API_KEY",
+        ),
+    )
+    llm_chat_base_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TXNEWS_LLM_CHAT_BASE_URL",
+            "LLM_CHAT_BASE_URL",
+        ),
+    )
+    llm_chat_model_name: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TXNEWS_LLM_CHAT_MODEL_NAME",
+            "LLM_CHAT_MODEL_NAME",
+        ),
+    )
+    llm_chat_timeout_seconds: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TXNEWS_LLM_CHAT_TIMEOUT_SECONDS",
+            "LLM_CHAT_TIMEOUT_SECONDS",
+        ),
+    )
+
+    llm_deep_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TXNEWS_LLM_DEEP_API_KEY",
+            "LLM_DEEP_API_KEY",
+        ),
+    )
+    llm_deep_base_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TXNEWS_LLM_DEEP_BASE_URL",
+            "LLM_DEEP_BASE_URL",
+        ),
+    )
+    llm_deep_model_name: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TXNEWS_LLM_DEEP_MODEL_NAME",
+            "LLM_DEEP_MODEL_NAME",
+        ),
+    )
+    llm_deep_timeout_seconds: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TXNEWS_LLM_DEEP_TIMEOUT_SECONDS",
+            "LLM_DEEP_TIMEOUT_SECONDS",
+        ),
+    )
+
     # local files
     config_dir: Path = Path("config")
     config_yaml: Path = Path("config/config.yaml")
     sources_txt: Path = Path("config/sources.txt")
 
+    def _accelerator_mode(self) -> str:
+        return (self.accelerator or "").strip().lower() or "cpu"
+
     def resolve_llm(self, file_cfg: "FileSettings") -> dict[str, Any]:
         llm = file_cfg.llm or {}
+        chat_cfg = llm.get("chat") if isinstance(llm.get("chat"), dict) else llm
         base_url = (
-            (self.llm_base_url or "").strip()
-            or str(llm.get("base_url") or "").strip()
+            (self.llm_chat_base_url or "").strip()
+            or (self.llm_base_url or "").strip()
+            or str(chat_cfg.get("base_url") or "").strip()
             or "https://dashscope.aliyuncs.com/compatible-mode/v1"
         )
         model = (
-            (self.llm_model_name or "").strip()
-            or str(llm.get("model") or "").strip()
+            (self.llm_chat_model_name or "").strip()
+            or (self.llm_model_name or "").strip()
+            or str(chat_cfg.get("model") or "").strip()
             or "qwen3-max"
         )
         api_key = (
-            (self.llm_api_key or "").strip()
+            (self.llm_chat_api_key or "").strip()
+            or (self.llm_api_key or "").strip()
             or (self.dashscope_api_key or "").strip()
-            or str(llm.get("api_key") or "").strip()
+            or str(chat_cfg.get("api_key") or "").strip()
             or None
         )
-        timeout_seconds = int(llm.get("timeout_seconds") or 60)
-        provider = str(llm.get("provider") or "openai_compat")
+        timeout_seconds = int(self.llm_chat_timeout_seconds or chat_cfg.get("timeout_seconds") or 60)
+        provider = str(chat_cfg.get("provider") or "openai_compat")
         return {
             "provider": provider,
             "base_url": base_url,
@@ -105,6 +184,76 @@ class Settings(BaseSettings):
             "api_key": api_key,
             "timeout_seconds": timeout_seconds,
         }
+
+    def resolve_llm_chat(self, file_cfg: "FileSettings") -> dict[str, Any]:
+        return self.resolve_llm(file_cfg)
+
+    def resolve_llm_deep(self, file_cfg: "FileSettings") -> dict[str, Any]:
+        # CPU-only fallback: keep original online LLM behavior for deep analysis as a safe baseline.
+        if self._accelerator_mode() == "cpu":
+            return self.resolve_llm(file_cfg)
+
+        llm = file_cfg.llm or {}
+        deep_cfg_is_split = isinstance(llm.get("deep"), dict)
+        deep_env_is_set = any(
+            [
+                (self.llm_deep_base_url or "").strip(),
+                (self.llm_deep_model_name or "").strip(),
+                (self.llm_deep_api_key or "").strip(),
+                self.llm_deep_timeout_seconds is not None,
+            ]
+        )
+        if not deep_cfg_is_split and not deep_env_is_set:
+            return self.resolve_llm(file_cfg)
+
+        deep_cfg = llm.get("deep") if deep_cfg_is_split else {}
+
+        base_url = (
+            (self.llm_deep_base_url or "").strip()
+            or str(deep_cfg.get("base_url") or "").strip()
+            or "http://127.0.0.1:9999/v1"
+        )
+        model = (
+            (self.llm_deep_model_name or "").strip()
+            or str(deep_cfg.get("model") or "").strip()
+            or "deepseekr1-merged"
+        )
+        api_key = (self.llm_deep_api_key or "").strip() or str(deep_cfg.get("api_key") or "").strip() or None
+        timeout_seconds = int(self.llm_deep_timeout_seconds or deep_cfg.get("timeout_seconds") or 120)
+        provider = str(deep_cfg.get("provider") or "openai_compat")
+        return {
+            "provider": provider,
+            "base_url": base_url,
+            "model": model,
+            "api_key": api_key,
+            "timeout_seconds": timeout_seconds,
+        }
+
+    def resolve_embedding_cfg(self, file_cfg: "FileSettings") -> dict[str, Any]:
+        """
+        Merge embedding config from file with env-controlled device selection.
+
+        Precedence:
+          1) TXNEWS_EMBEDDING_DEVICE (explicit)
+          2) TXNEWS_ACCELERATOR=gpu -> default to cuda:1 (keep GPU0 free for vLLM)
+          3) TXNEWS_ACCELERATOR=cpu -> force cpu
+          4) config/config.yaml value
+        """
+        cfg: dict[str, Any] = dict(file_cfg.embedding or {})
+
+        dev = (self.embedding_device or "").strip()
+        if dev:
+            cfg["device"] = dev
+            return cfg
+
+        mode = self._accelerator_mode()
+        if mode == "gpu":
+            cur = str(cfg.get("device") or "").strip().lower()
+            if not cur or cur in {"auto", "cpu"}:
+                cfg["device"] = "cuda:1"
+        elif mode == "cpu":
+            cfg["device"] = "cpu"
+        return cfg
 
     def load_file_settings(self) -> FileSettings:
         if not self.config_yaml.exists():
@@ -115,8 +264,8 @@ class Settings(BaseSettings):
     def load_sources(self) -> list[str]:
         if not self.sources_txt.exists():
             return []
-        lines = [l.strip() for l in self.sources_txt.read_text(encoding="utf-8").splitlines()]
-        return [l for l in lines if l and not l.startswith("#")]
+        lines = [line.strip() for line in self.sources_txt.read_text(encoding="utf-8").splitlines()]
+        return [line for line in lines if line and not line.startswith("#")]
 
 
 def get_settings() -> Settings:

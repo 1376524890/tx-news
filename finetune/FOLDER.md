@@ -25,4 +25,5 @@
 
 | 子目录 | 地位 | 功能 |
 | --- | --- | --- |
-| `datasets/` | 训练数据 | 面向 LLaMA-Factory 的数据集与 `dataset_info.json`。 |
+| `txdatasets/` | 训练数据 | 面向 LLaMA-Factory 的数据集与 `dataset_info.json`。 |
+| `result_model/` | 模型产物 | 本地训练/合并后的模型目录（可附带推理启动脚本）。 |
