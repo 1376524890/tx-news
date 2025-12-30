@@ -17,6 +17,6 @@
 | `App.vue` | 根组件 | 提供全局布局（Header）与 RouterView 容器。 |
 | `style.css` | 全局样式 | 定义 CSS 变量与通用 UI 组件样式（Button, Card）。 |
 | `router/` | 路由 | 路由定义。 |
-| `views/` | 视图 | 页面级组件。 |
+| `views/` | 视图 | 页面级组件（对话/看板/管理台；对话页支持工具调用实时进度展示）。 |
 | `assets/` | 资源 | 静态图片/样式资源。 |
-| `components/` | 组件 | 通用 UI 组件（HelloWorld 等）。 |
+| `components/` | 组件 | 通用 UI 组件（如 `TimeSeriesChart.vue` 折线图）。 |

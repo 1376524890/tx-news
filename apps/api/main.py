@@ -1,5 +1,5 @@
 # Input: HTTP 请求 + Postgres/Qdrant/Redis/NATS 等依赖
-# Output: FastAPI 路由与静态 UI（/、/admin、/search、/chat、/chat/stream 等）
+# Output: FastAPI 路由与静态 UI（/、/admin、/dashboard、/search、/chat、/chat/stream 等）
 # Pos: API 进程入口（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -99,6 +99,14 @@ def ui_admin() -> Response:
     return FileResponse(str(page))
 
 
+@app.get("/dashboard", include_in_schema=False)
+def ui_dashboard() -> Response:
+    page = STATIC_DIR / "index.html"
+    if not page.exists():
+        return HTMLResponse("<h1>TX-News Dashboard</h1><p>UI build not found. Run npm run build.</p>")
+    return FileResponse(str(page))
+
+
 @app.get("/search", response_model=list[SearchHit], operation_id="search_news")
 def search(q: str = Query(min_length=1), limit: int = Query(default=10, ge=1, le=50)):
     settings = get_settings()
@@ -175,6 +183,122 @@ def signals(limit: int = Query(default=50, ge=1, le=200)) -> list[dict[str, Any]
         }
         for r in rows
     ]
+
+
+@app.get("/dashboard/summary", operation_id="dashboard_summary")
+def dashboard_summary(
+    minutes: int = Query(default=180, ge=5, le=1440),
+    limit: int = Query(default=30, ge=1, le=200),
+) -> dict[str, Any]:
+    settings = get_settings()
+    engine = make_engine(settings.pg_dsn)
+    init_db(engine)
+
+    with engine.connect() as conn:
+        recent_rows = conn.execute(
+            text(
+                """
+                with latest_versions as (
+                    select distinct on (canonical_id)
+                        canonical_id, url, published_at, fetched_at
+                    from article_versions
+                    order by canonical_id, coalesce(published_at, fetched_at) desc
+                )
+                select
+                    s.canonical_id,
+                    s.kind,
+                    s.data as signal_data,
+                    s.created_at as signal_created_at,
+                    a.title as title,
+                    lv.url as url,
+                    lv.published_at as published_at,
+                    an.event_type as event_type,
+                    an.data as analysis_data,
+                    an.llm_used as llm_used
+                from signals s
+                left join articles a on a.canonical_id = s.canonical_id
+                left join latest_versions lv on lv.canonical_id = s.canonical_id
+                left join analyses an on an.canonical_id = s.canonical_id
+                order by s.created_at desc
+                limit :limit
+                """
+            ),
+            {"limit": limit},
+        ).mappings().all()
+
+        kinds = conn.execute(
+            text(
+                """
+                select kind, count(*) as c
+                from signals
+                where created_at >= now() - (:m || ' minutes')::interval
+                group by kind
+                order by c desc
+                """
+            ),
+            {"m": minutes},
+        ).all()
+        signals_by_kind = {k: int(c) for k, c in kinds}
+
+        event_types = conn.execute(
+            text(
+                """
+                select event_type, count(*) as c
+                from analyses
+                where created_at >= now() - (:m || ' minutes')::interval
+                group by event_type
+                order by c desc
+                limit 12
+                """
+            ),
+            {"m": minutes},
+        ).all()
+
+    recent: list[dict[str, Any]] = []
+    ticker_counts: dict[str, dict[str, Any]] = {}
+    for r in recent_rows:
+        published_at = r.get("published_at")
+        analysis_data = r.get("analysis_data") if isinstance(r.get("analysis_data"), dict) else None
+        tickers = (analysis_data or {}).get("tickers") if isinstance(analysis_data, dict) else None
+        if not isinstance(tickers, list):
+            tickers = []
+        for t in tickers:
+            if not isinstance(t, dict):
+                continue
+            ts_code = t.get("ts_code")
+            if not ts_code:
+                continue
+            if ts_code not in ticker_counts:
+                ticker_counts[ts_code] = {"ts_code": ts_code, "name": t.get("name"), "count": 0}
+            ticker_counts[ts_code]["count"] += 1
+
+        deep_optimized_at = (analysis_data or {}).get("deep_optimized_at") if isinstance(analysis_data, dict) else None
+        impact = (analysis_data or {}).get("impact") if isinstance(analysis_data, dict) else None
+        recent.append(
+            {
+                "canonical_id": r.get("canonical_id"),
+                "kind": r.get("kind"),
+                "created_at": r.get("signal_created_at").isoformat() if r.get("signal_created_at") else None,
+                "title": r.get("title"),
+                "url": r.get("url"),
+                "published_at": published_at.isoformat() if hasattr(published_at, "isoformat") and published_at else None,
+                "event_type": r.get("event_type"),
+                "tickers": tickers,
+                "impact": impact if isinstance(impact, dict) else None,
+                "llm_used": bool(r.get("llm_used")),
+                "deep_optimized_at": deep_optimized_at,
+            }
+        )
+
+    top_tickers = sorted(ticker_counts.values(), key=lambda x: int(x.get("count") or 0), reverse=True)[:12]
+
+    return {
+        "window_minutes": minutes,
+        "signals_by_kind": signals_by_kind,
+        "top_event_types": [{"event_type": et, "count": int(c)} for et, c in event_types],
+        "top_tickers": top_tickers,
+        "recent": recent,
+    }
 
 
 @app.get("/events/{event_id}", operation_id="get_event_timeline")
@@ -419,6 +543,15 @@ def admin_pipeline(minutes: int = Query(default=60, ge=5, le=1440)) -> dict[str,
         window_analyses = int(
             conn.execute(text("select count(*) from analyses where created_at >= now() - (:m || ' minutes')::interval"), {"m": minutes}).scalar() or 0
         )
+        window_deep = int(
+            conn.execute(
+                text(
+                    "select count(*) from signals where kind = 'deep_analysis_updated' and created_at >= now() - (:m || ' minutes')::interval"
+                ),
+                {"m": minutes},
+            ).scalar()
+            or 0
+        )
         kinds = conn.execute(
             text(
                 "select kind, count(*) as c from signals where created_at >= now() - (:m || ' minutes')::interval group by kind order by c desc"
@@ -457,6 +590,7 @@ def admin_pipeline(minutes: int = Query(default=60, ge=5, le=1440)) -> dict[str,
             "raw_documents": window_raw,
             "article_versions": window_versions,
             "analyses": window_analyses,
+            "deep_analyses": window_deep,
             "signals_by_kind": window_signals,
         },
         "latest": {
@@ -683,6 +817,24 @@ def chat_agent_stream(req: ChatRequest) -> StreamingResponse:
                         ev.get("arguments"),
                     )
                     yield _sse("tool", {"name": ev.get("name"), "arguments": ev.get("arguments")})
+                elif t == "tool_result":
+                    logger.info(
+                        "chat_stream tool_result trace=%s name=%s ok=%s duration_ms=%s summary=%s",
+                        trace_id,
+                        ev.get("name"),
+                        ev.get("ok"),
+                        ev.get("duration_ms"),
+                        ev.get("summary"),
+                    )
+                    yield _sse(
+                        "tool_result",
+                        {
+                            "name": ev.get("name"),
+                            "ok": ev.get("ok"),
+                            "duration_ms": ev.get("duration_ms"),
+                            "summary": ev.get("summary"),
+                        },
+                    )
                 elif t == "done":
                     done_at = time.time()
                     msg = ev.get("message") or {}

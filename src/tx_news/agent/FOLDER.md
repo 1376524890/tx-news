@@ -16,6 +16,6 @@
 | 文件 | 地位 | 功能 |
 | --- | --- | --- |
 | `__init__.py` | 包入口 | 导出 `TxNewsAgent`。 |
-| `txnews_agent.py` | Agent 核心 | LLM 对话 + 工具调用循环 + 证据收集。 |
+| `txnews_agent.py` | Agent 核心 | LLM 对话 + 工具调用循环 + 证据收集；`run_stream` 额外提供工具调用进度事件（tool_call/tool_result）。 |
 | `tools.py` | 工具实现 | 向量检索/近时列表/时间线/主数据查询。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |

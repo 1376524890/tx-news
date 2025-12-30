@@ -1,5 +1,18 @@
+<!-- Input: /admin/* API（轮询） -->
+<!-- Output: 管理台（健康/进程/趋势/日志） -->
+<!-- Pos: 前端管理台页（变更时同步更新以上注释与所属目录 FOLDER.md） -->
+
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
+import TimeSeriesChart from '../components/TimeSeriesChart.vue'
+
+type MetricPoint = {
+    ts: number
+    crawl: number
+    analysis: number
+    deep: number
+    backlog: number
+}
 
 const status = ref<any>({})
 const pipeline = ref<any>({})
@@ -11,26 +24,47 @@ const logName = ref('api')
 const logFollow = ref(true)
 
 const deps = ref<any[]>([])
+const points = ref<MetricPoint[]>([])
 
 async function api(path: string) {
     const res = await fetch(path)
     return res.json()
 }
 
+function safeNum(v: any): number {
+    const x = Number(v)
+    return Number.isFinite(x) ? x : 0
+}
+
+function pushPoint(p: MetricPoint) {
+    points.value.push(p)
+    if (points.value.length > 120) points.value.shift()
+}
+
 async function refreshAll() {
     try {
-        const st = await api("/admin/status")
+        const [st, pipe, procData, tsData] = await Promise.all([
+            api("/admin/status"),
+            api(`/admin/pipeline?minutes=${windowMinutes.value}`),
+            api("/admin/processes"),
+            api("/admin/masterdata"),
+        ])
+
         status.value = st
         deps.value = Object.entries(st.dependencies || {}).map(([k, v]: any) => ({ name: k, ...v }))
-        
-        pipeline.value = await api(`/admin/pipeline?minutes=${windowMinutes.value}`)
-        
-        const procData = await api("/admin/processes")
+
+        pipeline.value = pipe
         procs.value = procData.processes || []
-        
-        const tsData = await api("/admin/masterdata")
         tushare.value = tsData.stock_basic_cache || {}
-        
+
+        pushPoint({
+            ts: Date.now(),
+            crawl: safeNum(pipe?.counts?.raw_documents),
+            analysis: safeNum(pipe?.counts?.analyses),
+            deep: safeNum(pipe?.counts?.deep_analyses),
+            backlog: safeNum(st?.nats_jetstream?.num_pending),
+        })
+
         refreshLog()
     } catch (e) {
         console.error(e)
@@ -54,10 +88,32 @@ onMounted(() => {
     const t = setInterval(refreshAll, 5000)
     onUnmounted(() => clearInterval(t))
 })
+
+watch(windowMinutes, () => {
+    points.value = []
+    refreshAll()
+})
+
+function clearTrend() {
+    points.value = []
+}
 </script>
 
 <template>
-  <div class="admin-grid">
+  <div class="admin-grid span-all">
+      <section class="panel" style="grid-column: 1 / -1">
+        <div class="panel-header">
+          <div class="panel-title">实时趋势</div>
+          <div class="panel-actions">
+            <span class="badge badge-ok" v-if="points.length">points: {{ points.length }}</span>
+            <button class="btn btn-ghost" @click="clearTrend">清空</button>
+          </div>
+        </div>
+        <div class="side-body">
+          <TimeSeriesChart :points="points" />
+        </div>
+      </section>
+
       <section class="panel">
         <div class="panel-header">
           <div class="panel-title">依赖健康</div>
@@ -107,7 +163,9 @@ onMounted(() => {
             <div class="kv">
                 <div class="k">raw_documents</div> <div class="v">{{ (pipeline.counts || {}).raw_documents }}</div>
                 <div class="k">analyses</div> <div class="v">{{ (pipeline.counts || {}).analyses }}</div>
+                <div class="k">deep_analyses</div> <div class="v">{{ (pipeline.counts || {}).deep_analyses ?? 0 }}</div>
                 <div class="k">lag (s)</div> <div class="v">{{ pipeline.lag_seconds_raw_minus_analysis?.toFixed(1) || '-' }}</div>
+                <div class="k">queue pending</div> <div class="v">{{ status?.nats_jetstream?.num_pending ?? '-' }}</div>
             </div>
             
             <div class="list">

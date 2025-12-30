@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 from collections.abc import Iterator
@@ -172,9 +173,29 @@ class TxNewsAgent:
                     if not name or name not in self._tool_funcs:
                         raise AgentChatError(f"unknown tool: {name}")
 
+                    started_at = time.time()
                     yield {"type": "tool_call", "name": name, "arguments": args}
                     traces.append(ToolTrace(name=name, arguments=args))
-                    result = self._tool_funcs[name](**args)
+                    try:
+                        result = self._tool_funcs[name](**args)
+                    except Exception as e:
+                        elapsed_ms = int((time.time() - started_at) * 1000)
+                        yield {
+                            "type": "tool_result",
+                            "name": name,
+                            "ok": False,
+                            "duration_ms": elapsed_ms,
+                            "summary": {"error": str(e)},
+                        }
+                        raise
+                    elapsed_ms = int((time.time() - started_at) * 1000)
+                    yield {
+                        "type": "tool_result",
+                        "name": name,
+                        "ok": True,
+                        "duration_ms": elapsed_ms,
+                        "summary": self._tool_result_summary(name=name, result=result),
+                    }
 
                     if name in {"search_news", "list_recent"} and isinstance(result, list):
                         for item in result:
@@ -222,6 +243,22 @@ class TxNewsAgent:
             return
 
         raise AgentChatError("max_steps reached without final answer")
+
+    @staticmethod
+    def _tool_result_summary(*, name: str, result: Any) -> dict[str, Any]:
+        if isinstance(result, list):
+            return {"items": len(result)}
+        if isinstance(result, dict):
+            if result.get("error"):
+                return {"error": result.get("error")}
+            if name == "get_article_analysis":
+                return {"canonical_id": result.get("canonical_id"), "title": result.get("title")}
+            if name == "get_entity_profile":
+                return {"ts_code": result.get("ts_code"), "name": result.get("name")}
+            if name == "get_event_timeline":
+                return {"items": len(result.get("items") or [])}
+            return {k: result.get(k) for k in ("canonical_id", "event_id", "ts_code") if k in result}
+        return {"type": type(result).__name__}
 
     def tool_specs(self) -> list[dict[str, Any]]:
         return [

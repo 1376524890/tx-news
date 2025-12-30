@@ -1,3 +1,7 @@
+<!-- Input: 用户对话 + /chat/stream SSE（delta/tool/tool_result/done） -->
+<!-- Output: 对话 UI（含工具调用实时进度与证据展示） -->
+<!-- Pos: 前端对话页（变更时同步更新以上注释与所属目录 FOLDER.md） -->
+
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { marked } from 'marked'
@@ -10,6 +14,17 @@ interface Message {
     content: string
     ts?: string
     meta?: any
+}
+
+interface ToolProgressItem {
+    id: string
+    name: string
+    arguments?: any
+    status: 'running' | 'done' | 'error'
+    started_at: string
+    duration_ms?: number
+    summary?: any
+    error?: string
 }
 
 interface Signal {
@@ -127,7 +142,12 @@ async function sendMessage() {
     isLoading.value = true
     
     // Prepare streaming assistant message
-    const assistantMsg = ref<Message>({ role: 'assistant', content: '', ts: new Date().toISOString() })
+    const assistantMsg = ref<Message>({
+        role: 'assistant',
+        content: '',
+        ts: new Date().toISOString(),
+        meta: { tool_progress: [] as ToolProgressItem[] }
+    })
     messages.value.push(assistantMsg.value)
     
     try {
@@ -176,18 +196,69 @@ async function sendMessage() {
                 if (event === 'delta' && data.content) {
                     assistantMsg.value.content += data.content
                     scrollToBottom()
+                } else if (event === 'tool' && data.name) {
+                    const tp: ToolProgressItem[] = (assistantMsg.value.meta?.tool_progress || []) as ToolProgressItem[]
+                    tp.push({
+                        id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
+                        name: String(data.name),
+                        arguments: data.arguments,
+                        status: 'running',
+                        started_at: new Date().toISOString()
+                    })
+                    assistantMsg.value.meta = { ...(assistantMsg.value.meta || {}), tool_progress: tp }
+                    scrollToBottom()
+                } else if (event === 'tool_result' && data.name) {
+                    const tp: ToolProgressItem[] = (assistantMsg.value.meta?.tool_progress || []) as ToolProgressItem[]
+                    for (let i = tp.length - 1; i >= 0; i--) {
+                        const x = tp[i]!
+                        if (x.name === data.name && x.status === 'running') {
+                            x.status = data.ok ? 'done' : 'error'
+                            x.duration_ms = data.duration_ms
+                            x.summary = data.summary
+                            if (!data.ok && data.summary?.error) x.error = String(data.summary.error)
+                            break
+                        }
+                    }
+                    assistantMsg.value.meta = { ...(assistantMsg.value.meta || {}), tool_progress: tp }
+                    scrollToBottom()
                 } else if (event === 'done' && data.message) {
                     assistantMsg.value.content = data.message.content || assistantMsg.value.content
-                    assistantMsg.value.meta = data.message.meta
+                    assistantMsg.value.meta = {
+                        ...(data.message.meta || {}),
+                        tool_progress: (assistantMsg.value.meta?.tool_progress || []) as ToolProgressItem[]
+                    }
                 }
             }
         }
         saveHistory()
     } catch (e) {
         assistantMsg.value.content += `\n[Error: ${e}]`
+        const tp: ToolProgressItem[] = (assistantMsg.value.meta?.tool_progress || []) as ToolProgressItem[]
+        for (const x of tp) {
+            if (x.status === 'running') x.status = 'error'
+        }
     } finally {
         isLoading.value = false
     }
+}
+
+function fmtToolArgs(args: any): string {
+    try {
+        if (args == null) return ""
+        const s = JSON.stringify(args)
+        if (s.length <= 140) return s
+        return s.slice(0, 140) + "…"
+    } catch {
+        return ""
+    }
+}
+
+function fmtMs(ms?: number): string {
+    if (ms == null) return ""
+    const x = Number(ms)
+    if (!Number.isFinite(x)) return ""
+    if (x < 1000) return `${Math.round(x)}ms`
+    return `${(x / 1000).toFixed(2)}s`
 }
 </script>
 
@@ -208,6 +279,28 @@ async function sendMessage() {
           <div v-else class="content">{{ msg.content }}</div>
           
           <div v-if="msg.meta" class="meta">
+             <div v-if="msg.meta.tool_progress && msg.meta.tool_progress.length">
+                <div class="pill">工具进度</div>
+                <div class="tool-progress">
+                    <div v-for="t in msg.meta.tool_progress" :key="t.id" class="tool-step">
+                        <div class="tool-head">
+                            <div class="tool-left">
+                                <span class="tool-dot" :class="`tool-${t.status}`"></span>
+                                <code class="tool-name">{{ t.name }}({{ fmtToolArgs(t.arguments) }})</code>
+                            </div>
+                            <div class="tool-right mono">
+                                <span v-if="t.status === 'running'" class="muted">运行中…</span>
+                                <span v-else-if="t.status === 'done'" class="muted">{{ fmtMs(t.duration_ms) }}</span>
+                                <span v-else class="muted">失败</span>
+                            </div>
+                        </div>
+                        <div v-if="t.summary && (t.summary.items != null || t.summary.error)" class="tool-sub muted">
+                            <span v-if="t.summary.items != null">items={{ t.summary.items }}</span>
+                            <span v-else-if="t.summary.error">error={{ t.summary.error }}</span>
+                        </div>
+                    </div>
+                </div>
+             </div>
              <div v-if="msg.meta.tools && msg.meta.tools.length">
                 <div class="pill">工具调用</div>
                 <div v-for="t in msg.meta.tools" :key="t.name">

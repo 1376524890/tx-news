@@ -16,8 +16,9 @@
 | 文件 | 地位 | 功能 |
 | --- | --- | --- |
 | `src/main.ts` | 入口 | 挂载 Vue 应用与 Router。 |
-| `src/router/` | 路由 | 定义 `/` (Chat) 与 `/admin` (Dashboard) 路由。 |
-| `src/views/` | 页面 | `ChatView.vue` 与 `AdminView.vue`。 |
+| `src/router/` | 路由 | 定义 `/` (Chat)、`/dashboard` (看板) 与 `/admin` (管理台) 路由。 |
+| `src/views/` | 页面 | `ChatView.vue`（对话）、`DashboardView.vue`（看板）、`AdminView.vue`（管理台）。 |
+| `src/components/` | 组件 | 通用组件（如 `TimeSeriesChart.vue` 折线图）。 |
 | `src/style.css` | 样式 | 全局样式（移植自原 static/style.css）。 |
 | `package.json` | 依赖 | Vue, Vite, vue-router, marked 等。 |
 | `vite.config.ts` | 配置 | 开发代理与构建配置。 |
