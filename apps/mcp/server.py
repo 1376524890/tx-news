@@ -81,7 +81,7 @@ def tool_call(name: str, arguments: dict[str, Any]) -> Any:
     if name == "search_news":
         q = str(arguments.get("query") or "")
         limit = int(arguments.get("limit") or 10)
-        embedding_cfg = file_cfg.embedding or {}
+        embedding_cfg = settings.resolve_embedding_cfg(file_cfg)
         embedder, qdrant_strategy = build_embedder(embedding_cfg)
         model_name = str(embedding_cfg.get("model_name") or DEFAULT_EMBEDDING_MODEL)
         vector = embedder.embed(q[:2000])

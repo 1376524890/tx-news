@@ -301,7 +301,7 @@ def dashboard_summary(
 def search(q: str = Query(min_length=1), limit: int = Query(default=10, ge=1, le=50)):
     settings = get_settings()
     file_cfg = settings.load_file_settings()
-    embedding_cfg = file_cfg.embedding or {}
+    embedding_cfg = settings.resolve_embedding_cfg(file_cfg)
     embedder, qdrant_strategy = build_embedder(embedding_cfg)
     model_name = str(embedding_cfg.get("model_name") or DEFAULT_EMBEDDING_MODEL)
     vector = embedder.embed(q[:2000])
@@ -530,6 +530,13 @@ def _sse(event: str, data: Any) -> str:
     payload = json.dumps(data, ensure_ascii=False)
     return f"event: {event}\ndata: {payload}\n\n"
 
+def _config_url(request: Request) -> str:
+    # Prefer the public same-origin config page (works behind reverse proxies / tunnels).
+    base = str(getattr(request, "base_url", "") or "").rstrip("/")
+    if base:
+        return f"{base}/config"
+    return "/config"
+
 
 @app.post("/chat", response_model=ChatResponse, operation_id="chat_agent")
 def chat_agent(req: ChatRequest, request: Request) -> ChatResponse:
@@ -546,7 +553,7 @@ def chat_agent(req: ChatRequest, request: Request) -> ChatResponse:
             return ChatResponse(
                 message={
                     "role": "assistant",
-                    "content": "未配置个人 LLM：请先访问 http://localhost:8001/ 设置 base_url/model/api_key。",
+                    "content": f"未配置个人 LLM：请先访问 {_config_url(request)} 设置 base_url/model/api_key。",
                     "meta": {"tools": [], "evidence": []},
                 }
             )
@@ -624,7 +631,7 @@ def chat_agent_stream(req: ChatRequest, request: Request) -> StreamingResponse:
                     "done",
                     {
                         "role": "assistant",
-                        "content": "未配置个人 LLM：请先访问 http://localhost:8001/ 设置 base_url/model/api_key。",
+                        "content": f"未配置个人 LLM：请先访问 {_config_url(request)} 设置 base_url/model/api_key。",
                         "meta": {"tools": [], "evidence": []},
                     },
                 )

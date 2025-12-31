@@ -13,6 +13,7 @@
 
 补充：
 - `/chat/stream` 使用 SSE 逐步输出 `delta`（文本增量）、`tool`/`tool_result`（工具调用进度）与 `done`（最终消息）。
+- embedding 配置通过 `Settings.resolve_embedding_cfg()` 统一解析：默认强制使用 CPU（除非显式设置 `TXNEWS_EMBEDDING_DEVICE`），避免在 API/工具侧出现“配置不一致导致 500”。
 - `/status`、`/signals`、`/dashboard/summary`、`/api/config` 默认返回 `Cache-Control: no-store`，避免被 Cloudflare Tunnel/反代缓存导致“长时间不更新”。
 
 ## 文件

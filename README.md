@@ -26,7 +26,7 @@
 - Python >= 3.10
 - Node.js >= 18 (for frontend build)
 - Docker + Docker Compose
-- （可选）NVIDIA GPU（用于 vLLM 加速；无 GPU 也可跑，embedding 总是使用 CPU）
+- （可选）NVIDIA GPU（用于 vLLM 加速；无 GPU 也可跑，embedding 默认使用 CPU，除非显式设置 `TXNEWS_EMBEDDING_DEVICE`）
 - 网络：需要拉取 Docker 镜像；首次运行可能需要下载 embedding 模型与（可选）torch wheel
 
 ### 1.2 一键启动
@@ -51,7 +51,7 @@ bash scripts/start.sh
 - 设置 HuggingFace 镜像/缓存并做 embedding 预检（提前下载/加载模型）
 - （可选）当 `.env` 设置 `TXNEWS_ACCELERATOR=gpu` 时，启动本地 vLLM（用于 `deep_analysis`）
 - `docker compose up -d` 启动 Postgres/Redis/NATS/MinIO/Qdrant
-- 启动后台进程：Celery worker、NATS bridge、Collector、API
+- 启动后台进程：Celery worker、NATS bridge、Collector、API（8000）、Config（8001，可选）
 - 启动完成后做健康检查（API `/health`；若启用 vLLM 则检查 `/v1/models`）
 
 常用启动参数（写入 `.env`）：
@@ -60,13 +60,13 @@ bash scripts/start.sh
 - `PREFLIGHT_EMBEDDING=0/1`：是否启动前预检 embedding（建议开启）
 - `HF_HOME=var/hf`：HuggingFace cache 目录
 - `TXNEWS_ACCELERATOR=cpu|gpu|auto`：CPU/GPU 模式（`gpu` 会尝试启动本地 vLLM，并让深分析优先走 `llm.deep`）
-- `TXNEWS_EMBEDDING_DEVICE=cpu|cuda:1|...`：embedding 设备显式指定（现在总是默认使用 `cpu`）
+- `TXNEWS_EMBEDDING_DEVICE=cpu|cuda:1|...`：embedding 设备显式指定（默认 `cpu`；设置后覆盖默认行为）
 - `TXNEWS_VLLM_SCRIPT=...` / `TXNEWS_VLLM_PORT=...`：一键启动时 vLLM 启动脚本与端口（默认 `9999`）
 
 多 GPU（例如 4090×2）建议：
 - v1 是“多进程”模型：worker/API/collector 都是独立进程；vLLM 会自动使用两张 GPU（tensor-parallel-size=2）解决 KV 缓存不足问题。
 - `config/config.yaml: embedding.model_name` 默认选用较大中文向量模型；若你更关注速度或显存占用，可换为 `BAAI/bge-small-zh-v1.5`（质量/速度权衡）。
-- embedding 总是使用 CPU，无需 GPU 资源。
+- embedding 默认使用 CPU（除非显式设置 `TXNEWS_EMBEDDING_DEVICE`），通常无需占用 GPU 资源。
 
 4) 打开页面：
 - 对话 UI：`http://localhost:8000/`
@@ -114,7 +114,7 @@ TORCH_VARIANT=cu121
 PREFLIGHT_EMBEDDING=1
 TXNEWS_LOG_LEVEL=INFO
 TXNEWS_ACCELERATOR=gpu
-# TXNEWS_EMBEDDING_DEVICE=cpu  # embedding 现在总是默认使用 CPU
+# TXNEWS_EMBEDDING_DEVICE=cpu  # embedding 默认使用 CPU（除非显式设置为 cuda:...）
 # (optional) if you use the bundled vLLM script:
 # TXNEWS_VLLM_PORT=9999
 ```
@@ -123,7 +123,7 @@ TXNEWS_ACCELERATOR=gpu
 ```yaml
 embedding:
   model_name: BAAI/bge-large-zh-v1.5
-  # device 推荐使用 CPU，现在总是默认使用 CPU
+  # device 推荐使用 CPU（v1 默认会覆盖为 cpu，除非设置 TXNEWS_EMBEDDING_DEVICE）
   device: cpu
   use_fp16: false  # 仅在 GPU 上有效，CPU 模式下会被忽略
   qdrant_collection_strategy: auto
@@ -287,13 +287,14 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 - OLTP：PostgreSQL（SQLAlchemy）
 - 对象存储：MinIO（S3 API）
 - 向量库：Qdrant
-- Embedding：sentence-transformers（支持 GPU/FP16；模型可本地路径或 HF 下载）
+- Embedding：sentence-transformers（默认 CPU；可用 `TXNEWS_EMBEDDING_DEVICE` 显式覆盖；模型可本地路径或 HF 下载）
 - LLM：OpenAI-compatible Chat Completions（默认 DashScope compatible-mode；可替换其它兼容服务）
-- 前端：Vue 3 + TypeScript + Vite（SPA），由 API 进程挂载构建产物 `dist`。
+- 前端：Vue 3 + TypeScript + Vite（SPA），由 API 进程挂载构建产物 `dist_public/`（可选 `dist_admin/`）。
 
 ### 4.3 端口与服务（默认）
 - 公网 API + 对话 UI：`http://localhost:8000`
 - 配置 UI：`http://localhost:8000/config`
+- （可选）独立配置服务：`http://localhost:8001/`
 - Postgres：`localhost:5432`
 - Redis：`localhost:6379`
 - NATS：`localhost:4222`（监控 `http://localhost:8222`）
@@ -307,17 +308,17 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 ### 5.1 高层数据流
 ```mermaid
 graph LR
-  S[Sources] --> C[apps/collector]
-  C -->|publish txnews.raw| JS[NATS JetStream]
-  JS --> B[apps/worker/nats_bridge]
-  B -->|ingest_raw.delay| Q[Celery/Redis]
-  Q --> W[Celery Worker]
-  W --> P[(Postgres)]
-  W --> M[(MinIO)]
-  W --> V[(Qdrant)]
-  API[apps/api] --> P
-  API --> V
-  UI[static UI] --> API
+	  S[Sources] --> C[apps/collector]
+	  C -->|publish txnews.raw| JS[NATS JetStream]
+	  JS --> B[apps/worker/nats_bridge]
+	  B -->|ingest_raw.delay| Q[Celery/Redis]
+	  Q --> W[Celery Worker]
+	  W --> P[(Postgres)]
+	  W --> M[(MinIO)]
+	  W --> V[(Qdrant)]
+	  API[apps/api] --> P
+	  API --> V
+	  UI[Vue SPA] --> API
 ```
 
 ### 5.2 单条新闻的任务链
@@ -381,6 +382,7 @@ sequenceDiagram
   - `device`：`auto/cpu/cuda/cuda:0`
   - `use_fp16`：GPU 建议开启
   - `qdrant_collection_strategy`：`auto/base/scoped`
+- v1 默认强制 embedding 使用 CPU（除非显式设置 `TXNEWS_EMBEDDING_DEVICE`）。
 - Qdrant 兼容：
   - point id：Qdrant 只接受 `int/uuid`，v0 使用确定性 UUID（uuid5）写入，同时把原 `canonical_id` 放入 payload，检索时优先从 payload 取回 canonical_id。
   - collection：若换模型导致向量维度变化，`auto` 会自动切换到 `base__<model>__<dim>`，避免维度不匹配直接报错。
@@ -428,6 +430,7 @@ python -m apps.mcp.server
 相关目录/文件（以实际文件为准）：
 - 微调与推理入口：`finetune/README.md`、`finetune/sft.yaml`、`finetune/run_sft.sh`、`finetune/serve_vllm.sh`
 - 训练集：`finetune/txdatasets/README.md`（生成规范）、`finetune/txdatasets/dataset_info.json`、`finetune/txdatasets/txnews_deep_analysis_sft_alpaca.jsonl`
+- 已发布模型（下载）：ModelScope `MarkTom/txnews-DeepSeekR1`（https://modelscope.cn/models/MarkTom/txnews-DeepSeekR1；本项目 deep model name 默认 `deepseekr1-merged`；模型卡见 `finetune/result_model/deepseekr1_merged/README.md`）
 
 训练样本选取与生成规则（摘要版）：
 - **合规/安全**：训练集不得包含新闻原文；仅允许“改写后的摘要要点 + 链接/时间等元信息 + 结构化输出 JSON”。
@@ -568,7 +571,7 @@ v1 建议聚焦“检索质量 + 可观测性 + 成本治理 + 规模化”：
   - 技术栈：Vue 3 + TypeScript + Vite + Vue Router。
   - 构建产物：`apps/web/dist_public/`（对话+看板+配置入口；8000 挂载）与 `apps/web/dist_admin/`（可选独立配置页；8001 挂载）。
 - **功能增强**：
-  - 构建模式区分：public UI 与 admin UI 输出不同 bundle（避免把配置页暴露到用户侧端口）。
+  - 构建模式区分：public/admin 输出不同 bundle（多端口部署时可将配置 UI 独立到 `8001`；单端口部署也可直接使用 `8000/config`）。
   - 交互优化：流式对话增加工具调用可视化（进度栏 + 完成自动折叠），侧栏增加轮询接口平均耗时统计。
 - **运维集成**：
   - `scripts/start.sh` 增加 Node.js 环境检查与自动构建步骤（`npm install && npm run build:all`），并启动 8000/8001 两个端口服务。

@@ -45,7 +45,7 @@ def _get_engine():
 def _get_embedding_runtime() -> tuple[Embedder, str, str]:
     settings = get_settings()
     file_cfg = settings.load_file_settings()
-    embedding_cfg = file_cfg.embedding or {}
+    embedding_cfg = settings.resolve_embedding_cfg(file_cfg)
     embedder, qdrant_strategy = build_embedder(embedding_cfg)
     model_name = str(embedding_cfg.get("model_name") or DEFAULT_EMBEDDING_MODEL)
     return embedder, qdrant_strategy, model_name
