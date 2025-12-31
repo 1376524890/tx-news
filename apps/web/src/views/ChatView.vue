@@ -1,5 +1,5 @@
-<!-- Input: 用户对话 + /chat/stream SSE（delta/tool/tool_result/done） -->
-<!-- Output: 对话 UI（含工具调用实时进度的自然语言展示与证据展示） -->
+<!-- Input: 用户对话 + /chat/stream SSE（delta/tool/tool_result/done）+ /signals -->
+<!-- Output: 对话 UI（回车发送/Shift+Enter 换行；含工具进度与最新信号侧栏） -->
 <!-- Pos: 前端对话页（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
 <script setup lang="ts">
@@ -44,6 +44,7 @@ const messages = ref<Message[]>([])
 const input = ref('')
 const isLoading = ref(false)
 const chatContainer = ref<HTMLElement | null>(null)
+const isComposing = ref(false)
 
 // Side panel stats
 const status = ref({ ok: false, text: '连接中…', class: 'dot dot-warn' })
@@ -289,6 +290,14 @@ async function sendMessage() {
     }
 }
 
+function onComposerKeydown(e: KeyboardEvent) {
+    if (e.key !== 'Enter') return
+    if (isComposing.value) return
+    if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return
+    e.preventDefault()
+    sendMessage()
+}
+
 function fmtToolArgs(args: any): string {
     try {
         if (args == null) return ""
@@ -404,7 +413,7 @@ function toggleToolProgress(msg: Message) {
 </script>
 
 <template>
-  <section class="panel" style="grid-column: 1 / span 1">
+  <section class="panel chat-shell" style="grid-column: 1 / span 1">
     <div class="panel-header">
       <div class="panel-title">对话</div>
       <div class="panel-actions">
@@ -474,7 +483,9 @@ function toggleToolProgress(msg: Message) {
         class="input"
         rows="2"
         placeholder="输入你的问题（例如：今天有哪些影响A股的突发？某某公司发生了什么？）"
-        @keydown.enter.exact.prevent="sendMessage"
+        @keydown="onComposerKeydown"
+        @compositionstart="isComposing = true"
+        @compositionend="isComposing = false"
         required
       ></textarea>
       <div class="composer-row">
@@ -486,7 +497,7 @@ function toggleToolProgress(msg: Message) {
     </form>
   </section>
 
-  <aside class="panel side">
+  <aside class="panel side side-shell">
     <div class="panel-header">
       <div class="panel-title">最新信号</div>
       <div class="panel-actions">
