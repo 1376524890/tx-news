@@ -7,7 +7,7 @@
 > 一旦我所属的文件夹有所变化，请更新我。
 
 架构（≤3行）：
-- 单机 v0 数据流：`apps/collector` → NATS → `apps/worker`(Celery) → Postgres/Qdrant/MinIO。
+- 单机数据流（v1）：`apps/collector` → NATS → `apps/worker`(Celery) → Postgres/Qdrant/MinIO。
 - 运行入口在 `apps/`，可复用库在 `src/tx_news/`，配置在 `config/`。
 - 运维脚本在 `scripts/`；日志与缓存在 `var/`（gitignored）；进程 pid 在 `.run/`（用于管理台进程状态，尽量不要把运行态变更纳入提交）。
 

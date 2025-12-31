@@ -1,5 +1,27 @@
-# Vue 3 + TypeScript + Vite
+<!-- Input: Vue 3 + TypeScript 源码 + API 端点（/chat/stream、/admin/status 等） -->
+<!-- Output: 前端构建产物 `dist/`（由 FastAPI 挂载对外提供 UI） -->
+<!-- Pos: 前端工程说明（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+# `apps/web/`（Vue 3 SPA）
 
-Learn more about the recommended Project Setup and IDE Support in the [Vue Docs TypeScript Guide](https://vuejs.org/guide/typescript/overview.html#project-setup).
+该目录是 TX-News 的 v1 前端（Vue 3 + TypeScript + Vite）。构建产物 `dist/` 由 `apps/api/main.py` 挂载：
+- `/`：对话页
+- `/admin`：管理台
+- `/dashboard`：看板
+
+## 本地构建
+
+在仓库根目录执行：
+```bash
+npm --prefix apps/web install
+npm --prefix apps/web run build
+```
+
+## 开发模式（可选）
+
+```bash
+npm --prefix apps/web run dev
+```
+
+说明：
+- 生产环境由 API 直接提供 `dist/` 静态资源；开发模式仅用于前端调试。

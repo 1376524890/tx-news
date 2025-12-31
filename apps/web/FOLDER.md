@@ -15,6 +15,7 @@
 
 | 文件 | 地位 | 功能 |
 | --- | --- | --- |
+| `README.md` | 说明文档 | 前端构建/开发说明。 |
 | `src/main.ts` | 入口 | 挂载 Vue 应用与 Router。 |
 | `src/router/` | 路由 | 定义 `/` (Chat)、`/dashboard` (看板) 与 `/admin` (管理台) 路由。 |
 | `src/views/` | 页面 | `ChatView.vue`（对话）、`DashboardView.vue`（看板）、`AdminView.vue`（管理台）。 |

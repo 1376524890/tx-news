@@ -1,8 +1,8 @@
-<!-- Input: 项目背景/目标/架构设计信息 + v0 已实现的功能与部署方式 -->
+<!-- Input: 项目背景/目标/架构设计信息 + v1（基于 v0 单机架构）的功能与部署方式 -->
 <!-- Output: 面向使用者与开发者的使用说明（快速开始/API/UI/架构/方案/取舍/路线图） -->
 <!-- Pos: 根目录主文档（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
-# TX-news 高时效经济新闻拉取与分析系统（v0）
+# TX-news 高时效经济新闻拉取与分析系统（v1）
 
 *目标是在单机可自托管的前提下，完成 **采集 → 清洗 → 去重 → 入库 → 向量检索 → 结构化分析 → 信号/对话** 的闭环（UI/API/MCP）。*
 
@@ -20,7 +20,7 @@
 
 ---
 
-## 1. 快速开始（单机 v0）
+## 1. 快速开始（单机 v1）
 
 ### 1.1 前置条件
 - Python >= 3.10
@@ -281,7 +281,7 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 - `scripts/`：本地一键启动/停止
 - `var/`：运行态日志与缓存（gitignored）
 
-### 4.2 技术栈（v0）
+### 4.2 技术栈（v1）
 - 语言：Python 3.10+
 - API：FastAPI + Uvicorn
 - 异步任务：Celery（broker/backend：Redis）
@@ -303,7 +303,7 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 
 ---
 
-## 5. 调用链与数据流（v0 实现）
+## 5. 调用链与数据流（单机实现）
 
 ### 5.1 高层数据流
 ```mermaid
@@ -423,6 +423,21 @@ TXNEWS_LLM_API_KEY="<api-key>"
 python -m apps.mcp.server
 ```
 
+### 6.7.1 本地微调 LLM（Deep Analyse）与训练集规则
+本项目支持将 **worker 侧“深分析”**（`src/tx_news/tasks/deep_analysis.py:deep_optimize()`）切换为本地微调模型（通常通过 vLLM 提供 OpenAI-compatible `/v1/chat/completions`），以降低 token 成本并提升输出 JSON 的稳定性；对话与常规分析仍可保持云端模型（`llm.chat`）。
+
+相关目录/文件（以实际文件为准）：
+- 微调与推理入口：`finetune/README.md`、`finetune/sft.yaml`、`finetune/run_sft.sh`、`finetune/serve_vllm.sh`
+- 训练集：`finetune/txdatasets/README.md`（生成规范）、`finetune/txdatasets/dataset_info.json`、`finetune/txdatasets/txnews_deep_analysis_sft_alpaca.jsonl`
+
+训练样本选取与生成规则（摘要版）：
+- **合规/安全**：训练集不得包含新闻原文；仅允许“改写后的摘要要点 + 链接/时间等元信息 + 结构化输出 JSON”。
+- **输入字段（贴近线上 prompt）**：目标新闻标题、摘要要点（脱敏改写）、初步分析（`analysis.data`）、相似新闻证据包（TopN 元信息：canonical_id/score/title/url/published_at）、事件窗口 `minutes`（来自 `config/config.yaml:event_windows_minutes`）。
+- **输出格式（强约束）**：仅输出 1 个 JSON 对象且可 `json.loads` 解析；至少包含 `event_type, entities, tickers, impact, index_view, evidence` 六个字段；不得输出 markdown/解释/长引用。
+- **不可幻觉约束**：`evidence[*].url` 必须来自输入证据包 URL 集合；`tickers[*].ts_code` 不得凭空新增（应来自输入候选或你维护的 name→ts_code 映射）。
+- **覆盖与配比**：样本需覆盖 `policy/macro_data/liquidity/company_event/geopolitics/industry_supply_demand/other`；建议包含一定比例“初步分析错误→深分析纠错”与“证据不足→输出 uncertain”的样本。
+- **自动质检（建议强制）**：解析 JSON、字段齐全、event_type 合法、evidence URL 不越界、tickers schema 稳定（建议统一为 `[{ts_code,name,confidence?}]`），并做去重与长度裁剪（`cutoff_len` 约束）。
+
 ### 6.8 数据模型（v0：核心表）
 （以 `src/tx_news/db.py` 的 ORM 为准；这里给出理解调用链所需的最小心智模型）
 - `raw_documents`：抓取记录（url/status/checksum/s3_key/created_at）
@@ -490,7 +505,7 @@ python -m apps.mcp.server
 ## 8. 运维与排障（Troubleshooting）
 
 ### 8.1 常见依赖问题
-- Qdrant `ApiException`：优先看 `/admin/status` 的 `qdrant.ok` 与错误信息；确认 `docker compose ps` 中 qdrant 正常、`TXNEWS_QDRANT_URL` 可达。
+- Qdrant `ApiException`：优先看 `/admin/status` 的 `dependencies.qdrant.ok` 与错误信息；确认 `docker compose ps` 中 qdrant 正常、`TXNEWS_QDRANT_URL` 可达。
 - embedding 无法加载/超慢：设置 `HF_ENDPOINT=https://hf-mirror.com`、`HF_HOME=var/hf`，并开启 `PREFLIGHT_EMBEDDING=1`。
 - GPU 不生效：确认 `nvidia-smi` 可用；torch 是否为 CUDA 版本；必要时设置 `TORCH_VARIANT=cu121|cu124` 重新启动（或 `AUTO_TORCH=0` 自己管理 torch）。
 - Postgres `FATAL: sorry, too many clients already`：
@@ -511,6 +526,12 @@ python -m apps.mcp.server
 ---
 
 ## 9. v1 可优化方向（路线图）
+
+### 9.0 v1 已实现（迭代总结）
+- 前端：Vue 3 + TS SPA（Chat/Admin/Dashboard），SSE 流式对话 + 工具进度可视化（完成后自动折叠），侧栏统计包含轮询接口平均耗时。
+- API：提供 `/search`（向量检索）、`/chat/stream`（SSE）、`/admin/*`（健康/吞吐/日志）等；并对 `tickers` 等字段做兼容处理以避免 500。
+- 存储与稳定性：SQLAlchemy Engine 进程内复用，降低长跑场景 Postgres 连接数膨胀风险；Qdrant collection 支持按模型/维度策略自动兼容。
+- 集成：提供 `apps/mcp/server.py`（stdio JSON-RPC）用于外部 Agent/LLM 以 MCP 方式调用知识库/数据库检索能力。
 
 v1 建议聚焦“检索质量 + 可观测性 + 成本治理 + 规模化”：
 - 检索与证据定位

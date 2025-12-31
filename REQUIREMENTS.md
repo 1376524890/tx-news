@@ -6,9 +6,9 @@
 
 ## System
 - Python >= 3.10
-  - tx-news：已在 Python 3.13 测试
+  - tx-news：开发/运行环境通常为 Python 3.10–3.12
 - Docker + Docker Compose (for Postgres/Redis/NATS/MinIO/Qdrant)
-  - Web UI 随 API 一起启动（不需要 Node）
+- Node.js >= 18（用于构建 `apps/web`；若 `apps/web/dist` 已存在且不需要重新构建，可不安装）
 
 ## Network
 - Runtime requires outbound network access for:

@@ -9,7 +9,7 @@
 架构（≤3行）：
 - 周期性抓取来源列表：root 页提取链接 → 抓正文。
 - raw 内容写入 MinIO（S3），元数据写入 Postgres，并发布到 NATS JetStream。
-- 单机 v0：每 60 秒跑一轮（见 `main.py`）。
+- 单机版本：每 60 秒跑一轮（见 `main.py`）。
 
 ## 文件
 
