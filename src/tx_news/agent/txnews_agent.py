@@ -116,7 +116,8 @@ class TxNewsAgent:
         yield msg, None
 
     def run_stream(
-        self, *, messages: list[dict[str, str]], max_steps: int = 6, recent_minutes: int = 180
+        self,
+        *, messages: list[dict[str, str]], max_steps: int = 50, recent_minutes: int = 180
     ) -> Iterator[dict[str, Any]]:
         """
         Stream agent execution as SSE-friendly events.
@@ -145,7 +146,7 @@ class TxNewsAgent:
         evidence_seen: set[str] = set()
         tools = self.tool_specs()
 
-        for _ in range(int(max_steps)):
+        for step in range(int(max_steps)):
             msg: dict[str, Any] | None = None
             for final_or_none, delta in self._chat_once_stream(convo=convo, tools=tools):
                 if delta:
@@ -242,7 +243,40 @@ class TxNewsAgent:
             yield {"type": "done", "message": out}
             return
 
-        raise AgentChatError("max_steps reached without final answer")
+        # When max_steps reached, generate final output based on existing information
+        yield {
+            "type": "delta",
+            "content": "\n\n---\n已达到最大工具调用次数，以下是基于现有信息的总结：\n"
+        }
+        # Ask LLM to summarize based on existing conversation
+        convo.append(
+            {
+                "role": "user",
+                "content": "请基于之前的工具调用结果，总结一个最终答案（不允许输出新闻原文，使用 Markdown 格式）。",
+            }
+        )
+        # Generate final summary
+        final_msg: dict[str, Any] | None = None
+        for final_or_none, delta in self._chat_once_stream(convo=convo, tools=None):
+            if delta:
+                yield {"type": "delta", "content": delta}
+            if final_or_none is not None:
+                final_msg = final_or_none
+        if final_msg:
+            out = {
+                "role": "assistant",
+                "content": final_msg.get("content") or "",
+                "meta": {"tools": [t.__dict__ for t in traces], "evidence": evidence},
+            }
+            yield {"type": "done", "message": out}
+        else:
+            # Fallback if no response
+            out = {
+                "role": "assistant",
+                "content": "已达到最大工具调用次数，基于现有信息已完成分析。",
+                "meta": {"tools": [t.__dict__ for t in traces], "evidence": evidence},
+            }
+            yield {"type": "done", "message": out}
 
     @staticmethod
     def _tool_result_summary(*, name: str, result: Any) -> dict[str, Any]:
@@ -347,7 +381,7 @@ class TxNewsAgent:
             },
         ]
 
-    def run(self, *, messages: list[dict[str, str]], max_steps: int = 16, recent_minutes: int = 180) -> dict[str, Any]:
+    def run(self, *, messages: list[dict[str, str]], max_steps: int = 50, recent_minutes: int = 180) -> dict[str, Any]:
         if not messages:
             raise AgentChatError("messages is empty")
 
@@ -369,7 +403,7 @@ class TxNewsAgent:
 
         tools = self.tool_specs()
 
-        for _ in range(int(max_steps)):
+        for step in range(int(max_steps)):
             msg = self.client.chat(messages=convo, tools=tools)
             role = msg.get("role") or "assistant"
             content = msg.get("content") or ""
@@ -462,4 +496,19 @@ class TxNewsAgent:
                 "meta": {"tools": [t.__dict__ for t in traces], "evidence": evidence},
             }
 
-        raise AgentChatError("max_steps exceeded (tool loop did not terminate)")
+        # When max_steps reached, generate final output based on existing information
+        # Ask LLM to summarize based on existing conversation
+        convo.append(
+            {
+                "role": "user",
+                "content": "请基于之前的工具调用结果，总结一个最终答案（不允许输出新闻原文，使用 Markdown 格式）。",
+            }
+        )
+        # Generate final summary
+        final_msg = self.client.chat(messages=convo, tools=None)
+        final_content = final_msg.get("content") or "已达到最大工具调用次数，基于现有信息已完成分析。"
+        return {
+            "role": "assistant",
+            "content": final_content,
+            "meta": {"tools": [t.__dict__ for t in traces], "evidence": evidence},
+        }

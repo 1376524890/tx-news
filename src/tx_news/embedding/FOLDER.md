@@ -7,7 +7,7 @@
 > 一旦我所属的文件夹有所变化，请更新我。
 
 架构（≤3行）：
-- 通过 `sentence-transformers` 在 GPU（若可用）/CPU 上计算向量，支持 `device`/`use_fp16`/`cache_dir` 配置。
+- 通过 `sentence-transformers` 总是在 CPU 上计算向量，支持 `device`/`use_fp16`/`cache_dir` 配置。
 - 支持模型 id 简写与本地目录路径（可离线运行；避免强依赖网络下载）。
 - 向量用于语义去重与向量检索（Qdrant）。
 

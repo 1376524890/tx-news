@@ -365,7 +365,7 @@ else
 fi
 
 if [[ "${TXNEWS_ACCELERATOR:-cpu}" == "gpu" ]]; then
-  log "Step 9/11: Starting vLLM (GPU0) for deep analysis..."
+  log "Step 9/11: Starting vLLM (GPU0,1) for deep analysis..."
   VLLM_SCRIPT="${TXNEWS_VLLM_SCRIPT:-finetune/result_model/deepseekr1_merged/serve_vllm_gpu0_9999.sh}"
   VLLM_PORT="${TXNEWS_VLLM_PORT:-9999}"
   VLLM_TIMEOUT="${TXNEWS_VLLM_TIMEOUT_SECONDS:-600}"

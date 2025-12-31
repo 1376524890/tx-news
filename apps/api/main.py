@@ -677,7 +677,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
-    max_steps: int = 6
+    max_steps: int = 50
     recent_minutes: int = 180
 
 

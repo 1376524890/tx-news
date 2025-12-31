@@ -26,7 +26,7 @@
 - Python >= 3.10
 - Node.js >= 18 (for frontend build)
 - Docker + Docker Compose
-- （可选）NVIDIA GPU（用于 embedding 加速；无 GPU 也可跑）
+- （可选）NVIDIA GPU（用于 vLLM 加速；无 GPU 也可跑，embedding 总是使用 CPU）
 - 网络：需要拉取 Docker 镜像；首次运行可能需要下载 embedding 模型与（可选）torch wheel
 
 ### 1.2 一键启动
@@ -60,12 +60,13 @@ bash scripts/start.sh
 - `PREFLIGHT_EMBEDDING=0/1`：是否启动前预检 embedding（建议开启）
 - `HF_HOME=var/hf`：HuggingFace cache 目录
 - `TXNEWS_ACCELERATOR=cpu|gpu|auto`：CPU/GPU 模式（`gpu` 会尝试启动本地 vLLM，并让深分析优先走 `llm.deep`）
-- `TXNEWS_EMBEDDING_DEVICE=cpu|cuda:1|...`：embedding 设备显式指定（推荐双卡 `cuda:1`）
+- `TXNEWS_EMBEDDING_DEVICE=cpu|cuda:1|...`：embedding 设备显式指定（现在总是默认使用 `cpu`）
 - `TXNEWS_VLLM_SCRIPT=...` / `TXNEWS_VLLM_PORT=...`：一键启动时 vLLM 启动脚本与端口（默认 `9999`）
 
 多 GPU（例如 4090×2）建议：
-- v0 是“多进程”模型：worker/API/collector 都是独立进程；如要分卡运行，推荐手动启动并为不同进程设置 `CUDA_VISIBLE_DEVICES`。
+- v0 是“多进程”模型：worker/API/collector 都是独立进程；vLLM 会自动使用两张 GPU（tensor-parallel-size=2）解决 KV 缓存不足问题。
 - `config/config.yaml: embedding.model_name` 默认选用较大中文向量模型；若你更关注速度或显存占用，可换为 `BAAI/bge-small-zh-v1.5`（质量/速度权衡）。
+- embedding 总是使用 CPU，无需 GPU 资源。
 
 4) 打开页面：
 - 对话 UI：`http://localhost:8000/`
@@ -102,18 +103,17 @@ celery -A tx_news.tasks.celery_app.celery_app worker -l INFO --pool=solo --concu
 ### 1.6 推荐配置（GPU 方案 / CPU 方案）
 
 #### A) GPU 方案（推荐：4090×2）
-目标：embedding 全程走 GPU，API/Worker 可分卡，保证吞吐与时延稳定。
+目标：vLLM 全程走 GPU，embedding 使用 CPU，API/Worker 可分卡，保证吞吐与时延稳定。
 
 `.env` 推荐：
 ```bash
 HF_ENDPOINT=https://hf-mirror.com
 HF_HOME=var/hf
-AUTO_TORCH=1
 TORCH_VARIANT=cu121
 PREFLIGHT_EMBEDDING=1
 TXNEWS_LOG_LEVEL=INFO
 TXNEWS_ACCELERATOR=gpu
-TXNEWS_EMBEDDING_DEVICE=cuda:1
+# TXNEWS_EMBEDDING_DEVICE=cpu  # embedding 现在总是默认使用 CPU
 # (optional) if you use the bundled vLLM script:
 # TXNEWS_VLLM_PORT=9999
 ```
@@ -122,9 +122,9 @@ TXNEWS_EMBEDDING_DEVICE=cuda:1
 ```yaml
 embedding:
   model_name: BAAI/bge-large-zh-v1.5
-  # device 推荐交给 `.env` 控制（TXNEWS_EMBEDDING_DEVICE / TXNEWS_ACCELERATOR）
+  # device 推荐使用 CPU，现在总是默认使用 CPU
   device: cpu
-  use_fp16: true
+  use_fp16: false  # 仅在 GPU 上有效，CPU 模式下会被忽略
   qdrant_collection_strategy: auto
 
 crawler:
@@ -232,10 +232,10 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 兼容保留：
 - `POST /chat`：同步一次性返回（不推荐用于 UI）
 
-对话请求参数（`ChatRequest`）：
+### 对话请求参数（`ChatRequest`）：
 - `messages`：对话消息数组（`{role,content}`），建议只发送必要上下文
 - `recent_minutes`：系统提示词里“优先检索最近 N 分钟”的窗口（默认 180）
-- `max_steps`：最多工具回合数（默认 6，过大可能更慢/更贵）
+- `max_steps`：最多工具回合数（默认 50，过大可能更慢/更贵）
 
 对话响应结构（`done` 的 `message`）：
 - `content`：助手输出（Markdown 文本）
@@ -493,6 +493,10 @@ python -m apps.mcp.server
 - Qdrant `ApiException`：优先看 `/admin/status` 的 `qdrant.ok` 与错误信息；确认 `docker compose ps` 中 qdrant 正常、`TXNEWS_QDRANT_URL` 可达。
 - embedding 无法加载/超慢：设置 `HF_ENDPOINT=https://hf-mirror.com`、`HF_HOME=var/hf`，并开启 `PREFLIGHT_EMBEDDING=1`。
 - GPU 不生效：确认 `nvidia-smi` 可用；torch 是否为 CUDA 版本；必要时设置 `TORCH_VARIANT=cu121|cu124` 重新启动（或 `AUTO_TORCH=0` 自己管理 torch）。
+- Postgres `FATAL: sorry, too many clients already`：
+  - 症状：API（如 `/admin/status`）或 worker/collector 入库路径报 `sqlalchemy.exc.OperationalError`，日志提示连接数已满。
+  - 处理：先重启本仓库进程释放连接（`bash scripts/stop.sh && bash scripts/start.sh`），再观察 `var/log/api.log`/`var/log/celery_worker.log` 是否仍持续报错。
+  - 根因说明：长跑场景需要复用进程内 SQLAlchemy `Engine`/连接池；若代码在高频路径里反复创建 `Engine`，会快速耗尽 Postgres 连接。
 
 ### 8.2 对话“长时间无回复”
 - 建议使用 `/chat/stream`；并把 `TXNEWS_LOG_LEVEL=DEBUG` 打开以观察：
@@ -586,3 +590,7 @@ v1 建议聚焦“检索质量 + 可观测性 + 成本治理 + 规模化”：
 预期收益：
 - 深分析输出格式更稳定（严格 JSON、事件类型/字段更贴合本项目）。
 - Token 成本可控：深分析链路由本地推理承担；对话仍用云端保障体验。
+
+### 11.5 稳定性修复：Postgres 连接池复用 (2025-12-31)
+- 背景：长时间运行时，若在高频路径（API 请求/worker 任务/collector）反复创建 SQLAlchemy `Engine`，会导致 Postgres 连接数不断上升直至报错。
+- 修复：`tx_news.storage.postgres.make_engine()` 在进程内缓存 `Engine`，并在 `init_db()` 中对同一 DSN 只执行一次 `create_all`，降低长跑场景的连接数风险。

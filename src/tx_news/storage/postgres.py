@@ -1,4 +1,4 @@
-# Input: Postgres DSN/Engine 与 ORM 模型
+# Input: Postgres DSN（进程内缓存 Engine）与 ORM 模型
 # Output: 建表与 CRUD/查询函数（articles/versions/analysis/signals/a_share 等）
 # Pos: Postgres 数据访问层（变更时同步更新以上注释与所属目录 FOLDER.md）
 
@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from functools import lru_cache
+from threading import Lock
 
 from sqlalchemy import create_engine, desc, select
 from sqlalchemy.engine import Engine
@@ -18,12 +20,37 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+@lru_cache(maxsize=8)
 def make_engine(pg_dsn: str) -> Engine:
-    return create_engine(pg_dsn, pool_pre_ping=True)
+    # IMPORTANT:
+    # - This function is intentionally cached so API endpoints / Celery tasks do not create a new
+    #   Engine (and a new connection pool) per request/task, which can exhaust Postgres connections
+    #   during long-running tests.
+    kwargs: dict[str, object] = {"pool_pre_ping": True}
+    if not pg_dsn.startswith("sqlite"):
+        kwargs.update(
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_recycle=1800,
+        )
+    return create_engine(pg_dsn, **kwargs)
+
+
+_init_lock = Lock()
+_initialized_urls: set[str] = set()
 
 
 def init_db(engine: Engine) -> None:
-    Base.metadata.create_all(engine)
+    # Ensure create_all is executed only once per Engine URL in this process.
+    url_key = str(engine.url)
+    if url_key in _initialized_urls:
+        return
+    with _init_lock:
+        if url_key in _initialized_urls:
+            return
+        Base.metadata.create_all(engine)
+        _initialized_urls.add(url_key)
 
 
 @contextmanager

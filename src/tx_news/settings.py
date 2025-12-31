@@ -235,23 +235,17 @@ class Settings(BaseSettings):
 
         Precedence:
           1) TXNEWS_EMBEDDING_DEVICE (explicit)
-          2) TXNEWS_ACCELERATOR=gpu -> default to cuda:1 (keep GPU0 free for vLLM)
-          3) TXNEWS_ACCELERATOR=cpu -> force cpu
-          4) config/config.yaml value
+          2) Always use cpu for embedding (override all other settings)
+          3) config/config.yaml value
         """
         cfg: dict[str, Any] = dict(file_cfg.embedding or {})
 
+        # Always use CPU for embedding, regardless of other settings
+        # But respect explicit device setting if provided
         dev = (self.embedding_device or "").strip()
         if dev:
             cfg["device"] = dev
-            return cfg
-
-        mode = self._accelerator_mode()
-        if mode == "gpu":
-            cur = str(cfg.get("device") or "").strip().lower()
-            if not cur or cur in {"auto", "cpu"}:
-                cfg["device"] = "cuda:1"
-        elif mode == "cpu":
+        else:
             cfg["device"] = "cpu"
         return cfg
 
