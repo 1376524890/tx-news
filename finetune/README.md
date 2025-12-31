@@ -59,3 +59,14 @@ To keep chat and normal analysis on API LLM while running **deep analysis** on l
 - Keep the default worker (pipeline + analyze) and API process pointing to your API LLM.
 
 This is described at a high level in `README.md` (section “11.4”).
+
+## Upload to ModelScope (optional)
+If you want to publish a merged model directory (e.g. `finetune/result_model/deepseekr1_merged/`) to ModelScope:
+```bash
+export MODELSCOPE_TOKEN="YOUR_TOKEN"
+python finetune/upload_modelscope.py --model-id MarkTom/txnews-DeepSeekR1 --model-dir finetune/result_model/deepseekr1_merged
+```
+
+Notes:
+- Some ModelScope versions do not support `upload_mode` / resume; the script auto-detects API signature and falls back.
+- Large weights are uploaded via Git LFS by default for `.safetensors` (see `--lfs-suffix`).

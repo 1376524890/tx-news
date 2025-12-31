@@ -19,6 +19,7 @@
 | `run_sft.sh` | 脚本入口 | 运行 SFT 训练。 |
 | `serve_vllm.sh` | 脚本入口 | 启动 vLLM 推理服务。 |
 | `sft.yaml` | 配置文件 | SFT 训练参数配置。 |
+| `upload_modelscope.py` | 发布脚本 | 上传本地模型目录到 ModelScope Hub（支持 token/env；覆盖/断点续传）。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |
 
 ## 子目录
