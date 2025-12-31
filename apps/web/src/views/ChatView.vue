@@ -1,5 +1,5 @@
 <!-- Input: 用户对话 + /chat/stream SSE（delta/tool/tool_result/done） -->
-<!-- Output: 对话 UI（含工具调用实时进度与证据展示） -->
+<!-- Output: 对话 UI（含工具调用实时进度的自然语言展示与证据展示） -->
 <!-- Pos: 前端对话页（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
 <script setup lang="ts">
@@ -41,7 +41,9 @@ const chatContainer = ref<HTMLElement | null>(null)
 // Side panel stats
 const status = ref({ ok: false, text: '连接中…', class: 'dot dot-warn' })
 const counts = ref({ articles: '-', analyses: '-', signals: '-', a_share: '-' })
+const lat = ref({ status_ms: '-', signals_ms: '-' })
 const signals = ref<Signal[]>([])
+const latWin = { status: [] as number[], signals: [] as number[] }
 
 // Load history
 onMounted(() => {
@@ -102,6 +104,7 @@ async function api(path: string) {
 }
 
 async function refreshStatus() {
+    const t0 = Date.now()
     try {
         const st = await api("/admin/status")
         const deps = st.dependencies || {}
@@ -119,14 +122,19 @@ async function refreshStatus() {
         }
     } catch {
         status.value = { ok: false, text: "连接失败", class: "dot dot-bad" }
+    } finally {
+        recordLatency('status', Date.now() - t0)
     }
 }
 
 async function refreshSignals() {
+    const t0 = Date.now()
     try {
         signals.value = await api("/signals?limit=30")
     } catch {
         signals.value = [] // or error indicator
+    } finally {
+        recordLatency('signals', Date.now() - t0)
     }
 }
 
@@ -146,7 +154,7 @@ async function sendMessage() {
         role: 'assistant',
         content: '',
         ts: new Date().toISOString(),
-        meta: { tool_progress: [] as ToolProgressItem[] }
+        meta: { tool_progress: [] as ToolProgressItem[], tool_progress_collapsed: false }
     })
     messages.value.push(assistantMsg.value)
     
@@ -205,7 +213,7 @@ async function sendMessage() {
                         status: 'running',
                         started_at: new Date().toISOString()
                     })
-                    assistantMsg.value.meta = { ...(assistantMsg.value.meta || {}), tool_progress: tp }
+                    assistantMsg.value.meta = { ...(assistantMsg.value.meta || {}), tool_progress: tp, tool_progress_collapsed: false }
                     scrollToBottom()
                 } else if (event === 'tool_result' && data.name) {
                     const tp: ToolProgressItem[] = (assistantMsg.value.meta?.tool_progress || []) as ToolProgressItem[]
@@ -223,9 +231,11 @@ async function sendMessage() {
                     scrollToBottom()
                 } else if (event === 'done' && data.message) {
                     assistantMsg.value.content = data.message.content || assistantMsg.value.content
+                    const tp: ToolProgressItem[] = (assistantMsg.value.meta?.tool_progress || []) as ToolProgressItem[]
                     assistantMsg.value.meta = {
                         ...(data.message.meta || {}),
-                        tool_progress: (assistantMsg.value.meta?.tool_progress || []) as ToolProgressItem[]
+                        tool_progress: tp,
+                        tool_progress_collapsed: tp.length > 0
                     }
                 }
             }
@@ -237,6 +247,7 @@ async function sendMessage() {
         for (const x of tp) {
             if (x.status === 'running') x.status = 'error'
         }
+        assistantMsg.value.meta = { ...(assistantMsg.value.meta || {}), tool_progress_collapsed: false }
     } finally {
         isLoading.value = false
     }
@@ -253,12 +264,106 @@ function fmtToolArgs(args: any): string {
     }
 }
 
+function fmtMinutes(minutes?: any): string {
+    const n = Number(minutes)
+    if (!Number.isFinite(n) || n <= 0) return ""
+    if (n % 60 === 0) return `${n / 60} 小时`
+    if (n > 60) return `${Math.floor(n / 60)} 小时 ${n % 60} 分钟`
+    return `${n} 分钟`
+}
+
 function fmtMs(ms?: number): string {
     if (ms == null) return ""
     const x = Number(ms)
     if (!Number.isFinite(x)) return ""
     if (x < 1000) return `${Math.round(x)}ms`
     return `${(x / 1000).toFixed(2)}s`
+}
+
+function recordLatency(kind: 'status' | 'signals', ms: number) {
+    if (!Number.isFinite(ms) || ms < 0) return
+    const w = (kind === 'status' ? latWin.status : latWin.signals)
+    w.push(ms)
+    if (w.length > 30) w.shift()
+    const avg = Math.round(w.reduce((a, b) => a + b, 0) / w.length)
+    if (kind === 'status') lat.value.status_ms = `${avg}ms`
+    else lat.value.signals_ms = `${avg}ms`
+}
+
+function toolLabel(t: ToolProgressItem): string {
+    const name = String(t.name || '')
+    const args = (t.arguments || {}) as any
+    if (name === 'list_recent') {
+        const minutes = fmtMinutes(args.minutes)
+        const limit = args.limit != null ? Number(args.limit) : null
+        const parts = []
+        if (minutes) parts.push(`近 ${minutes}`)
+        if (limit != null && Number.isFinite(limit)) parts.push(`最多 ${limit} 条`)
+        return parts.length ? `检索近期新闻（${parts.join('，')}）` : '检索近期新闻'
+    }
+    if (name === 'search_news') {
+        const q = typeof args.q === 'string' ? args.q.trim() : ''
+        const limit = args.limit != null ? Number(args.limit) : null
+        const parts = []
+        if (q) parts.push(`关键词：${q}`)
+        if (limit != null && Number.isFinite(limit)) parts.push(`最多 ${limit} 条`)
+        return parts.length ? `搜索知识库（${parts.join('，')}）` : '搜索知识库'
+    }
+    if (name === 'get_article_analysis') {
+        const cid = typeof args.canonical_id === 'string' ? args.canonical_id.trim() : ''
+        return cid ? `读取文章分析（${cid}）` : '读取文章分析'
+    }
+    if (name === 'list_signals') {
+        const limit = args.limit != null ? Number(args.limit) : null
+        return Number.isFinite(limit) ? `读取最新信号（最多 ${limit} 条）` : '读取最新信号'
+    }
+    if (name === 'get_event_timeline') {
+        const eventId = typeof args.event_id === 'string' ? args.event_id.trim() : ''
+        const limit = args.limit != null ? Number(args.limit) : null
+        const parts = []
+        if (eventId) parts.push(eventId)
+        if (limit != null && Number.isFinite(limit)) parts.push(`最多 ${limit} 条`)
+        return parts.length ? `获取事件时间线（${parts.join('，')}）` : '获取事件时间线'
+    }
+    if (name === 'get_entity_profile') {
+        const ts = typeof args.ts_code === 'string' ? args.ts_code.trim() : ''
+        return ts ? `查询个股资料（${ts}）` : '查询个股资料'
+    }
+    const raw = fmtToolArgs(args)
+    return raw ? `${name}（${raw}）` : name
+}
+
+function toolResultText(t: ToolProgressItem): string {
+    const s = t.summary || {}
+    if (s == null || typeof s !== 'object') return ''
+    if (s.items != null) {
+        const n = Number(s.items)
+        return Number.isFinite(n) ? `返回 ${n} 条结果` : ''
+    }
+    if (s.error) {
+        return `错误：${String(s.error)}`
+    }
+    return ''
+}
+
+function toolProgressSummary(items: ToolProgressItem[]): string {
+    const xs = items || []
+    const done = xs.filter(x => x.status === 'done').length
+    const err = xs.filter(x => x.status === 'error').length
+    const ms = xs.filter(x => typeof x.duration_ms === 'number' && x.status === 'done').map(x => Number(x.duration_ms))
+    const avg = ms.length ? Math.round(ms.reduce((a, b) => a + b, 0) / ms.length) : null
+    const parts = []
+    parts.push(`已完成 ${done}/${xs.length}`)
+    if (err) parts.push(`失败 ${err}`)
+    if (avg != null) parts.push(`平均 ${avg}ms`)
+    return parts.join(' · ')
+}
+
+function toggleToolProgress(msg: Message) {
+    if (!msg.meta) msg.meta = {}
+    const cur = Boolean(msg.meta.tool_progress_collapsed)
+    msg.meta.tool_progress_collapsed = !cur
+    saveHistory()
 }
 </script>
 
@@ -280,31 +385,40 @@ function fmtMs(ms?: number): string {
           
           <div v-if="msg.meta" class="meta">
              <div v-if="msg.meta.tool_progress && msg.meta.tool_progress.length">
-                <div class="pill">工具进度</div>
-                <div class="tool-progress">
+                <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
+                  <div class="pill">工具进度</div>
+                  <div class="muted mono" style="flex:1; min-width:0;">{{ toolProgressSummary(msg.meta.tool_progress) }}</div>
+                  <button
+                    class="btn btn-ghost"
+                    style="padding: 0 8px; height: 26px; min-height: 0;"
+                    @click="toggleToolProgress(msg)"
+                    type="button"
+                  >
+                    {{ msg.meta.tool_progress_collapsed ? '展开' : '收起' }}
+                  </button>
+                </div>
+                <div v-if="!msg.meta.tool_progress_collapsed" class="tool-progress">
                     <div v-for="t in msg.meta.tool_progress" :key="t.id" class="tool-step">
                         <div class="tool-head">
                             <div class="tool-left">
                                 <span class="tool-dot" :class="`tool-${t.status}`"></span>
-                                <code class="tool-name">{{ t.name }}({{ fmtToolArgs(t.arguments) }})</code>
+                                <span class="tool-name">{{ toolLabel(t) }}</span>
                             </div>
                             <div class="tool-right mono">
                                 <span v-if="t.status === 'running'" class="muted">运行中…</span>
-                                <span v-else-if="t.status === 'done'" class="muted">{{ fmtMs(t.duration_ms) }}</span>
+                                <span v-else-if="t.status === 'done'" class="muted">耗时 {{ fmtMs(t.duration_ms) }}</span>
                                 <span v-else class="muted">失败</span>
                             </div>
                         </div>
-                        <div v-if="t.summary && (t.summary.items != null || t.summary.error)" class="tool-sub muted">
-                            <span v-if="t.summary.items != null">items={{ t.summary.items }}</span>
-                            <span v-else-if="t.summary.error">error={{ t.summary.error }}</span>
-                        </div>
+                        <div v-if="toolResultText(t)" class="tool-sub muted">{{ toolResultText(t) }}</div>
                     </div>
                 </div>
              </div>
              <div v-if="msg.meta.tools && msg.meta.tools.length">
                 <div class="pill">工具调用</div>
                 <div v-for="t in msg.meta.tools" :key="t.name">
-                    <code>{{ t.name }}({{ JSON.stringify(t.arguments || {}) }})</code>
+                    <span class="mono">{{ t.name }}</span>
+                    <span class="muted">：{{ fmtToolArgs(t.arguments || {}) || "（无参数）" }}</span>
                 </div>
              </div>
              <div v-if="msg.meta.evidence && msg.meta.evidence.length" style="margin-top:8px">
@@ -357,6 +471,10 @@ function fmtMs(ms?: number): string {
         <div class="v">{{ counts.signals }}</div>
         <div class="k">a_share</div>
         <div class="v">{{ counts.a_share }}</div>
+        <div class="k">avg_status</div>
+        <div class="v">{{ lat.status_ms }}</div>
+        <div class="k">avg_signals</div>
+        <div class="v">{{ lat.signals_ms }}</div>
       </div>
       <div class="list">
         <div v-for="s in signals" :key="s.canonical_id" class="card">
