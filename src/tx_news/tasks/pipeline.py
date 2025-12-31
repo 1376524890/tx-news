@@ -47,6 +47,26 @@ def sha256_hex(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _normalize_tickers(value: Any) -> list[dict[str, Any]]:
+    """
+    Ensure tickers schema is stable for API/UI.
+    - preferred: list[{"ts_code": "...", ...}]
+    - accepted fallback: list[str] -> list[{"ts_code": str}]
+    """
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict):
+            out.append(item)
+            continue
+        if isinstance(item, str):
+            s = item.strip()
+            if s:
+                out.append({"ts_code": s})
+    return out
+
+
 @celery_app.task(name="tx_news.tasks.pipeline.normalize_raw")
 def normalize_raw(raw: dict[str, Any]) -> dict[str, Any]:
     settings = get_settings()
@@ -216,6 +236,8 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
         except Exception as e:
             llm_used = False
             logger.warning("dashscope llm failed; fall back to rules: %s", e)
+
+    result["tickers"] = _normalize_tickers(result.get("tickers"))
 
     upsert_analysis(engine, canonical["canonical_id"], event_type=str(result.get("event_type", event_type)), data=result, llm_used=llm_used)
     insert_signal(engine, canonical["canonical_id"], "analysis_updated", {"event_type": result.get("event_type", event_type), "event_id": event_id})

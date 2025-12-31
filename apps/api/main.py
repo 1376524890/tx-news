@@ -78,6 +78,20 @@ class SearchHit(BaseModel):
     tickers: list[dict[str, Any]] = []
 
 
+def _normalize_tickers(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict):
+            out.append(item)
+            continue
+        if isinstance(item, str) and item.strip():
+            out.append({"ts_code": item.strip()})
+            continue
+    return out
+
+
 @app.get("/health", operation_id="health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -142,7 +156,7 @@ def search(q: str = Query(min_length=1), limit: int = Query(default=10, ge=1, le
                 url=v.url if v else None,
                 published_at=v.published_at if v else None,
                 event_type=an.event_type if an else None,
-                tickers=(an.data.get("tickers") if an else []) or [],
+                tickers=_normalize_tickers((an.data.get("tickers") if an else None)),
             )
         )
     return hits

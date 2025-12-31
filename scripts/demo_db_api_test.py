@@ -45,7 +45,7 @@ def main() -> int:
         # 1) /admin/status should report postgres ok and expose counts (DB connectivity + basic queries).
         status = _http_get_json(client, f"{base}/admin/status")
         _expect(isinstance(status, dict), f"/admin/status response is not a dict: {type(status)}")
-        deps = status.get("deps") if isinstance(status, dict) else None
+        deps = status.get("deps") or status.get("dependencies")
         _expect(isinstance(deps, dict), "/admin/status missing deps dict")
         pg = deps.get("postgres")
         _expect(isinstance(pg, dict), "/admin/status deps.postgres missing dict")
