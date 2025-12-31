@@ -282,33 +282,33 @@ if ! have node || ! have npm; then
   die "Node.js and npm are required for frontend build. Please install them."
 fi
 
-log "Step 0/11: Building frontend (apps/web)..."
+log "Step 0/12: Building frontend (apps/web)..."
 (
   cd "${ROOT_DIR}/apps/web"
   npm install --no-audit --no-fund --quiet
-  npm run build
+  npm run build:all
 ) || die "Frontend build failed."
 
 if [[ ! -d ".venv" ]]; then
-  log "Step 1/11: Creating virtualenv in .venv (this may take a moment)..."
+  log "Step 1/12: Creating virtualenv in .venv (this may take a moment)..."
   "${PYTHON_BIN}" -m venv .venv
   log "Virtualenv created."
 else
-  log "Step 1/11: Virtualenv already exists (.venv)."
+  log "Step 1/12: Virtualenv already exists (.venv)."
 fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
-log "Step 2/11: Upgrading pip..."
+log "Step 2/12: Upgrading pip..."
 python -m pip install --upgrade pip 2>&1 | tee -a "${BOOTSTRAP_LOG}"
 
-log "Step 3/11: Auto-installing torch (CPU/CUDA)..."
+log "Step 3/12: Auto-installing torch (CPU/CUDA)..."
 install_torch_auto
 
-log "Step 4/11: Installing Python dependencies (requirements.txt)..."
+log "Step 4/12: Installing Python dependencies (requirements.txt)..."
 pip install -r requirements.txt 2>&1 | tee -a "${BOOTSTRAP_LOG}"
 
-log "Step 5/11: Installing this repo as editable package (pip install -e .)..."
+log "Step 5/12: Installing this repo as editable package (pip install -e .)..."
 pip install -e . 2>&1 | tee -a "${BOOTSTRAP_LOG}"
 log "Python deps installed. (bootstrap log: ${BOOTSTRAP_LOG})"
 
@@ -334,10 +334,10 @@ set -a
 source .env
 set +a
 
-log "Step 6/11: Preflight embedding (HF mirror + model load)..."
+log "Step 6/12: Preflight embedding (HF mirror + model load)..."
 preflight_embedding
 
-log "Step 7/11: Starting Docker services (postgres/redis/nats/minio/qdrant)..."
+log "Step 7/12: Starting Docker services (postgres/redis/nats/minio/qdrant)..."
 compose up -d
 
 wait_port "127.0.0.1" "5432" "Postgres" 90
@@ -348,7 +348,7 @@ wait_port "127.0.0.1" "6333" "Qdrant" 60
 log "Docker services are ready."
 
 # Optional: sync A-share master data if tushare.token is configured.
-log "Step 8/11: Optional Tushare A-share master data sync..."
+log "Step 8/12: Optional Tushare A-share master data sync..."
 TUSHARE_TOKEN="$("${PYTHON_BIN}" - <<'PY'
 import yaml
 from pathlib import Path
@@ -365,7 +365,7 @@ else
 fi
 
 if [[ "${TXNEWS_ACCELERATOR:-cpu}" == "gpu" ]]; then
-  log "Step 9/11: Starting vLLM (GPU0,1) for deep analysis..."
+  log "Step 9/12: Starting vLLM (GPU0,1) for deep analysis..."
   VLLM_SCRIPT="${TXNEWS_VLLM_SCRIPT:-finetune/result_model/deepseekr1_merged/serve_vllm_gpu0_9999.sh}"
   VLLM_PORT="${TXNEWS_VLLM_PORT:-9999}"
   VLLM_TIMEOUT="${TXNEWS_VLLM_TIMEOUT_SECONDS:-600}"
@@ -378,10 +378,10 @@ if [[ "${TXNEWS_ACCELERATOR:-cpu}" == "gpu" ]]; then
   wait_http "http://127.0.0.1:${VLLM_PORT}/v1/models" "vLLM" "${VLLM_TIMEOUT}"
   log "vLLM is ready."
 else
-  log "Step 9/11: Skip vLLM (TXNEWS_ACCELERATOR=${TXNEWS_ACCELERATOR:-cpu})."
+  log "Step 9/12: Skip vLLM (TXNEWS_ACCELERATOR=${TXNEWS_ACCELERATOR:-cpu})."
 fi
 
-log "Step 10/11: Starting background processes (Celery worker / NATS bridge / Collector / API)..."
+log "Step 10/12: Starting background processes (Celery worker / NATS bridge / Collector / API / Config)..."
 start_bg "celery_worker" \
   "cd '${ROOT_DIR}' && source .venv/bin/activate && celery -A tx_news.tasks.celery_app.celery_app worker -l INFO --pool=solo --concurrency=1" \
   "${LOG_DIR}/celery_worker.log"
@@ -398,8 +398,13 @@ start_bg "api" \
   "cd '${ROOT_DIR}' && source .venv/bin/activate && uvicorn apps.api.main:app --host 0.0.0.0 --port 8000" \
   "${LOG_DIR}/api.log"
 
-log "Step 11/11: Startup checks..."
+start_bg "config" \
+  "cd '${ROOT_DIR}' && source .venv/bin/activate && uvicorn apps.admin.main:app --host 0.0.0.0 --port 8001" \
+  "${LOG_DIR}/config.log"
+
+log "Step 11/12: Startup checks..."
 wait_http "http://127.0.0.1:8000/health" "API /health" 60
+wait_http "http://127.0.0.1:8001/health" "Config /health" 60
 if [[ "${TXNEWS_ACCELERATOR:-cpu}" == "gpu" ]]; then
   VLLM_PORT="${TXNEWS_VLLM_PORT:-9999}"
   wait_http "http://127.0.0.1:${VLLM_PORT}/v1/models" "vLLM /v1/models" 10
@@ -408,8 +413,8 @@ log "Startup checks passed."
 
 log "Startup complete."
 log "Web UI: http://localhost:8000/"
-log "Admin UI: http://localhost:8000/admin"
-log "API: http://localhost:8000 (health: /health, search: /search?q=...)"
+log "Config UI: http://localhost:8001/"
+log "API: http://localhost:8000 (health: /health, search: /search?q=..., status: /status)"
 if [[ "${TXNEWS_ACCELERATOR:-cpu}" == "gpu" ]]; then
   log "vLLM: http://localhost:${TXNEWS_VLLM_PORT:-9999}/v1 (models: /v1/models)"
 fi

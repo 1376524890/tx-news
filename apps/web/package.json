@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc -b && vite build",
+    "build": "npm run build:all",
+    "build:public": "vue-tsc -b && vite build --mode public",
+    "build:admin": "vue-tsc -b && vite build --mode admin",
+    "build:all": "vue-tsc -b && vite build --mode public && vite build --mode admin",
     "preview": "vite preview"
   },
   "dependencies": {

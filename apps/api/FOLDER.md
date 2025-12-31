@@ -7,9 +7,9 @@
 > 一旦我所属的文件夹有所变化，请更新我。
 
 架构（≤3行）：
-- FastAPI 对外提供检索/对话/管理台等 HTTP 接口。
-- 静态挂载 `apps/web/dist` (Vue 3 SPA) 作为前端 UI（服务端为 `/`、`/admin`、`/dashboard` 提供刷新入口）。
-- 依赖 Postgres/Qdrant/Redis/NATS（通过 `tx_news.settings` 读取连接信息；DB Engine 由 `tx_news.storage.postgres.make_engine()` 在进程内复用，避免长跑时连接数膨胀；chat 默认读取 `llm.chat`）。
+- FastAPI 对外提供检索/对话等用户侧 HTTP 接口（8000）。
+- 静态挂载 `apps/web/dist_public` 作为用户侧对话 UI（不提供运维管理台 UI）。
+- LLM：默认读取 `llm.chat`；也支持从 cookie 用户标识在 Redis 中读取“个人在线 LLM 配置”，用于按用户分摊 chat 成本。
 
 补充：
 - `/chat/stream` 使用 SSE 逐步输出 `delta`（文本增量）、`tool`/`tool_result`（工具调用进度）与 `done`（最终消息）。

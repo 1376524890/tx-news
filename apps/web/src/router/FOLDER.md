@@ -13,4 +13,4 @@
 ## 文件
 | 文件 | 地位 | 功能 |
 | --- | --- | --- |
-| `index.ts` | 路由表 | 定义 `/` (Chat) 与 `/admin` (Dashboard) 路由规则。 |
+| `index.ts` | 路由表 | 构建模式区分：public UI `/`（对话）；admin UI `/`（配置）。 |

@@ -1,5 +1,5 @@
-# Input: 本地 Python/Docker 环境 + config/.env 配置
-# Output: 启动 v0 单机栈（infra + worker/collector/api），并写入 var/log 与 .run
+# Input: 本地 Python/Docker 环境 + Node.js（可选）+ config/.env 配置
+# Output: 启动 v1 单机栈（infra + worker/collector/api/config），并写入 var/log 与 .run
 # Pos: 运维启动脚本（Windows PowerShell 版；变更时同步更新以上注释与所属目录 FOLDER.md）
 
 Set-StrictMode -Version Latest
@@ -178,12 +178,12 @@ if (-not (Get-Command $PythonBin -ErrorAction SilentlyContinue)) {
 }
 
 if (-not (Test-Path ".venv")) {
-  Write-Log "Step 1/8: Creating virtualenv in .venv (this may take a moment)..."
+  Write-Log "Step 1/9: Creating virtualenv in .venv (this may take a moment)..."
   & $PythonBin -m venv .venv
   if ($LASTEXITCODE -ne 0) { Die "Failed to create virtualenv (exit=$LASTEXITCODE)" }
   Write-Log "Virtualenv created."
 } else {
-  Write-Log "Step 1/8: Virtualenv already exists (.venv)."
+  Write-Log "Step 1/9: Virtualenv already exists (.venv)."
 }
 
 $VenvPython = Join-Path $RootDir ".venv\\Scripts\\python.exe"
@@ -191,15 +191,15 @@ if (-not (Test-Path $VenvPython)) {
   Die "Virtualenv python not found: $VenvPython"
 }
 
-Write-Log "Step 2/8: Upgrading pip..."
+Write-Log "Step 2/9: Upgrading pip..."
 (& $VenvPython -m pip install --upgrade pip 2>&1) | Tee-Object -FilePath $BootstrapLog -Append | Out-Host
 if ($LASTEXITCODE -ne 0) { Die "pip upgrade failed (exit=$LASTEXITCODE)" }
 
-Write-Log "Step 3/8: Installing Python dependencies (requirements.txt)..."
+Write-Log "Step 3/9: Installing Python dependencies (requirements.txt)..."
 (& $VenvPython -m pip install -r requirements.txt 2>&1) | Tee-Object -FilePath $BootstrapLog -Append | Out-Host
 if ($LASTEXITCODE -ne 0) { Die "pip install -r requirements.txt failed (exit=$LASTEXITCODE)" }
 
-Write-Log "Step 4/8: Installing this repo as editable package (pip install -e .)..."
+Write-Log "Step 4/9: Installing this repo as editable package (pip install -e .)..."
 (& $VenvPython -m pip install -e . 2>&1) | Tee-Object -FilePath $BootstrapLog -Append | Out-Host
 if ($LASTEXITCODE -ne 0) { Die "pip install -e . failed (exit=$LASTEXITCODE)" }
 Write-Log "Python deps installed. (bootstrap log: $BootstrapLog)"
@@ -224,7 +224,17 @@ if (-not (Test-Path ".env")) {
 
 Import-DotEnv -Path ".env"
 
-Write-Log "Step 5/8: Starting Docker services (postgres/redis/nats/minio/qdrant)..."
+Write-Log "Step 5/9: Building frontend (public/admin; optional)..."
+if (Get-Command npm -ErrorAction SilentlyContinue) {
+  & npm --prefix apps/web install
+  if ($LASTEXITCODE -ne 0) { Die "npm install failed (exit=$LASTEXITCODE)" }
+  & npm --prefix apps/web run build:all
+  if ($LASTEXITCODE -ne 0) { Die "npm run build:all failed (exit=$LASTEXITCODE)" }
+} else {
+  Write-Log "WARN: npm not found; skip frontend build (UI may be missing)."
+}
+
+Write-Log "Step 6/9: Starting Docker services (postgres/redis/nats/minio/qdrant)..."
 Invoke-Compose up -d
 if ($LASTEXITCODE -ne 0) { Die "docker compose up failed (exit=$LASTEXITCODE)" }
 
@@ -235,7 +245,7 @@ Wait-Port -Host "127.0.0.1" -Port 9000 -Name "MinIO" -TimeoutSec 60
 Wait-Port -Host "127.0.0.1" -Port 6333 -Name "Qdrant" -TimeoutSec 60
 Write-Log "Docker services are ready."
 
-Write-Log "Step 6/8: Optional Tushare A-share master data sync..."
+Write-Log "Step 7/9: Optional Tushare A-share master data sync..."
 $tushareToken = (& $VenvPython -c @"
 import yaml
 from pathlib import Path
@@ -252,7 +262,7 @@ if ($tushareToken) {
   Write-Log "WARN: tushare.token is empty; skip A-share master data sync."
 }
 
-Write-Log "Step 7/8: Starting background processes (Celery worker / NATS bridge / Collector / API)..."
+Write-Log "Step 8/9: Starting background processes (Celery worker / NATS bridge / Collector / API / Config)..."
 Start-Bg -Name "celery_worker" -FilePath $VenvPython `
   -ArgumentList @("-m","celery","-A","tx_news.tasks.celery_app.celery_app","worker","-l","INFO","--pool=solo","--concurrency=1") `
   -StdoutLog (Join-Path $LogDir "celery_worker.log") `
@@ -273,9 +283,14 @@ Start-Bg -Name "api" -FilePath $VenvPython `
   -StdoutLog (Join-Path $LogDir "api.log") `
   -StderrLog (Join-Path $LogDir "api.err.log")
 
-Write-Log "Step 8/8: Startup complete."
+Start-Bg -Name "config" -FilePath $VenvPython `
+  -ArgumentList @("-m","uvicorn","apps.admin.main:app","--host","0.0.0.0","--port","8001") `
+  -StdoutLog (Join-Path $LogDir "config.log") `
+  -StderrLog (Join-Path $LogDir "config.err.log")
+
+Write-Log "Step 9/9: Startup complete."
 Write-Log "Web UI: http://localhost:8000/"
-Write-Log "Admin UI: http://localhost:8000/admin"
+Write-Log "Config UI: http://localhost:8001/"
 Write-Log "API: http://localhost:8000 (health: /health, search: /search?q=...)"
 Write-Log "Logs: $LogDir/ (bootstrap: $BootstrapLog)"
 Write-Log "Stop: Ctrl+C here, or run: scripts\\stop.cmd"

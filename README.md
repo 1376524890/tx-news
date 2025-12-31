@@ -13,8 +13,8 @@
 
 快速导航：
 - 快速开始：一键部署/启动/验证
-- API：检索/对话（含 SSE 流式）/管理台接口
-- UI：对话页（Markdown）与管理台（实时监控/日志）
+- API：检索/对话（含 SSE 流式）/状态接口
+- UI：对话页（Markdown）与配置页（按用户设置在线 LLM）
 - 架构：调用链、数据流、关键模块与取舍
 - v1：可优化方向清单
 
@@ -35,7 +35,7 @@
 - 按需填写：
   - LLM：优先 `TXNEWS_LLM_API_KEY`（OpenAI 兼容），或兼容 `DASHSCOPE_API_KEY`
   - （可选）`HF_ENDPOINT=https://hf-mirror.com`（HuggingFace 镜像）
-  - （调试）`TXNEWS_LOG_LEVEL=DEBUG`（打开流式对话与管理台关键路径日志）
+  - （调试）`TXNEWS_LOG_LEVEL=DEBUG`（打开流式对话关键路径日志）
 
 2) 配置采集源与本地参数：
 - 编辑 `config/sources.txt`：每行一个入口 URL（支持 `#` 注释）
@@ -64,21 +64,21 @@ bash scripts/start.sh
 - `TXNEWS_VLLM_SCRIPT=...` / `TXNEWS_VLLM_PORT=...`：一键启动时 vLLM 启动脚本与端口（默认 `9999`）
 
 多 GPU（例如 4090×2）建议：
-- v0 是“多进程”模型：worker/API/collector 都是独立进程；vLLM 会自动使用两张 GPU（tensor-parallel-size=2）解决 KV 缓存不足问题。
+- v1 是“多进程”模型：worker/API/collector 都是独立进程；vLLM 会自动使用两张 GPU（tensor-parallel-size=2）解决 KV 缓存不足问题。
 - `config/config.yaml: embedding.model_name` 默认选用较大中文向量模型；若你更关注速度或显存占用，可换为 `BAAI/bge-small-zh-v1.5`（质量/速度权衡）。
 - embedding 总是使用 CPU，无需 GPU 资源。
 
 4) 打开页面：
 - 对话 UI：`http://localhost:8000/`
-- 管理台：`http://localhost:8000/admin`
+- 配置页（按用户设置在线 LLM）：`http://localhost:8001/`
 - 健康检查：`http://localhost:8000/health`
 
 ### 1.3 快速验证
 ```bash
 curl -s http://localhost:8000/health
-curl -s http://localhost:8000/admin/status | jq .
+curl -s http://localhost:8000/status | jq .
 ```
-管理台“实时监控”会展示窗口吞吐与数据流健康。
+对话页侧栏会展示基础计数与依赖健康（来自 `/status`）。
 
 ### 1.4 停止
 ```bash
@@ -242,12 +242,10 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 - `meta.tools`：工具调用轨迹（便于排障/审计）
 - `meta.evidence`：证据链接列表（canonical_id/url/published_at）
 
-### 2.3 管理台与运维接口
-- `GET /admin/status`：依赖健康 + 基础计数 + JetStream consumer 状态
-- `GET /admin/processes`：后台进程状态（基于 `.run/*.pid`）
-- `GET /admin/pipeline?minutes=60`：窗口内吞吐、lag 与最新条目
-- `GET /admin/masterdata`：主数据缓存状态
-- `GET /admin/logs/{name}?n=200`：日志 tail（api/collector/nats_bridge/celery_worker/bootstrap）
+### 2.3 状态与配置接口
+- `GET /status`：依赖健康（最小集）+ 基础计数（供对话页侧栏展示）
+- `GET http://localhost:8001/api/config`：读取当前用户的在线 LLM 配置（cookie 区分用户）
+- `POST http://localhost:8001/api/config`：设置当前用户的 base_url/model/api_key（用于对话按用户分摊成本）
 
 ---
 
@@ -260,11 +258,9 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
   - 工具调用（Tool Calls）实时可视化展示。
 - *v0 (Deprecated)*：原静态 HTML/JS 仍在 `apps/api/static`，但不再作为默认 UI。
 
-### 3.2 管理台（`/admin`）
-- **v1 (Vue 3)**：集成在 SPA 中的 `/admin` 路由。
-  - 实时监控（吞吐/Lag/NATS Pending）数据流。
-  - 日志 Tail 查看器（支持跟随/搜索/过滤）。
-  - 进程与依赖健康状态看板。
+### 3.2 配置页（`http://localhost:8001/`）
+- 用于每个前端用户配置自己的在线 LLM（base_url/model/api_key），从而让 `/chat` 与 `/chat/stream` 按用户分摊成本。
+- 配置通过 cookie 区分用户，并写入 Redis；如开启 `TXNEWS_REQUIRE_USER_LLM=1`，未配置用户将无法发起对话。
 
 ---
 
@@ -274,7 +270,8 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 - `apps/`
   - `apps/collector/`：采集进程（sources → raw → NATS）
   - `apps/worker/`：NATS → Celery 桥接 + worker 运行
-  - `apps/api/`：FastAPI + 静态 UI（对话/管理台）
+  - `apps/api/`：FastAPI + 静态 UI（对话）
+  - `apps/admin/`：配置服务（8001；按用户设置在线 LLM）
   - `apps/mcp/`：MCP server（stdio JSON-RPC），用于外部 Agent 工具接入
 - `src/tx_news/`：核心可复用库（crawler/normalize/dedup/embedding/storage/tasks/agent）
 - `config/`：本地配置（`config.yaml` + `sources.txt`）
@@ -294,7 +291,8 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 - 前端：Vue 3 + TypeScript + Vite（SPA），由 API 进程挂载构建产物 `dist`。
 
 ### 4.3 端口与服务（默认）
-- API/UI：`http://localhost:8000`
+- 公网 API + 对话 UI：`http://localhost:8000`
+- 配置 UI：`http://localhost:8001`
 - Postgres：`localhost:5432`
 - Redis：`localhost:6379`
 - NATS：`localhost:4222`（监控 `http://localhost:8222`）
@@ -505,11 +503,11 @@ python -m apps.mcp.server
 ## 8. 运维与排障（Troubleshooting）
 
 ### 8.1 常见依赖问题
-- Qdrant `ApiException`：优先看 `/admin/status` 的 `dependencies.qdrant.ok` 与错误信息；确认 `docker compose ps` 中 qdrant 正常、`TXNEWS_QDRANT_URL` 可达。
+- Qdrant `ApiException`：优先看 `/status` 的 `dependencies.qdrant.ok` 与错误信息；确认 `docker compose ps` 中 qdrant 正常、`TXNEWS_QDRANT_URL` 可达。
 - embedding 无法加载/超慢：设置 `HF_ENDPOINT=https://hf-mirror.com`、`HF_HOME=var/hf`，并开启 `PREFLIGHT_EMBEDDING=1`。
 - GPU 不生效：确认 `nvidia-smi` 可用；torch 是否为 CUDA 版本；必要时设置 `TORCH_VARIANT=cu121|cu124` 重新启动（或 `AUTO_TORCH=0` 自己管理 torch）。
 - Postgres `FATAL: sorry, too many clients already`：
-  - 症状：API（如 `/admin/status`）或 worker/collector 入库路径报 `sqlalchemy.exc.OperationalError`，日志提示连接数已满。
+  - 症状：API（如 `/status`）或 worker/collector 入库路径报 `sqlalchemy.exc.OperationalError`，日志提示连接数已满。
   - 处理：先重启本仓库进程释放连接（`bash scripts/stop.sh && bash scripts/start.sh`），再观察 `var/log/api.log`/`var/log/celery_worker.log` 是否仍持续报错。
   - 根因说明：长跑场景需要复用进程内 SQLAlchemy `Engine`/连接池；若代码在高频路径里反复创建 `Engine`，会快速耗尽 Postgres 连接。
 
@@ -520,7 +518,6 @@ python -m apps.mcp.server
 
 ### 8.3 日志与定位
 - 日志目录：`var/log/`
-- 管理台日志：`/admin` → 日志视图（对应 `/admin/logs/{name}`）
 - 常用日志名：`api`、`collector`、`nats_bridge`、`celery_worker`、`bootstrap`
 
 ---
@@ -528,8 +525,8 @@ python -m apps.mcp.server
 ## 9. v1 可优化方向（路线图）
 
 ### 9.0 v1 已实现（迭代总结）
-- 前端：Vue 3 + TS SPA（Chat/Admin/Dashboard），SSE 流式对话 + 工具进度可视化（完成后自动折叠），侧栏统计包含轮询接口平均耗时。
-- API：提供 `/search`（向量检索）、`/chat/stream`（SSE）、`/admin/*`（健康/吞吐/日志）等；并对 `tickers` 等字段做兼容处理以避免 500。
+- 前端：Vue 3 + TS SPA（public：对话；admin：配置页），SSE 流式对话 + 工具进度可视化（完成后自动折叠），侧栏统计包含轮询接口平均耗时。
+- API：用户侧提供 `/search`（向量检索）、`/chat/stream`（SSE）、`/status`（最小依赖/计数）；配置服务（8001）提供 `/api/config`（按用户设置在线 LLM），并对 `tickers` 等字段做兼容处理以避免 500。
 - 存储与稳定性：SQLAlchemy Engine 进程内复用，降低长跑场景 Postgres 连接数膨胀风险；Qdrant collection 支持按模型/维度策略自动兼容。
 - 集成：提供 `apps/mcp/server.py`（stdio JSON-RPC）用于外部 Agent/LLM 以 MCP 方式调用知识库/数据库检索能力。
 
@@ -565,12 +562,12 @@ v1 建议聚焦“检索质量 + 可观测性 + 成本治理 + 规模化”：
 ### 11.1 前端重构 (Frontend Refactor)
 - **架构变更**：从原生静态文件 (`apps/api/static/`) 迁移至现代前端工程 (`apps/web/`)。
   - 技术栈：Vue 3 + TypeScript + Vite + Vue Router。
-  - 构建产物：`apps/web/dist/`，由 FastAPI 挂载于 `/` 和 `/static`。
+  - 构建产物：`apps/web/dist_public/`（对话页；8000 挂载）与 `apps/web/dist_admin/`（配置页；8001 挂载）。
 - **功能增强**：
-  - 动态路由：`/` (Chat) 与 `/admin` (Dashboard) 使用 Hash/History 模式切换。
-  - 交互优化：流式对话增加工具调用可视化；管理台增加自动刷新与日志实时跟随。
+  - 构建模式区分：public UI 与 admin UI 输出不同 bundle（避免把配置页暴露到用户侧端口）。
+  - 交互优化：流式对话增加工具调用可视化（进度栏 + 完成自动折叠），侧栏增加轮询接口平均耗时统计。
 - **运维集成**：
-  - `scripts/start.sh` 增加 Node.js 环境检查与自动构建步骤 (`npm install && npm run build`)。
+  - `scripts/start.sh` 增加 Node.js 环境检查与自动构建步骤（`npm install && npm run build:all`），并启动 8000/8001 两个端口服务。
 
 ### 11.2 文档治理 (Documentation)
 - 全面补充了 `FOLDER.md` 目录索引，覆盖 `src/` 根目录及 `apps/web/` 各级子目录。

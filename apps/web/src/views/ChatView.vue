@@ -106,7 +106,7 @@ async function api(path: string) {
 async function refreshStatus() {
     const t0 = Date.now()
     try {
-        const st = await api("/admin/status")
+        const st = await api("/status")
         const deps = st.dependencies || {}
         const ok = Object.values(deps).every((x: any) => x && x.ok)
         status.value = {

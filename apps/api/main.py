@@ -1,12 +1,10 @@
-# Input: HTTP 请求 + Postgres/Qdrant/Redis/NATS 等依赖
-# Output: FastAPI 路由与静态 UI（/、/admin、/dashboard、/search、/chat、/chat/stream 等）
-# Pos: API 进程入口（变更时同步更新以上注释与所属目录 FOLDER.md）
+# Input: HTTP 请求 + Postgres/Qdrant/Redis 等依赖 + 用户 Cookie（可选）
+# Output: 公网/用户侧 API + 对话 UI（8000；不提供运维管理台 UI）
+# Pos: Public API 进程入口（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 import logging
 import time
 import secrets
@@ -14,14 +12,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from redis import Redis
 from sqlalchemy import text
-
-import nats
 
 from tx_news.agent.txnews_agent import AgentChatError, TxNewsAgent
 from tx_news.embedding.embedder import DEFAULT_EMBEDDING_MODEL, build_embedder
@@ -38,6 +34,7 @@ from tx_news.storage.postgres import (
     make_engine,
 )
 from tx_news.storage.qdrant import QdrantStore, scored_point_canonical_id
+from tx_news.user_llm_config import UID_COOKIE, get_user_llm_config
 
 
 configure_logging()
@@ -45,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="tx-news API", version="0.1.0")
 
-STATIC_DIR = Path(__file__).resolve().parents[2] / "apps" / "web" / "dist"
+STATIC_DIR = Path(__file__).resolve().parents[2] / "apps" / "web" / "dist_public"
 
 # Mount /assets for Vue SPA
 if (STATIC_DIR / "assets").exists():
@@ -63,20 +60,6 @@ def vite_svg() -> Response:
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-RUN_DIR = ROOT_DIR / ".run"
-LOG_DIR = ROOT_DIR / "var" / "log"
-
-
-class SearchHit(BaseModel):
-    canonical_id: str
-    score: float
-    title: str | None = None
-    url: str | None = None
-    published_at: datetime | None = None
-    event_type: str | None = None
-    tickers: list[dict[str, Any]] = []
-
 
 def _normalize_tickers(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
@@ -92,6 +75,21 @@ def _normalize_tickers(value: Any) -> list[dict[str, Any]]:
     return out
 
 
+class SearchHit(BaseModel):
+    canonical_id: str
+    score: float
+    title: str | None = None
+    url: str | None = None
+    published_at: datetime | None = None
+    event_type: str | None = None
+    tickers: list[dict[str, Any]] = Field(default_factory=list)
+
+    @field_validator("tickers", mode="before")
+    @classmethod
+    def _v_tickers(cls, v: Any) -> list[dict[str, Any]]:
+        return _normalize_tickers(v)
+
+
 @app.get("/health", operation_id="health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -105,20 +103,38 @@ def ui_index() -> Response:
     return FileResponse(str(index))
 
 
-@app.get("/admin", include_in_schema=False)
-def ui_admin() -> Response:
-    page = STATIC_DIR / "index.html"
-    if not page.exists():
-        return HTMLResponse("<h1>TX-News Admin</h1><p>UI build not found. Run npm run build.</p>")
-    return FileResponse(str(page))
+@app.get("/status", operation_id="status")
+def status() -> dict[str, Any]:
+    """
+    Public-facing status for the chat UI (keep minimal; do not expose admin UI).
+    """
+    settings = get_settings()
+    engine = make_engine(settings.pg_dsn)
+    init_db(engine)
 
+    deps: dict[str, Any] = {}
+    try:
+        with engine.connect() as conn:
+            counts = {
+                "articles": int(conn.execute(text("select count(*) from articles")).scalar() or 0),
+                "analyses": int(conn.execute(text("select count(*) from analyses")).scalar() or 0),
+                "raw_documents": int(conn.execute(text("select count(*) from raw_documents")).scalar() or 0),
+                "signals": int(conn.execute(text("select count(*) from signals")).scalar() or 0),
+                "a_share_basic": int(conn.execute(text("select count(*) from a_share_basic")).scalar() or 0),
+            }
+        deps["postgres"] = {"ok": True}
+    except Exception as e:
+        counts = {}
+        deps["postgres"] = {"ok": False, "error": str(e)}
 
-@app.get("/dashboard", include_in_schema=False)
-def ui_dashboard() -> Response:
-    page = STATIC_DIR / "index.html"
-    if not page.exists():
-        return HTMLResponse("<h1>TX-News Dashboard</h1><p>UI build not found. Run npm run build.</p>")
-    return FileResponse(str(page))
+    try:
+        q = QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection)
+        q._client().get_collections()  # type: ignore[attr-defined]
+        deps["qdrant"] = {"ok": True}
+    except Exception as e:
+        deps["qdrant"] = {"ok": False, "error": str(e)}
+
+    return {"dependencies": deps, "counts": counts}
 
 
 @app.get("/search", response_model=list[SearchHit], operation_id="search_news")
@@ -199,122 +215,6 @@ def signals(limit: int = Query(default=50, ge=1, le=200)) -> list[dict[str, Any]
     ]
 
 
-@app.get("/dashboard/summary", operation_id="dashboard_summary")
-def dashboard_summary(
-    minutes: int = Query(default=180, ge=5, le=1440),
-    limit: int = Query(default=30, ge=1, le=200),
-) -> dict[str, Any]:
-    settings = get_settings()
-    engine = make_engine(settings.pg_dsn)
-    init_db(engine)
-
-    with engine.connect() as conn:
-        recent_rows = conn.execute(
-            text(
-                """
-                with latest_versions as (
-                    select distinct on (canonical_id)
-                        canonical_id, url, published_at, fetched_at
-                    from article_versions
-                    order by canonical_id, coalesce(published_at, fetched_at) desc
-                )
-                select
-                    s.canonical_id,
-                    s.kind,
-                    s.data as signal_data,
-                    s.created_at as signal_created_at,
-                    a.title as title,
-                    lv.url as url,
-                    lv.published_at as published_at,
-                    an.event_type as event_type,
-                    an.data as analysis_data,
-                    an.llm_used as llm_used
-                from signals s
-                left join articles a on a.canonical_id = s.canonical_id
-                left join latest_versions lv on lv.canonical_id = s.canonical_id
-                left join analyses an on an.canonical_id = s.canonical_id
-                order by s.created_at desc
-                limit :limit
-                """
-            ),
-            {"limit": limit},
-        ).mappings().all()
-
-        kinds = conn.execute(
-            text(
-                """
-                select kind, count(*) as c
-                from signals
-                where created_at >= now() - (:m || ' minutes')::interval
-                group by kind
-                order by c desc
-                """
-            ),
-            {"m": minutes},
-        ).all()
-        signals_by_kind = {k: int(c) for k, c in kinds}
-
-        event_types = conn.execute(
-            text(
-                """
-                select event_type, count(*) as c
-                from analyses
-                where created_at >= now() - (:m || ' minutes')::interval
-                group by event_type
-                order by c desc
-                limit 12
-                """
-            ),
-            {"m": minutes},
-        ).all()
-
-    recent: list[dict[str, Any]] = []
-    ticker_counts: dict[str, dict[str, Any]] = {}
-    for r in recent_rows:
-        published_at = r.get("published_at")
-        analysis_data = r.get("analysis_data") if isinstance(r.get("analysis_data"), dict) else None
-        tickers = (analysis_data or {}).get("tickers") if isinstance(analysis_data, dict) else None
-        if not isinstance(tickers, list):
-            tickers = []
-        for t in tickers:
-            if not isinstance(t, dict):
-                continue
-            ts_code = t.get("ts_code")
-            if not ts_code:
-                continue
-            if ts_code not in ticker_counts:
-                ticker_counts[ts_code] = {"ts_code": ts_code, "name": t.get("name"), "count": 0}
-            ticker_counts[ts_code]["count"] += 1
-
-        deep_optimized_at = (analysis_data or {}).get("deep_optimized_at") if isinstance(analysis_data, dict) else None
-        impact = (analysis_data or {}).get("impact") if isinstance(analysis_data, dict) else None
-        recent.append(
-            {
-                "canonical_id": r.get("canonical_id"),
-                "kind": r.get("kind"),
-                "created_at": r.get("signal_created_at").isoformat() if r.get("signal_created_at") else None,
-                "title": r.get("title"),
-                "url": r.get("url"),
-                "published_at": published_at.isoformat() if hasattr(published_at, "isoformat") and published_at else None,
-                "event_type": r.get("event_type"),
-                "tickers": tickers,
-                "impact": impact if isinstance(impact, dict) else None,
-                "llm_used": bool(r.get("llm_used")),
-                "deep_optimized_at": deep_optimized_at,
-            }
-        )
-
-    top_tickers = sorted(ticker_counts.values(), key=lambda x: int(x.get("count") or 0), reverse=True)[:12]
-
-    return {
-        "window_minutes": minutes,
-        "signals_by_kind": signals_by_kind,
-        "top_event_types": [{"event_type": et, "count": int(c)} for et, c in event_types],
-        "top_tickers": top_tickers,
-        "recent": recent,
-    }
-
-
 @app.get("/events/{event_id}", operation_id="get_event_timeline")
 def event_timeline(event_id: str, limit: int = Query(default=50, ge=1, le=200)) -> list[dict[str, Any]]:
     settings = get_settings()
@@ -360,330 +260,6 @@ def entity_profile(ts_code: str) -> dict[str, Any]:
     }
 
 
-async def _check_nats(url: str) -> tuple[bool, str | None]:
-    try:
-        nc = await nats.connect(url, connect_timeout=2)
-        await nc.drain()
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
-
-async def _nats_js_stats(url: str, *, stream: str, consumer: str) -> dict[str, Any]:
-    nc = await nats.connect(url, connect_timeout=2)
-    js = nc.jetstream()
-    out: dict[str, Any] = {"stream": stream, "consumer": consumer}
-    try:
-        sinfo = await js.stream_info(stream)
-        out["messages"] = getattr(sinfo.state, "messages", None)
-        out["bytes"] = getattr(sinfo.state, "bytes", None)
-    except Exception as e:
-        out["stream_error"] = str(e)
-    try:
-        cinfo = await js.consumer_info(stream, consumer)
-        out["num_pending"] = getattr(cinfo, "num_pending", None)
-        out["num_ack_pending"] = getattr(cinfo, "num_ack_pending", None)
-        out["num_redelivered"] = getattr(cinfo, "num_redelivered", None)
-    except Exception as e:
-        out["consumer_error"] = str(e)
-    await nc.drain()
-    return out
-
-
-def _tail_file(path: Path, n: int = 200) -> str:
-    n = max(1, min(int(n), 2000))
-    if not path.exists():
-        return ""
-    # Fast tail: read backwards in blocks.
-    block_size = 8192
-    data = b""
-    with path.open("rb") as f:
-        f.seek(0, os.SEEK_END)
-        size = f.tell()
-        pos = size
-        while pos > 0 and data.count(b"\n") <= n:
-            step = min(block_size, pos)
-            pos -= step
-            f.seek(pos)
-            data = f.read(step) + data
-            if pos == 0:
-                break
-    lines = data.splitlines()[-n:]
-    try:
-        return b"\n".join(lines).decode("utf-8", errors="replace")
-    except Exception:
-        return "\n".join([line.decode("utf-8", errors="replace") for line in lines])
-
-
-def _process_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
-def _proc_cmdline(pid: int) -> str | None:
-    p = Path("/proc") / str(pid) / "cmdline"
-    try:
-        raw = p.read_bytes()
-        if not raw:
-            return None
-        return " ".join([x for x in raw.decode("utf-8", errors="replace").split("\x00") if x])
-    except Exception:
-        return None
-
-
-@app.get("/admin/status", operation_id="admin_status")
-def admin_status() -> dict[str, Any]:
-    settings = get_settings()
-    engine = make_engine(settings.pg_dsn)
-    init_db(engine)
-
-    deps: dict[str, Any] = {}
-
-    # Postgres + basic counts
-    try:
-        with engine.connect() as conn:
-            counts = {
-                "articles": int(conn.execute(text("select count(*) from articles")).scalar() or 0),
-                "analyses": int(conn.execute(text("select count(*) from analyses")).scalar() or 0),
-                "raw_documents": int(conn.execute(text("select count(*) from raw_documents")).scalar() or 0),
-                "signals": int(conn.execute(text("select count(*) from signals")).scalar() or 0),
-                "a_share_basic": int(conn.execute(text("select count(*) from a_share_basic")).scalar() or 0),
-            }
-            latest = {
-                "signal_at": (
-                    conn.execute(text("select max(created_at) from signals")).scalar()
-                ),
-                "article_at": (
-                    conn.execute(text("select max(updated_at) from articles")).scalar()
-                ),
-            }
-        deps["postgres"] = {"ok": True}
-    except Exception as e:
-        counts = {}
-        latest = {"signal_at": None, "article_at": None}
-        deps["postgres"] = {"ok": False, "error": str(e)}
-
-    # Redis
-    try:
-        r = Redis.from_url(settings.redis_url)
-        r.ping()
-        deps["redis"] = {"ok": True}
-    except Exception as e:
-        deps["redis"] = {"ok": False, "error": str(e)}
-
-    # NATS
-    ok, err = asyncio.run(_check_nats(settings.nats_url))
-    deps["nats"] = {"ok": ok, "error": err}
-    js_stats = asyncio.run(_nats_js_stats(settings.nats_url, stream=settings.nats_stream, consumer="txnews_raw_bridge"))
-
-    # MinIO
-    try:
-        from tx_news.storage.minio import S3Client
-
-        s3 = S3Client(
-            endpoint_url=settings.s3_endpoint,
-            access_key=settings.s3_access_key,
-            secret_key=settings.s3_secret_key,
-            region=settings.s3_region,
-            bucket=settings.s3_bucket,
-        )
-        s3._client().list_buckets()  # type: ignore[attr-defined]
-        deps["minio"] = {"ok": True}
-    except Exception as e:
-        deps["minio"] = {"ok": False, "error": str(e)}
-
-    # Qdrant
-    try:
-        q = QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection)
-        q._client().get_collections()  # type: ignore[attr-defined]
-        deps["qdrant"] = {"ok": True}
-    except Exception as e:
-        deps["qdrant"] = {"ok": False, "error": str(e)}
-
-    # Normalize latest datetimes to ISO strings
-    latest_out = {}
-    for k, v in latest.items():
-        latest_out[k] = v.isoformat() if hasattr(v, "isoformat") and v else None
-
-    return {
-        "dependencies": deps,
-        "counts": counts,
-        "latest": latest_out,
-        "s3": {"endpoint": settings.s3_endpoint, "bucket": settings.s3_bucket},
-        "qdrant": {"url": settings.qdrant_url, "collection": settings.qdrant_collection},
-        "nats_jetstream": js_stats,
-    }
-
-
-@app.get("/admin/processes", operation_id="admin_processes")
-def admin_processes() -> dict[str, Any]:
-    processes: list[dict[str, Any]] = []
-    for pidfile in sorted(RUN_DIR.glob("*.pid")):
-        name = pidfile.stem
-        try:
-            pid = int(pidfile.read_text(encoding="utf-8").strip())
-        except Exception:
-            processes.append({"name": name, "pid": None, "alive": False, "error": "invalid pidfile"})
-            continue
-        alive = _process_alive(pid)
-        processes.append(
-            {
-                "name": name,
-                "pid": pid,
-                "alive": alive,
-                "cmdline": _proc_cmdline(pid) if alive else None,
-                "pidfile": str(pidfile.relative_to(ROOT_DIR)),
-            }
-        )
-    return {"processes": processes}
-
-
-@app.get("/admin/pipeline", operation_id="admin_pipeline")
-def admin_pipeline(minutes: int = Query(default=60, ge=5, le=1440)) -> dict[str, Any]:
-    settings = get_settings()
-    engine = make_engine(settings.pg_dsn)
-    init_db(engine)
-
-    with engine.connect() as conn:
-        window_raw = int(
-            conn.execute(text("select count(*) from raw_documents where created_at >= now() - (:m || ' minutes')::interval"), {"m": minutes}).scalar() or 0
-        )
-        window_versions = int(
-            conn.execute(text("select count(*) from article_versions where created_at >= now() - (:m || ' minutes')::interval"), {"m": minutes}).scalar() or 0
-        )
-        window_analyses = int(
-            conn.execute(text("select count(*) from analyses where created_at >= now() - (:m || ' minutes')::interval"), {"m": minutes}).scalar() or 0
-        )
-        window_deep = int(
-            conn.execute(
-                text(
-                    "select count(*) from signals where kind = 'deep_analysis_updated' and created_at >= now() - (:m || ' minutes')::interval"
-                ),
-                {"m": minutes},
-            ).scalar()
-            or 0
-        )
-        kinds = conn.execute(
-            text(
-                "select kind, count(*) as c from signals where created_at >= now() - (:m || ' minutes')::interval group by kind order by c desc"
-            ),
-            {"m": minutes},
-        ).all()
-        window_signals = {k: int(c) for k, c in kinds}
-
-        latest_raw = conn.execute(
-            text(
-                "select source_id, url, fetched_at, created_at from raw_documents order by created_at desc limit 1"
-            )
-        ).mappings().first()
-        latest_analysis = conn.execute(
-            text("select canonical_id, event_type, created_at from analyses order by created_at desc limit 1")
-        ).mappings().first()
-        latest_version = conn.execute(
-            text(
-                "select canonical_id, source_id, url, coalesce(published_at, fetched_at) as t from article_versions order by coalesce(published_at, fetched_at) desc limit 1"
-            )
-        ).mappings().first()
-
-        max_raw = conn.execute(text("select max(created_at) from raw_documents")).scalar()
-        max_an = conn.execute(text("select max(created_at) from analyses")).scalar()
-        lag_seconds = None
-        if max_raw and max_an:
-            lag = (max_raw - max_an).total_seconds()
-            lag_seconds = float(lag)
-
-    def _dt(v):
-        return v.isoformat() if hasattr(v, "isoformat") and v else None
-
-    return {
-        "window_minutes": minutes,
-        "counts": {
-            "raw_documents": window_raw,
-            "article_versions": window_versions,
-            "analyses": window_analyses,
-            "deep_analyses": window_deep,
-            "signals_by_kind": window_signals,
-        },
-        "latest": {
-            "raw_document": {
-                "source_id": latest_raw.get("source_id") if latest_raw else None,
-                "url": latest_raw.get("url") if latest_raw else None,
-                "fetched_at": _dt(latest_raw.get("fetched_at")) if latest_raw else None,
-                "created_at": _dt(latest_raw.get("created_at")) if latest_raw else None,
-            }
-            if latest_raw
-            else None,
-            "article_version": {
-                "canonical_id": latest_version.get("canonical_id") if latest_version else None,
-                "source_id": latest_version.get("source_id") if latest_version else None,
-                "url": latest_version.get("url") if latest_version else None,
-                "time": _dt(latest_version.get("t")) if latest_version else None,
-            }
-            if latest_version
-            else None,
-            "analysis": {
-                "canonical_id": latest_analysis.get("canonical_id") if latest_analysis else None,
-                "event_type": latest_analysis.get("event_type") if latest_analysis else None,
-                "created_at": _dt(latest_analysis.get("created_at")) if latest_analysis else None,
-            }
-            if latest_analysis
-            else None,
-        },
-        "lag_seconds_raw_minus_analysis": lag_seconds,
-    }
-
-
-def _read_masterdata_cache() -> dict[str, Any] | None:
-    candidates = [
-        ROOT_DIR / "var" / "cache" / "a_share" / "stock_basic.json",
-        ROOT_DIR / "var" / "cache" / "tushare" / "stock_basic.json",
-    ]
-    for cache_path in candidates:
-        if not cache_path.exists():
-            continue
-        try:
-            payload = json.loads(cache_path.read_text(encoding="utf-8"))
-            rows_obj = payload.get("rows")
-            return {
-                "path": str(cache_path.relative_to(ROOT_DIR)),
-                "source": payload.get("source"),
-                "fetched_at": payload.get("fetched_at"),
-                "rows": len(rows_obj) if isinstance(rows_obj, list) else None,
-            }
-        except Exception:
-            return {"path": str(cache_path.relative_to(ROOT_DIR)), "error": "invalid json"}
-    return None
-
-
-@app.get("/admin/masterdata", operation_id="admin_masterdata")
-def admin_masterdata() -> dict[str, Any]:
-    return {"stock_basic_cache": _read_masterdata_cache()}
-
-
-@app.get("/admin/tushare", operation_id="admin_tushare")
-def admin_tushare() -> dict[str, Any]:
-    # Backward-compatible alias.
-    return {"stock_basic_cache": _read_masterdata_cache()}
-
-
-@app.get("/admin/logs/{name}", operation_id="admin_logs")
-def admin_logs(name: str, n: int = Query(default=200, ge=1, le=2000)) -> dict[str, Any]:
-    allowed = {
-        "bootstrap": LOG_DIR / "bootstrap.log",
-        "api": LOG_DIR / "api.log",
-        "collector": LOG_DIR / "collector.log",
-        "nats_bridge": LOG_DIR / "nats_bridge.log",
-        "celery_worker": LOG_DIR / "celery_worker.log",
-    }
-    path = allowed.get(name)
-    if not path:
-        return {"error": "not_allowed", "allowed": sorted(allowed.keys())}
-    return {"name": name, "path": str(path.relative_to(ROOT_DIR)), "tail": _tail_file(path, n=n)}
-
-
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -698,21 +274,50 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     message: dict[str, Any]
 
+
+def _resolve_user_llm(request: Request) -> dict[str, Any] | None:
+    """
+    Resolve per-user LLM config from Redis if cookie exists.
+    Returns None when not configured.
+    """
+    settings = get_settings()
+    uid = (request.cookies.get(UID_COOKIE) or "").strip()
+    if not uid:
+        return None
+    try:
+        r = Redis.from_url(settings.redis_url)
+        cfg = get_user_llm_config(r, uid)
+    except Exception:
+        return None
+    if not cfg:
+        return None
+    return {"api_key": cfg.api_key, "base_url": cfg.base_url, "model": cfg.model}
+
+
 def _sse(event: str, data: Any) -> str:
     payload = json.dumps(data, ensure_ascii=False)
     return f"event: {event}\ndata: {payload}\n\n"
 
 
 @app.post("/chat", response_model=ChatResponse, operation_id="chat_agent")
-def chat_agent(req: ChatRequest) -> ChatResponse:
+def chat_agent(req: ChatRequest, request: Request) -> ChatResponse:
     settings = get_settings()
     file_cfg = settings.load_file_settings()
     llm = settings.resolve_llm_chat(file_cfg)
-    api_key = llm.get("api_key")
-    model = llm.get("model") or "qwen3-max"
-    base_url = llm.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    user_llm = _resolve_user_llm(request) or {}
+    api_key = user_llm.get("api_key") or llm.get("api_key")
+    model = user_llm.get("model") or llm.get("model") or "qwen3-max"
+    base_url = user_llm.get("base_url") or llm.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     if not api_key:
+        if settings.require_user_llm:
+            return ChatResponse(
+                message={
+                    "role": "assistant",
+                    "content": "未配置个人 LLM：请先访问 http://localhost:8001/ 设置 base_url/model/api_key。",
+                    "meta": {"tools": [], "evidence": []},
+                }
+            )
         return ChatResponse(
             message={
                 "role": "assistant",
@@ -756,13 +361,14 @@ def chat_agent(req: ChatRequest) -> ChatResponse:
 
 
 @app.post("/chat/stream", operation_id="chat_agent_stream")
-def chat_agent_stream(req: ChatRequest) -> StreamingResponse:
+def chat_agent_stream(req: ChatRequest, request: Request) -> StreamingResponse:
     settings = get_settings()
     file_cfg = settings.load_file_settings()
     llm = settings.resolve_llm_chat(file_cfg)
-    api_key = llm.get("api_key")
-    model = llm.get("model") or "qwen3-max"
-    base_url = llm.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    user_llm = _resolve_user_llm(request) or {}
+    api_key = user_llm.get("api_key") or llm.get("api_key")
+    model = user_llm.get("model") or llm.get("model") or "qwen3-max"
+    base_url = user_llm.get("base_url") or llm.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
     timeout_seconds = int(llm.get("timeout_seconds") or 60)
     trace_id = secrets.token_hex(4)
 
@@ -781,6 +387,16 @@ def chat_agent_stream(req: ChatRequest) -> StreamingResponse:
         yield _sse("ready", {"ok": True})
         if not api_key:
             logger.warning("chat_stream no api key trace=%s", trace_id)
+            if settings.require_user_llm:
+                yield _sse(
+                    "done",
+                    {
+                        "role": "assistant",
+                        "content": "未配置个人 LLM：请先访问 http://localhost:8001/ 设置 base_url/model/api_key。",
+                        "meta": {"tools": [], "evidence": []},
+                    },
+                )
+                return
             yield _sse(
                 "done",
                 {

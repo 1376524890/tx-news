@@ -8,10 +8,12 @@
 
 架构（≤3行）：
 - 对应 Router 路由的页面级组件。
-- `ChatView` 负责流式对话交互（工具调用进度以自然语言展示，并在完成后自动折叠；侧栏统计包含轮询接口平均耗时）；`AdminView` 负责系统监控与日志展示。
+- `ChatView` 负责流式对话交互（工具调用进度以自然语言展示，并在完成后自动折叠；侧栏统计包含轮询接口平均耗时）；`ConfigView` 提供按用户在线 LLM 配置（独立端口 8001）。
 
 ## 文件
 | 文件 | 地位 | 功能 |
 | --- | --- | --- |
 | `ChatView.vue` | 对话页 | 集成 SSE 客户端、Markdown 渲染与信号侧边栏。 |
-| `AdminView.vue` | 管理台 | 展示 API 状态、管道吞吐、进程状态与日志 Tail。 |
+| `ConfigView.vue` | 配置页 | 在线 LLM（base_url/model/api_key）配置（admin build，用于 8001）。 |
+| `DashboardView.vue` | Legacy | 旧看板页面（依赖已下线的 `/dashboard/*` API；不再暴露）。 |
+| `AdminView.vue` | Legacy | 旧管理台页面（已不在默认路由中使用）。 |

@@ -20,6 +20,7 @@
 | `models.py` | DTO 模型 | Pydantic 数据结构（Raw/Normalized/Canonical/Analysis）。 |
 | `settings.py` | 配置入口 | 环境变量（含 `llm.chat`/`llm.deep` 分流）+ `config/` 文件加载与默认值。 |
 | `logging.py` | 基础设施 | 统一日志格式与等级配置。 |
+| `user_llm_config.py` | 用户配置 | 单用户在线 LLM 配置读写（用于按用户分摊 chat 成本）。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |
 
 ## 子目录

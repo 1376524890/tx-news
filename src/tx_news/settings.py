@@ -52,6 +52,16 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "txnews_articles"
 
+    # Per-user LLM config (stored in Redis, keyed by cookie uid)
+    require_user_llm: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("TXNEWS_REQUIRE_USER_LLM"),
+    )
+    user_llm_ttl_seconds: int = Field(
+        default=60 * 60 * 24 * 30,  # 30 days
+        validation_alias=AliasChoices("TXNEWS_USER_LLM_TTL_SECONDS"),
+    )
+
     # LLM keys (backward-compatible)
     # - preferred: TXNEWS_LLM_API_KEY (OpenAI-compatible services)
     # - compatible: DASHSCOPE_API_KEY / TXNEWS_DASHSCOPE_API_KEY

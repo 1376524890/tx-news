@@ -43,7 +43,19 @@ def main() -> int:
         health = _http_get_json(client, f"{base_url}/health")
         _expect(isinstance(health, dict) and health.get("status") == "ok", f"/health not ok: {health}")
 
-        # 2) /search (knowledge-base retrieval)
+        # 2) /status should report qdrant+postgres ok (KB depends on both).
+        status = _http_get_json(client, f"{base_url}/status")
+        _expect(isinstance(status, dict), f"/status response is not a dict: {type(status)}")
+        deps = status.get("dependencies")
+        _expect(isinstance(deps, dict), "/status missing dependencies dict")
+        qd = deps.get("qdrant")
+        _expect(isinstance(qd, dict), "/status dependencies.qdrant missing dict")
+        _expect(bool(qd.get("ok")), f"qdrant is not ok (KB /search requires it): {qd}")
+        pg = deps.get("postgres")
+        _expect(isinstance(pg, dict), "/status dependencies.postgres missing dict")
+        _expect(bool(pg.get("ok")), f"postgres is not ok (KB /articles requires it): {pg}")
+
+        # 3) /search (knowledge-base retrieval)
         query = str(args.query)
         res = _http_get_json(client, f"{base_url}/search", params={"q": query, "limit": int(args.limit)})
         _expect(isinstance(res, list), f"/search response is not a list: {type(res)}")
@@ -51,7 +63,7 @@ def main() -> int:
         if args.require_hit:
             _expect(len(hits) > 0, "no hits from /search (require-hit enabled)")
 
-        # 3) follow up with /articles/{canonical_id} for the first hit (should be a real DB record)
+        # 4) follow up with /articles/{canonical_id} for the first hit (should be a real DB record)
         article = None
         if hits:
             cid = str(hits[0].get("canonical_id") or "")
@@ -62,6 +74,7 @@ def main() -> int:
 
         summary = {
             "health": health,
+            "status": status,
             "query": query,
             "hits_count": len(hits),
             "hits": hits[: min(len(hits), 3)],
