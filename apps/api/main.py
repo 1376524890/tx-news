@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from redis import Redis
@@ -34,7 +34,7 @@ from tx_news.storage.postgres import (
     make_engine,
 )
 from tx_news.storage.qdrant import QdrantStore, scored_point_canonical_id
-from tx_news.user_llm_config import UID_COOKIE, get_user_llm_config
+from tx_news.user_llm_config import UID_COOKIE, clear_user_llm_config, get_user_llm_config, make_user_id, set_user_llm_config
 
 
 configure_logging()
@@ -43,6 +43,8 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="tx-news API", version="0.1.0")
 
 STATIC_DIR = Path(__file__).resolve().parents[2] / "apps" / "web" / "dist_public"
+
+NO_STORE_HEADERS = {"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"}
 
 # Mount /assets for Vue SPA
 if (STATIC_DIR / "assets").exists():
@@ -103,8 +105,20 @@ def ui_index() -> Response:
     return FileResponse(str(index))
 
 
+@app.get("/dashboard", include_in_schema=False)
+@app.get("/dashboard/", include_in_schema=False)
+def ui_dashboard() -> Response:
+    return ui_index()
+
+
+@app.get("/config", include_in_schema=False)
+@app.get("/config/", include_in_schema=False)
+def ui_config() -> Response:
+    return ui_index()
+
+
 @app.get("/status", operation_id="status")
-def status() -> dict[str, Any]:
+def status() -> Response:
     """
     Public-facing status for the chat UI (keep minimal; do not expose admin UI).
     """
@@ -134,7 +148,153 @@ def status() -> dict[str, Any]:
     except Exception as e:
         deps["qdrant"] = {"ok": False, "error": str(e)}
 
-    return {"dependencies": deps, "counts": counts}
+    return JSONResponse({"dependencies": deps, "counts": counts}, headers=NO_STORE_HEADERS)
+
+
+def _redis() -> Redis:
+    settings = get_settings()
+    return Redis.from_url(settings.redis_url)
+
+
+def _ensure_uid(request: Request) -> tuple[str, dict[str, str]]:
+    uid = (request.cookies.get(UID_COOKIE) or "").strip()
+    if uid:
+        return uid, {}
+    uid = make_user_id()
+    return uid, {
+        "Set-Cookie": f"{UID_COOKIE}={uid}; Path=/; HttpOnly; SameSite=Lax",
+    }
+
+
+class UserLLMConfigIn(BaseModel):
+    base_url: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    api_key: str = Field(min_length=1)
+
+
+@app.get("/api/config", operation_id="get_user_llm_config")
+def api_get_config(request: Request) -> Response:
+    uid, headers = _ensure_uid(request)
+    cfg = get_user_llm_config(_redis(), uid)
+    out = {"uid": uid, "configured": bool(cfg), "config": (cfg.masked() if cfg else None)}
+    return JSONResponse(content=out, headers={**headers, **NO_STORE_HEADERS})
+
+
+@app.post("/api/config", operation_id="set_user_llm_config")
+def api_set_config(request: Request, body: UserLLMConfigIn) -> Response:
+    uid, headers = _ensure_uid(request)
+    settings = get_settings()
+    ttl = int(getattr(settings, "user_llm_ttl_seconds", 0) or 0)
+    set_user_llm_config(
+        _redis(),
+        uid=uid,
+        base_url=body.base_url,
+        model=body.model,
+        api_key=body.api_key,
+        ttl_seconds=ttl if ttl > 0 else None,
+    )
+    cfg = get_user_llm_config(_redis(), uid)
+    out = {"uid": uid, "configured": bool(cfg), "config": (cfg.masked() if cfg else None)}
+    return JSONResponse(content=out, headers={**headers, **NO_STORE_HEADERS})
+
+
+@app.post("/api/config/clear", operation_id="clear_user_llm_config")
+def api_clear_config(request: Request) -> Response:
+    uid, headers = _ensure_uid(request)
+    clear_user_llm_config(_redis(), uid)
+    out = {"uid": uid, "configured": False, "config": None}
+    return JSONResponse(content=out, headers={**headers, **NO_STORE_HEADERS})
+
+
+@app.get("/dashboard/summary", operation_id="dashboard_summary")
+def dashboard_summary(
+    minutes: int = Query(default=180, ge=5, le=60 * 24),
+    limit: int = Query(default=40, ge=1, le=200),
+) -> Response:
+    """
+    Public summary used by the dashboard page (no admin/ops data, only aggregated DB results).
+    """
+    settings = get_settings()
+    engine = make_engine(settings.pg_dsn)
+    init_db(engine)
+
+    window_seconds = int(minutes) * 60
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "select kind, count(*) as n "
+                "from signals "
+                "where created_at >= (now() - (:sec || ' seconds')::interval) "
+                "group by kind"
+            ),
+            {"sec": window_seconds},
+        ).all()
+        signals_by_kind = {str(r[0]): int(r[1] or 0) for r in rows}
+
+        rows = conn.execute(
+            text(
+                "select coalesce(event_type, 'other') as event_type, count(*) as n "
+                "from analyses "
+                "where created_at >= (now() - (:sec || ' seconds')::interval) "
+                "group by event_type "
+                "order by n desc "
+                "limit 12"
+            ),
+            {"sec": window_seconds},
+        ).all()
+        top_event_types = [{"event_type": str(r[0] or "other"), "count": int(r[1] or 0)} for r in rows]
+
+        rows = conn.execute(
+            text(
+                "select canonical_id, kind, created_at "
+                "from signals "
+                "where created_at >= (now() - (:sec || ' seconds')::interval) "
+                "order by created_at desc "
+                "limit :limit"
+            ),
+            {"sec": window_seconds, "limit": int(limit)},
+        ).all()
+
+    recent: list[dict[str, Any]] = []
+    tickers_count: dict[str, int] = {}
+    for canonical_id, kind, created_at in rows:
+        cid = str(canonical_id)
+        a = get_article(engine, cid)
+        v = get_latest_version(engine, cid)
+        an = get_analysis(engine, cid)
+        data = an.data if an and isinstance(an.data, dict) else {}
+        tickers = _normalize_tickers(data.get("tickers"))
+        for t in tickers:
+            ts = str((t or {}).get("ts_code") or "").strip()
+            if ts:
+                tickers_count[ts] = tickers_count.get(ts, 0) + 1
+        recent.append(
+            {
+                "canonical_id": cid,
+                "kind": str(kind),
+                "created_at": created_at.isoformat() if created_at else None,
+                "title": getattr(a, "title", None) if a else None,
+                "url": v.url if v else None,
+                "published_at": v.published_at.isoformat() if v and v.published_at else None,
+                "event_type": str(getattr(an, "event_type", None) or "") or None,
+                "tickers": tickers,
+                "impact": data.get("impact"),
+                "llm_used": bool(getattr(an, "llm_used", 0)) if an else False,
+                "deep_optimized_at": data.get("deep_optimized_at"),
+            }
+        )
+
+    top_tickers = [{"ts_code": k, "count": v} for k, v in sorted(tickers_count.items(), key=lambda x: x[1], reverse=True)[:20]]
+    return JSONResponse(
+        {
+            "window_minutes": int(minutes),
+            "signals_by_kind": signals_by_kind,
+            "top_event_types": top_event_types,
+            "top_tickers": top_tickers,
+            "recent": recent,
+        },
+        headers=NO_STORE_HEADERS,
+    )
 
 
 @app.get("/search", response_model=list[SearchHit], operation_id="search_news")
@@ -199,20 +359,92 @@ def article(canonical_id: str) -> dict[str, Any]:
 
 
 @app.get("/signals", operation_id="list_signals")
-def signals(limit: int = Query(default=50, ge=1, le=200)) -> list[dict[str, Any]]:
+def signals(limit: int = Query(default=50, ge=1, le=200)) -> Response:
     settings = get_settings()
     engine = make_engine(settings.pg_dsn)
     init_db(engine)
-    rows = list_signals(engine, limit=limit)
-    return [
-        {
-            "canonical_id": r.canonical_id,
-            "kind": r.kind,
-            "data": r.data,
-            "created_at": r.created_at.isoformat(),
-        }
-        for r in rows
-    ]
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                with latest as (
+                  select distinct on (canonical_id)
+                    canonical_id, url, published_at, fetched_at
+                  from article_versions
+                  order by canonical_id, published_at desc nulls last, fetched_at desc
+                )
+                select
+                  s.canonical_id,
+                  s.kind,
+                  s.data as signal_data,
+                  s.created_at,
+                  a.title,
+                  an.event_type,
+                  an.data as analysis_data,
+                  an.llm_used as llm_used,
+                  l.url,
+                  l.published_at
+                from signals s
+                left join articles a on a.canonical_id = s.canonical_id
+                left join analyses an on an.canonical_id = s.canonical_id
+                left join latest l on l.canonical_id = s.canonical_id
+                order by s.created_at desc
+                limit :limit
+                """
+            ),
+            {"limit": int(limit)},
+        ).all()
+
+    out: list[dict[str, Any]] = []
+    for canonical_id, kind, signal_data, created_at, title, event_type, analysis_data, llm_used, url, published_at in rows:
+        data = analysis_data if isinstance(analysis_data, dict) else {}
+        tickers = _normalize_tickers(data.get("tickers"))
+        impact = data.get("impact") if isinstance(data.get("impact"), dict) else None
+        deep_optimized_at = data.get("deep_optimized_at") if isinstance(data.get("deep_optimized_at"), str) else None
+
+        ts_codes = []
+        for t in tickers:
+            ts = str((t or {}).get("ts_code") or "").strip()
+            if ts:
+                ts_codes.append(ts)
+        ts_codes = ts_codes[:4]
+
+        kind_s = str(kind)
+        event_type_s = str(event_type or "").strip() or None
+        if kind_s == "analysis_updated":
+            summary = f"分析完成：{event_type_s or 'other'}"
+            if ts_codes:
+                summary += f" · {', '.join(ts_codes)}"
+        elif kind_s == "deep_analysis_updated":
+            summary = f"深分析完成：{event_type_s or 'other'}"
+            if ts_codes:
+                summary += f" · {', '.join(ts_codes)}"
+        elif kind_s == "breaking":
+            reason = None
+            if isinstance(signal_data, dict):
+                reason = signal_data.get("reason")
+            summary = "发现新文章" if reason == "new_canonical" else "Breaking"
+        else:
+            summary = kind_s
+
+        out.append(
+            {
+                "canonical_id": str(canonical_id),
+                "kind": kind_s,
+                "created_at": created_at.isoformat() if created_at else None,
+                "title": title,
+                "url": url,
+                "published_at": published_at.isoformat() if published_at else None,
+                "event_type": event_type_s,
+                "tickers": tickers,
+                "impact": impact,
+                "llm_used": bool(llm_used or 0),
+                "deep_optimized_at": deep_optimized_at,
+                "summary": summary,
+            }
+        )
+
+    return JSONResponse(out, headers=NO_STORE_HEADERS)
 
 
 @app.get("/events/{event_id}", operation_id="get_event_timeline")

@@ -13,4 +13,4 @@
 ## 文件
 | 文件 | 地位 | 功能 |
 | --- | --- | --- |
-| `index.ts` | 路由表 | 构建模式区分：public UI `/`（对话）；admin UI `/`（配置）。 |
+| `index.ts` | 路由表 | 构建模式区分：public UI `/`（对话）+ `/dashboard`（看板）+ `/config`（配置）；admin UI `/`（配置）。 |

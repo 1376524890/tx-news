@@ -1,6 +1,6 @@
 <!-- Input: /api/config（cookie 用户配置） -->
 <!-- Output: 在线 LLM 配置界面（base_url/model/api_key），用于按用户分摊成本 -->
-<!-- Pos: 配置页（admin build，用于 8001）（变更时同步更新以上注释与所属目录 FOLDER.md） -->
+<!-- Pos: 配置页（public: /config；admin build: 8001 /）（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
@@ -140,4 +140,3 @@ onMounted(() => {
     </section>
   </div>
 </template>
-

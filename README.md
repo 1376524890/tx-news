@@ -70,7 +70,8 @@ bash scripts/start.sh
 
 4) 打开页面：
 - 对话 UI：`http://localhost:8000/`
-- 配置页（按用户设置在线 LLM）：`http://localhost:8001/`
+- 配置页（按用户设置在线 LLM）：`http://localhost:8000/config`（单端口/反代/Cloudflare Tunnel 推荐）
+- （可选）独立配置服务：`http://localhost:8001/`（本机多端口可用时）
 - 健康检查：`http://localhost:8000/health`
 
 ### 1.3 快速验证
@@ -206,7 +207,7 @@ curl -s "http://localhost:8000/search?q=央行%20降准&limit=10" | jq .
 curl -s "http://localhost:8000/articles/<canonical_id>" | jq .
 ```
 
-- `GET /signals?limit=50`：最新信号（breaking/analysis_updated 等）
+- `GET /signals?limit=50`：最新信号（breaking/analysis_updated/deep_analysis_updated 等；返回已整理的 title/url/event_type/tickers/summary 字段，适合前端直接展示）
 ```bash
 curl -s "http://localhost:8000/signals?limit=50" | jq .
 ```
@@ -244,8 +245,8 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 
 ### 2.3 状态与配置接口
 - `GET /status`：依赖健康（最小集）+ 基础计数（供对话页侧栏展示）
-- `GET http://localhost:8001/api/config`：读取当前用户的在线 LLM 配置（cookie 区分用户）
-- `POST http://localhost:8001/api/config`：设置当前用户的 base_url/model/api_key（用于对话按用户分摊成本）
+- `GET http://localhost:8000/api/config`：读取当前用户的在线 LLM 配置（cookie 区分用户；默认不缓存，适合反代）
+- `POST http://localhost:8000/api/config`：设置当前用户的 base_url/model/api_key（用于对话按用户分摊成本）
 
 ---
 
@@ -258,7 +259,7 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
   - 工具调用（Tool Calls）实时可视化展示。
 - *v0 (Deprecated)*：原静态 HTML/JS 仍在 `apps/api/static`，但不再作为默认 UI。
 
-### 3.2 配置页（`http://localhost:8001/`）
+### 3.2 配置页（`http://localhost:8000/config`）
 - 用于每个前端用户配置自己的在线 LLM（base_url/model/api_key），从而让 `/chat` 与 `/chat/stream` 按用户分摊成本。
 - 配置通过 cookie 区分用户，并写入 Redis；如开启 `TXNEWS_REQUIRE_USER_LLM=1`，未配置用户将无法发起对话。
 
@@ -292,7 +293,7 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 
 ### 4.3 端口与服务（默认）
 - 公网 API + 对话 UI：`http://localhost:8000`
-- 配置 UI：`http://localhost:8001`
+- 配置 UI：`http://localhost:8000/config`
 - Postgres：`localhost:5432`
 - Redis：`localhost:6379`
 - NATS：`localhost:4222`（监控 `http://localhost:8222`）
@@ -520,13 +521,16 @@ python -m apps.mcp.server
 - 日志目录：`var/log/`
 - 常用日志名：`api`、`collector`、`nats_bridge`、`celery_worker`、`bootstrap`
 
+### 8.4 Cloudflare Tunnel / 反代仅暴露单端口
+- 若仅能访问 `8000`：使用配置页 `http://<host>:8000/config`（而不是 `8001`），并确保反代不要缓存 `/status`、`/signals`、`/dashboard/summary`（本项目已对这些接口默认设置 `Cache-Control: no-store`）。
+
 ---
 
 ## 9. v1 可优化方向（路线图）
 
 ### 9.0 v1 已实现（迭代总结）
-- 前端：Vue 3 + TS SPA（public：对话；admin：配置页），SSE 流式对话 + 工具进度可视化（完成后自动折叠），侧栏统计包含轮询接口平均耗时。
-- API：用户侧提供 `/search`（向量检索）、`/chat/stream`（SSE）、`/status`（最小依赖/计数）；配置服务（8001）提供 `/api/config`（按用户设置在线 LLM），并对 `tickers` 等字段做兼容处理以避免 500。
+- 前端：Vue 3 + TS SPA（public：对话 + 看板；admin：配置页），SSE 流式对话 + 工具进度可视化（完成后自动折叠），侧栏统计包含轮询接口平均耗时。
+- API：用户侧提供 `/search`（向量检索）、`/chat/stream`（SSE）、`/status`（最小依赖/计数）、`/dashboard/summary`（看板聚合）；并提供 `/api/config`（按用户设置在线 LLM；单端口反代可用），对 `tickers` 等字段做兼容处理以避免 500。
 - 存储与稳定性：SQLAlchemy Engine 进程内复用，降低长跑场景 Postgres 连接数膨胀风险；Qdrant collection 支持按模型/维度策略自动兼容。
 - 集成：提供 `apps/mcp/server.py`（stdio JSON-RPC）用于外部 Agent/LLM 以 MCP 方式调用知识库/数据库检索能力。
 
@@ -562,7 +566,7 @@ v1 建议聚焦“检索质量 + 可观测性 + 成本治理 + 规模化”：
 ### 11.1 前端重构 (Frontend Refactor)
 - **架构变更**：从原生静态文件 (`apps/api/static/`) 迁移至现代前端工程 (`apps/web/`)。
   - 技术栈：Vue 3 + TypeScript + Vite + Vue Router。
-  - 构建产物：`apps/web/dist_public/`（对话页；8000 挂载）与 `apps/web/dist_admin/`（配置页；8001 挂载）。
+  - 构建产物：`apps/web/dist_public/`（对话+看板+配置入口；8000 挂载）与 `apps/web/dist_admin/`（可选独立配置页；8001 挂载）。
 - **功能增强**：
   - 构建模式区分：public UI 与 admin UI 输出不同 bundle（避免把配置页暴露到用户侧端口）。
   - 交互优化：流式对话增加工具调用可视化（进度栏 + 完成自动折叠），侧栏增加轮询接口平均耗时统计。

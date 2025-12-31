@@ -15,6 +15,8 @@ const isAdmin = import.meta.env.MODE === 'admin'
 
     <div class="panel-actions" v-if="!isAdmin">
       <router-link to="/" class="btn btn-ghost" exact-active-class="active">对话</router-link>
+      <router-link to="/dashboard" class="btn btn-ghost" exact-active-class="active">看板</router-link>
+      <router-link to="/config" class="btn btn-ghost" exact-active-class="active">配置</router-link>
     </div>
     <div class="panel-actions" v-else>
       <router-link to="/" class="btn btn-ghost" exact-active-class="active">配置</router-link>

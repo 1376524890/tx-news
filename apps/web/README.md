@@ -8,6 +8,9 @@
 - `dist_public/`：用户对话页（由 `apps/api/main.py` 在 `8000` 挂载）
 - `dist_admin/`：配置页（由 `apps/admin/main.py` 在 `8001` 挂载）
 
+说明：
+- 若你通过 Cloudflare Tunnel / 反向代理只暴露一个端口（例如仅 `8000`），配置页可直接使用 `http://<host>:8000/config`（由 public SPA 路由提供），并通过同源 `/api/config` 保存“按用户在线 LLM 配置”。
+
 ## 本地构建
 
 在仓库根目录执行：

@@ -3,7 +3,7 @@
 <!-- Pos: 前端对话页（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { computed, ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { marked } from 'marked'
 // Actually the original app.js had a custom markdown renderer. I'll use `marked` for better support.
 
@@ -30,7 +30,14 @@ interface ToolProgressItem {
 interface Signal {
     canonical_id: string
     kind: string
-    created_at: string
+    created_at: string | null
+    title?: string | null
+    url?: string | null
+    published_at?: string | null
+    event_type?: string | null
+    tickers?: Array<{ ts_code?: string }> | null
+    deep_optimized_at?: string | null
+    summary?: string | null
 }
 
 const messages = ref<Message[]>([])
@@ -44,6 +51,30 @@ const counts = ref({ articles: '-', analyses: '-', signals: '-', a_share: '-' })
 const lat = ref({ status_ms: '-', signals_ms: '-' })
 const signals = ref<Signal[]>([])
 const latWin = { status: [] as number[], signals: [] as number[] }
+const SIGNALS_FETCH_LIMIT = 50
+const SIGNALS_VIEW_LIMIT = 12
+
+const signalsView = computed(() => {
+    const xs = (signals.value || [])
+        .slice()
+        .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+    return xs.slice(0, SIGNALS_VIEW_LIMIT)
+})
+
+function fmtTs(iso?: string | null): string {
+    if (!iso) return '-'
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return String(iso)
+    return d.toLocaleString()
+}
+
+function tickersText(s: Signal): string {
+    const xs = (s.tickers || [])
+        .map((x) => (x && typeof x.ts_code === 'string' ? x.ts_code.trim() : ''))
+        .filter((x) => x.length > 0)
+        .slice(0, 4)
+    return xs.length ? xs.join(', ') : ''
+}
 
 // Load history
 onMounted(() => {
@@ -98,9 +129,14 @@ function renderMd(text: string) {
 }
 
 async function api(path: string) {
-    const res = await fetch(path)
+    const res = await fetch(path, { cache: "no-store" })
+    const text = await res.text()
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    return res.json()
+    try {
+        return text ? JSON.parse(text) : null
+    } catch {
+        throw new Error("Invalid JSON response")
+    }
 }
 
 async function refreshStatus() {
@@ -130,7 +166,7 @@ async function refreshStatus() {
 async function refreshSignals() {
     const t0 = Date.now()
     try {
-        signals.value = await api("/signals?limit=30")
+        signals.value = await api(`/signals?limit=${SIGNALS_FETCH_LIMIT}`)
     } catch {
         signals.value = [] // or error indicator
     } finally {
@@ -463,23 +499,37 @@ function toggleToolProgress(msg: Message) {
             <span class="status-text">{{ status.text }}</span>
         </div>
       <div class="kv">
-        <div class="k">articles</div>
+        <div class="k">文章</div>
         <div class="v">{{ counts.articles }}</div>
-        <div class="k">analyses</div>
+        <div class="k">分析</div>
         <div class="v">{{ counts.analyses }}</div>
-        <div class="k">signals</div>
+        <div class="k">信号</div>
         <div class="v">{{ counts.signals }}</div>
-        <div class="k">a_share</div>
+        <div class="k">个股</div>
         <div class="v">{{ counts.a_share }}</div>
-        <div class="k">avg_status</div>
+        <div class="k">状态均耗时</div>
         <div class="v">{{ lat.status_ms }}</div>
-        <div class="k">avg_signals</div>
+        <div class="k">信号均耗时</div>
         <div class="v">{{ lat.signals_ms }}</div>
       </div>
       <div class="list">
-        <div v-for="s in signals" :key="s.canonical_id" class="card">
-            <div class="title">{{ s.kind }} · {{ s.created_at }}</div>
-            <div class="small">canonical_id: <code>{{ s.canonical_id }}</code></div>
+        <div v-for="s in signalsView" :key="s.kind + '|' + s.canonical_id + '|' + (s.created_at || '')" class="card">
+            <div class="title">
+              <span>{{ s.summary || s.kind }}</span>
+              <span class="muted" style="margin-left: 8px;">· {{ fmtTs(s.created_at) }}</span>
+            </div>
+            <div v-if="s.title || s.url" class="small" style="margin-top: 4px;">
+              <a v-if="s.url" :href="s.url" target="_blank" rel="noreferrer">{{ s.title || s.url }}</a>
+              <span v-else>{{ s.title }}</span>
+            </div>
+            <div class="small muted" style="margin-top: 4px;">
+              <span v-if="s.event_type">类型：{{ s.event_type }}</span>
+              <span v-if="tickersText(s)" style="margin-left: 10px;">个股：{{ tickersText(s) }}</span>
+              <span v-if="s.deep_optimized_at" style="margin-left: 10px;">deep ✓</span>
+            </div>
+        </div>
+        <div v-if="(signals || []).length > signalsView.length" class="small muted" style="margin-top: 8px;">
+          已显示最新 {{ signalsView.length }} 条（共 {{ (signals || []).length }} 条）。
         </div>
       </div>
     </div>

@@ -1,4 +1,4 @@
-<!-- Input: /dashboard/summary + /admin/status（轮询） -->
+<!-- Input: /status + /dashboard/summary（轮询） -->
 <!-- Output: 分析结果看板（KPI + 热点 + 最新输出） -->
 <!-- Pos: 前端看板页（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
@@ -23,7 +23,7 @@ type DashboardSummary = {
   window_minutes: number
   signals_by_kind: Record<string, number>
   top_event_types: Array<{ event_type: string; count: number }>
-  top_tickers: Array<{ ts_code: string; name?: string; count: number }>
+  top_tickers: Array<{ ts_code: string; count: number }>
   recent: DashboardRecentItem[]
 }
 
@@ -31,9 +31,11 @@ const windowMinutes = ref(180)
 const summary = ref<DashboardSummary | null>(null)
 const status = ref<any>(null)
 const error = ref<string | null>(null)
+const pollStats = ref({ n: 0, totalMs: 0 })
 
 async function api(path: string) {
-  const res = await fetch(path)
+  const started = performance.now()
+  const res = await fetch(path, { cache: 'no-store' })
   const text = await res.text()
   let data: any = null
   try {
@@ -42,6 +44,8 @@ async function api(path: string) {
     data = { raw: text }
   }
   if (!res.ok) throw new Error((data && (data.error || data.detail)) || `HTTP ${res.status}`)
+  const elapsed = performance.now() - started
+  pollStats.value = { n: pollStats.value.n + 1, totalMs: pollStats.value.totalMs + elapsed }
   return data
 }
 
@@ -49,7 +53,7 @@ async function refresh() {
   try {
     error.value = null
     const [st, s] = await Promise.all([
-      api('/admin/status'),
+      api('/status'),
       api(`/dashboard/summary?minutes=${windowMinutes.value}&limit=40`)
     ])
     status.value = st
@@ -64,9 +68,10 @@ const healthOk = computed(() => {
   return Object.values(deps).every((x: any) => x && x.ok)
 })
 
-const backlog = computed(() => {
-  const js = status.value?.nats_jetstream || {}
-  return js.num_pending ?? '-'
+const avgPollMs = computed(() => {
+  const n = pollStats.value.n
+  if (!n) return null
+  return pollStats.value.totalMs / n
 })
 
 const totalCounts = computed(() => status.value?.counts || {})
@@ -150,9 +155,9 @@ watch(windowMinutes, () => refresh())
             <div class="metric-h">{{ windowMinutes }}m 内 deep_analysis_updated</div>
           </div>
           <div class="metric">
-            <div class="metric-k">队列积压</div>
-            <div class="metric-v">{{ backlog }}</div>
-            <div class="metric-h">NATS JetStream pending</div>
+            <div class="metric-k">轮询平均耗时</div>
+            <div class="metric-v">{{ avgPollMs ? `${avgPollMs.toFixed(0)}ms` : '-' }}</div>
+            <div class="metric-h">/status + /dashboard/summary</div>
           </div>
           <div class="metric">
             <div class="metric-k">articles（总）</div>
@@ -242,7 +247,6 @@ watch(windowMinutes, () => refresh())
         <div class="pill-grid">
           <div v-for="x in summary?.top_tickers || []" :key="x.ts_code" class="pill">
             <span class="mono">{{ x.ts_code }}</span>
-            <span v-if="x.name" class="muted" style="margin-left: 6px">{{ x.name }}</span>
             <span class="pill-count mono">{{ x.count }}</span>
           </div>
           <div v-if="(summary?.top_tickers || []).length === 0" class="muted">暂无数据</div>

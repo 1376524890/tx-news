@@ -8,11 +8,12 @@
 
 架构（≤3行）：
 - FastAPI 对外提供检索/对话等用户侧 HTTP 接口（8000）。
-- 静态挂载 `apps/web/dist_public` 作为用户侧对话 UI（不提供运维管理台 UI）。
+- 静态挂载 `apps/web/dist_public` 作为用户侧 UI（对话 `/`、看板 `/dashboard`、配置 `/config`；不提供运维管理台 UI）。
 - LLM：默认读取 `llm.chat`；也支持从 cookie 用户标识在 Redis 中读取“个人在线 LLM 配置”，用于按用户分摊 chat 成本。
 
 补充：
 - `/chat/stream` 使用 SSE 逐步输出 `delta`（文本增量）、`tool`/`tool_result`（工具调用进度）与 `done`（最终消息）。
+- `/status`、`/signals`、`/dashboard/summary`、`/api/config` 默认返回 `Cache-Control: no-store`，避免被 Cloudflare Tunnel/反代缓存导致“长时间不更新”。
 
 ## 文件
 
