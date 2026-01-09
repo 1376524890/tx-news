@@ -234,8 +234,10 @@ curl -s "http://localhost:8000/signals?limit=50" | jq .
 ### 2.2 对话接口（SSE 流式）
 对话建议使用流式接口（避免长时间无响应）：
 - `POST /chat/stream`：`text/event-stream`
+  - `event: ready`：连接就绪（前端可据此切换 UI 状态）
   - `event: delta`：增量 token
-  - `event: tool`：工具调用
+  - `event: tool`：工具调用开始（name/arguments）
+  - `event: tool_result`：工具调用结果摘要（ok/duration_ms/summary）
   - `event: done`：最终消息（含 meta.tools/meta.evidence）
 
 示例（仅展示首屏，实际是流式）：
@@ -362,6 +364,55 @@ sequenceDiagram
   - `dedup_store`：LSH 近重复 + Qdrant 语义去重 + 写入 Postgres/Qdrant
   - `analyze`：规则分析 +（可选）LLM JSON 增强 + 写入 analyses/signals
   - `deep_analysis`：仅对新 canonical 且 LLM 可用触发深分析（二次推理）
+
+### 5.4 对话页“获取新闻→知识库匹配→分析→反馈”（SSE）
+```mermaid
+sequenceDiagram
+  participant User as 用户
+  participant UI as 前端对话页（Vue）
+  participant API as FastAPI（/chat/stream）
+  participant Agent as TxNewsAgent
+  participant LLM as 在线 LLM（OpenAI-compatible）
+  participant Tools as TxNewsTools
+  participant PG as Postgres（articles/versions/analyses）
+  participant Emb as Embedding 模型
+  participant Q as Qdrant（向量库）
+
+  User->>UI: 输入问题并发送
+  UI->>API: POST /chat/stream（messages/recent_minutes/max_steps）
+  API-->>UI: SSE ready/delta/tool/tool_result/done
+
+  API->>Agent: run_stream(...)
+  Agent->>LLM: chat.completions（携带 tool specs）
+
+  Note over LLM,Tools: 1) 获取“近期新闻”（不返回原文）
+  LLM-->>Agent: tool_call(list_recent)
+  Agent->>Tools: list_recent(minutes, limit)
+  Tools->>PG: 查询最近文章版本 + 已有 analyses（用于摘要/结构化字段）
+  PG-->>Tools: rows
+  Tools-->>Agent: recent items（title/url/published_at/event_type/tickers...）
+  Agent-->>API: SSE tool/tool_result
+  Agent->>LLM: 追加 tool 结果继续推理
+
+  Note over LLM,Tools: 2) 知识库匹配（向量检索）
+  LLM-->>Agent: tool_call(search_news)
+  Agent->>Tools: search_news(q, limit)
+  Tools->>Emb: embed(q) 得到 query vector
+  Emb-->>Tools: vector
+  Tools->>Q: search(vector) 得到候选 canonical_id
+  Q-->>Tools: points（id/score + payload）
+  Tools->>PG: 回查文章元信息与分析结果（拼装可用证据）
+  PG-->>Tools: rows
+  Tools-->>Agent: hits（canonical_id/score/title/url/...）
+  Agent-->>API: SSE tool/tool_result
+  Agent->>LLM: 追加 tool 结果继续推理
+
+  Note over Agent,LLM: 3) 基于证据生成回答（Markdown）\n并附 meta.evidence（可点击 URL 列表）
+  LLM-->>Agent: final assistant message
+  Agent-->>API: done（message.content + meta.tools/meta.evidence）
+  API-->>UI: SSE done
+  UI-->>User: 展示答案 + 工具进度 + 证据链接
+```
 
 关键消息与任务名（便于对齐“数据流/调用链”）：
 - NATS subject：`${TXNEWS_NATS_STREAM}.raw`（默认 `txnews.raw`）
