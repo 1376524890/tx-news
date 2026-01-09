@@ -187,7 +187,7 @@ watch(windowMinutes, () => refresh())
       </div>
       <div class="side-body">
         <div class="table-wrap">
-          <table class="table">
+          <table class="table recent-table">
             <thead>
               <tr>
                 <th style="width: 168px">时间</th>
@@ -208,9 +208,17 @@ watch(windowMinutes, () => refresh())
                 <td class="mono">{{ r.event_type || '-' }}</td>
                 <td class="mono">{{ tickersText(r) }}</td>
                 <td class="mono">{{ fmtImpact(r) }}</td>
-                <td>
-                  <a v-if="r.url" :href="r.url" target="_blank" rel="noreferrer">{{ r.title || r.url }}</a>
-                  <span v-else>{{ r.title || '-' }}</span>
+                <td class="recent-title-cell">
+                  <a
+                    v-if="r.url"
+                    class="recent-title"
+                    :href="r.url"
+                    target="_blank"
+                    rel="noreferrer"
+                    :title="r.title || r.url || ''"
+                    >{{ r.title || r.url }}</a
+                  >
+                  <span v-else class="recent-title" :title="r.title || ''">{{ r.title || '-' }}</span>
                 </td>
               </tr>
               <tr v-if="(summary?.recent || []).length === 0">
@@ -266,5 +274,22 @@ watch(windowMinutes, () => refresh())
   .dashboard-grid {
     grid-template-columns: 1fr;
   }
+}
+
+.recent-table {
+  table-layout: fixed;
+}
+
+.recent-title-cell {
+  vertical-align: top;
+}
+
+.recent-title {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  direction: ltr;
 }
 </style>

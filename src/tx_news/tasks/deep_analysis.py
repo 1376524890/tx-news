@@ -48,7 +48,11 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
     """
     settings = get_settings()
     file_cfg = settings.load_file_settings()
+    # Cost policy:
+    # - GPU mode: prefer local vLLM (llm.deep); fall back to cloud (llm.chat) on failure.
+    # - CPU mode: resolve_llm_deep() already falls back to llm.chat.
     llm = settings.resolve_llm_deep(file_cfg)
+    llm_fallback = settings.resolve_llm_chat(file_cfg)
 
     engine = make_engine(settings.pg_dsn)
     init_db(engine)
@@ -84,7 +88,7 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
     model_name = str(embedding_cfg.get("model_name") or DEFAULT_EMBEDDING_MODEL)
 
     try:
-        vector = embedder.embed(canonical["text"][:4000])
+        vector = embedder.embed(canonical["text"])
         qdrant = QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection).resolve_collection_for_embedding(
             vector_size=len(vector),
             model_name_or_path=model_name,
@@ -113,12 +117,6 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
         event_type = (current_analysis.event_type if current_analysis else "other") if current_analysis else "other"
         minutes = planner.window_minutes(event_type)
 
-        client = DashScopeClient(
-            api_key=str(llm.get("api_key")) if llm.get("api_key") else None,
-            model=str(llm.get("model") or "deepseekr1-merged"),
-            base_url=str(llm.get("base_url") or "http://127.0.0.1:9999/v1"),
-            timeout_seconds=int(llm.get("timeout_seconds") or 120),
-        )
         system = (
             "你是金融新闻分析助手。请只输出一个 JSON 对象，不要输出任何多余文本。"
             "你需要在已有初步分析的基础上，结合相关证据进行二次推理与修正。"
@@ -133,11 +131,28 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
             f"请在 {minutes} 分钟的事件窗口假设下进行逻辑化分析，修正与补全结构化结果。"
         )
 
+        def _call(llm_cfg: dict[str, Any]) -> dict[str, Any]:
+            client = DashScopeClient(
+                api_key=str(llm_cfg.get("api_key")) if llm_cfg.get("api_key") else None,
+                model=str(llm_cfg.get("model") or "deepseekr1-merged"),
+                base_url=str(llm_cfg.get("base_url") or "http://127.0.0.1:9999/v1"),
+                timeout_seconds=int(llm_cfg.get("timeout_seconds") or 120),
+            )
+            return client.chat_json(system=system, user=user)
+
         try:
-            out = client.chat_json(system=system, user=user)
+            out = _call(dict(llm or {}))
         except Exception as e:
-            logger.warning("deep_analysis llm failed; skipped canonical_id=%s err=%s", canonical_id, e)
-            return {"skipped": True, "reason": "llm_failed", "error": str(e)}
+            # Local vLLM down/misconfigured → fall back to cloud LLM (if api_key is configured).
+            logger.warning("deep_analysis primary llm failed; try fallback: %s", e)
+            try:
+                if llm_fallback and llm_fallback.get("api_key"):
+                    out = _call(dict(llm_fallback or {}))
+                else:
+                    return {"skipped": True, "reason": "llm_failed", "error": str(e)}
+            except Exception as e2:
+                logger.warning("deep_analysis fallback llm failed; skipped canonical_id=%s err=%s", canonical_id, e2)
+                return {"skipped": True, "reason": "llm_failed", "error": str(e2)}
 
         base = current_analysis.data if current_analysis and isinstance(current_analysis.data, dict) else {}
         meta = base.get("_txnews") if isinstance(base.get("_txnews"), dict) else {}

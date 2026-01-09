@@ -9,7 +9,8 @@
 架构（≤3行）：
 - `celery_app.py` 定义 Celery app 与任务注册策略。
 - `pipeline.py` 定义 Raw→Normalize→Dedup→Analyze 的主流水线任务（并对 `tickers` 等字段做 schema 归一化，保证 API/UI 稳定；同时对相同 checksum 的 canonical 分析做幂等跳过，避免重复分析/重复 LLM 成本）。
-- `deep_analysis.py` 与 `maintenance.py` 提供“深分析”和“维护任务”（深分析使用 `llm.deep` 可指向本地 vLLM；`pipeline.analyze()` 读取 `llm.chat` 保持云端；embedding 支持绑定到指定 GPU，并在换模型/维度变化时自动兼容 Qdrant collection）。
+- `deep_analysis.py` 与 `maintenance.py` 提供“深分析”和“维护任务”（GPU 模式下 `pipeline.analyze()` 与深分析均优先使用 `llm.deep` 指向本地 vLLM；不可用时回退到 `llm.chat`（需配置 api_key）；embedding 支持绑定到指定 GPU，并在换模型/维度变化时自动兼容 Qdrant collection）。
+- 向量化：canonical 的 embedding 以“抽取后的正文文本”为输入（不再额外做字符级截断；实际长度仍可能受 embedding 模型的最大 token 限制影响）。
 
 ## 文件
 

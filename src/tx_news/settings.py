@@ -62,6 +62,13 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TXNEWS_USER_LLM_TTL_SECONDS"),
     )
 
+    # Full text access (copyright / compliance sensitive)
+    # Default: disabled. Enable explicitly for internal KB usage.
+    allow_full_text: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("TXNEWS_ALLOW_FULL_TEXT"),
+    )
+
     # LLM keys (backward-compatible)
     # - preferred: TXNEWS_LLM_API_KEY (OpenAI-compatible services)
     # - compatible: DASHSCOPE_API_KEY / TXNEWS_DASHSCOPE_API_KEY

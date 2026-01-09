@@ -130,7 +130,7 @@ def dedup_store(normalized: dict[str, Any]) -> dict[str, Any]:
     embedding_cfg = settings.resolve_embedding_cfg(file_cfg)
     embedder, qdrant_strategy = build_embedder(embedding_cfg)
     model_name = str(embedding_cfg.get("model_name") or DEFAULT_EMBEDDING_MODEL)
-    vector = embedder.embed(normalized["text"][:4000])
+    vector = embedder.embed(normalized["text"])
     qdrant = QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection).resolve_collection_for_embedding(
         vector_size=len(vector),
         model_name_or_path=model_name,
@@ -196,8 +196,16 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
     if not canonical_id:
         return {"skipped": True, "reason": "missing_canonical_id"}
 
-    llm = settings.resolve_llm_chat(file_cfg)
-    api_key = llm.get("api_key")
+    # Cost policy:
+    # - GPU mode: prefer local vLLM (llm.deep) for BOTH analyze + deep_analysis; fall back to cloud (llm.chat) on failure.
+    # - CPU mode: use cloud (llm.chat) if api_key is configured; otherwise fall back to rules-only.
+    accel = (settings.accelerator or "").strip().lower() or "cpu"
+    prefer_local = accel != "cpu"
+    llm_primary = settings.resolve_llm_deep(file_cfg) if prefer_local else settings.resolve_llm_chat(file_cfg)
+    llm_fallback = settings.resolve_llm_chat(file_cfg) if prefer_local else None
+    api_key_primary = llm_primary.get("api_key")
+    api_key_fallback = (llm_fallback or {}).get("api_key") if llm_fallback else None
+    llm_available_now = bool(prefer_local or api_key_primary or api_key_fallback)
 
     # Fast path: if this canonical text checksum was already analyzed, don't pay the LLM cost again.
     current_checksum = str(canonical.get("checksum") or "").strip()
@@ -208,8 +216,9 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
         prev_checksum = str(meta.get("text_checksum") or "").strip()
         prev_llm_used = bool(getattr(existing_analysis, "llm_used", 0))
         if prev_checksum and prev_checksum == current_checksum:
-            # Allow a one-time "upgrade" from rules to LLM when an API key becomes available.
-            if prev_llm_used or not api_key:
+            # Idempotency: if checksum unchanged, skip by default.
+            # Exception: allow a one-time "upgrade" from rules-only to LLM when LLM becomes available.
+            if prev_llm_used or not llm_available_now:
                 logger.info("analyze skipped canonical_id=%s reason=same_checksum", canonical_id)
                 return {
                     "canonical_id": canonical_id,
@@ -262,34 +271,46 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
         }
 
         llm_used = False
-        if api_key:
-            llm_used = True
+        system = (
+            "你是金融新闻分析助手。请只输出一个 JSON 对象，不要输出任何多余文本。"
+            "输出字段：event_type, entities, tickers, impact, index_view, evidence。"
+            "注意：不要输出新闻全文，不要输出长段引用。"
+        )
+        user = (
+            f"标题：{title or ''}\n"
+            f"正文：{text[:6000]}\n\n"
+            f"已识别个股候选：{tickers}\n"
+            "请基于以上内容进行结构化标注与推理，给出对大盘与个股的方向性判断（情景化）。"
+        )
+
+        def _try_llm(llm_cfg: dict[str, Any], api_key: Any) -> bool:
+            nonlocal llm_used
             client = DashScopeClient(
-                api_key=str(api_key),
-                model=str(llm.get("model") or "qwen3-max"),
-                base_url=str(llm.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-                timeout_seconds=int(llm.get("timeout_seconds") or 60),
+                api_key=str(api_key) if api_key else None,
+                model=str(llm_cfg.get("model") or "qwen3-max"),
+                base_url=str(llm_cfg.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+                timeout_seconds=int(llm_cfg.get("timeout_seconds") or 60),
             )
-            system = (
-                "你是金融新闻分析助手。请只输出一个 JSON 对象，不要输出任何多余文本。"
-                "输出字段：event_type, entities, tickers, impact, index_view, evidence。"
-                "注意：不要输出新闻全文，不要输出长段引用。"
-            )
-            user = (
-                f"标题：{title or ''}\n"
-                f"正文：{text[:6000]}\n\n"
-                f"已识别个股候选：{tickers}\n"
-                "请基于以上内容进行结构化标注与推理，给出对大盘与个股的方向性判断（情景化）。"
-            )
+            out = client.chat_json(system=system, user=user)
+            for k in ("event_type", "entities", "tickers", "impact", "index_view", "evidence"):
+                if k in out:
+                    result[k] = out[k]
+            llm_used = True
+            return True
+
+        # Primary: local vLLM in GPU mode; cloud in CPU mode.
+        # For local vLLM, api_key can be empty; for cloud fallback, api_key is required.
+        try_primary = prefer_local or bool(api_key_primary)
+        if try_primary:
             try:
-                out = client.chat_json(system=system, user=user)
-                # merge with required ids
-                for k in ("event_type", "entities", "tickers", "impact", "index_view", "evidence"):
-                    if k in out:
-                        result[k] = out[k]
+                _try_llm(dict(llm_primary or {}), api_key_primary)
             except Exception as e:
-                llm_used = False
-                logger.warning("dashscope llm failed; fall back to rules: %s", e)
+                logger.warning("primary llm failed; try fallback if available: %s", e)
+                if llm_fallback and api_key_fallback:
+                    try:
+                        _try_llm(dict(llm_fallback or {}), api_key_fallback)
+                    except Exception as e2:
+                        logger.warning("fallback llm failed; fall back to rules: %s", e2)
 
         result["tickers"] = _normalize_tickers(result.get("tickers"))
 

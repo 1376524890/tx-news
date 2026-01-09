@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -356,6 +356,84 @@ def article(canonical_id: str) -> dict[str, Any]:
         "published_at": v.published_at.isoformat() if v and v.published_at else None,
         "analysis": an.data if an else None,
     }
+
+
+@app.get("/kb/articles/{canonical_id}", operation_id="kb_get_article_full")
+def kb_article_full(canonical_id: str) -> Response:
+    """
+    Internal KB API: return full extracted text (requires TXNEWS_ALLOW_FULL_TEXT=1).
+    This endpoint is intentionally separated from /articles to keep default behavior compliant.
+    """
+    settings = get_settings()
+    if not bool(getattr(settings, "allow_full_text", False)):
+        raise HTTPException(status_code=403, detail="full_text_disabled")
+    engine = make_engine(settings.pg_dsn)
+    init_db(engine)
+    a = get_article(engine, canonical_id)
+    if not a:
+        return {"error": "not_found"}
+    v = get_latest_version(engine, canonical_id)
+    an = get_analysis(engine, canonical_id)
+    return JSONResponse(
+        {
+            "canonical_id": canonical_id,
+            "title": a.title,
+            "latest_url": v.url if v else None,
+            "published_at": v.published_at.isoformat() if v and v.published_at else None,
+            "text": a.text,
+            "analysis": an.data if an else None,
+        },
+        headers=NO_STORE_HEADERS,
+    )
+
+
+@app.get("/kb/search", operation_id="kb_search_full")
+def kb_search(q: str = Query(min_length=1), limit: int = Query(default=10, ge=1, le=50)) -> Response:
+    """
+    Internal KB API: vector search + return full extracted text for each hit.
+    Requires TXNEWS_ALLOW_FULL_TEXT=1.
+    """
+    settings = get_settings()
+    if not bool(getattr(settings, "allow_full_text", False)):
+        raise HTTPException(status_code=403, detail="full_text_disabled")
+
+    file_cfg = settings.load_file_settings()
+    embedding_cfg = settings.resolve_embedding_cfg(file_cfg)
+    embedder, qdrant_strategy = build_embedder(embedding_cfg)
+    model_name = str(embedding_cfg.get("model_name") or DEFAULT_EMBEDDING_MODEL)
+    vector = embedder.embed(q[:2000])
+
+    qdrant = QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection).resolve_collection_for_embedding(
+        vector_size=len(vector),
+        model_name_or_path=model_name,
+        strategy=qdrant_strategy,
+    )
+    points = qdrant.search(vector=vector, limit=limit)
+
+    engine = make_engine(settings.pg_dsn)
+    init_db(engine)
+
+    out: list[dict[str, Any]] = []
+    for p in points:
+        cid = scored_point_canonical_id(p) or str(p.id)
+        a = get_article(engine, cid)
+        v = get_latest_version(engine, cid)
+        an = get_analysis(engine, cid)
+        if not a:
+            continue
+        out.append(
+            {
+                "canonical_id": cid,
+                "score": float(p.score or 0.0),
+                "title": a.title,
+                "url": v.url if v else None,
+                "published_at": v.published_at.isoformat() if v and v.published_at else None,
+                "event_type": an.event_type if an else None,
+                "tickers": _normalize_tickers((an.data.get("tickers") if an else None)),
+                "text": a.text,
+            }
+        )
+    return JSONResponse(out, headers=NO_STORE_HEADERS)
 
 
 @app.get("/signals", operation_id="list_signals")

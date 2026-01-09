@@ -43,8 +43,26 @@ def tools_list() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "search_news_full_text",
+            "description": "Vector search over KB and include full extracted text (requires TXNEWS_ALLOW_FULL_TEXT=1).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "default": 5}},
+                "required": ["query"],
+            },
+        },
+        {
             "name": "get_article_analysis",
             "description": "Get latest structured analysis for a canonical article (no full text).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"canonical_id": {"type": "string"}},
+                "required": ["canonical_id"],
+            },
+        },
+        {
+            "name": "get_article_full_text",
+            "description": "Get full extracted text for a canonical article (requires TXNEWS_ALLOW_FULL_TEXT=1).",
             "inputSchema": {
                 "type": "object",
                 "properties": {"canonical_id": {"type": "string"}},
@@ -77,6 +95,8 @@ def tool_call(name: str, arguments: dict[str, Any]) -> Any:
     file_cfg = settings.load_file_settings()
     engine = make_engine(settings.pg_dsn)
     init_db(engine)
+
+    allow_full_text = bool(getattr(settings, "allow_full_text", False))
 
     if name == "search_news":
         q = str(arguments.get("query") or "")
@@ -111,6 +131,42 @@ def tool_call(name: str, arguments: dict[str, Any]) -> Any:
             )
         return out
 
+    if name == "search_news_full_text":
+        if not allow_full_text:
+            return {"error": "full_text_disabled"}
+        q = str(arguments.get("query") or "")
+        limit = int(arguments.get("limit") or 5)
+        embedding_cfg = settings.resolve_embedding_cfg(file_cfg)
+        embedder, qdrant_strategy = build_embedder(embedding_cfg)
+        model_name = str(embedding_cfg.get("model_name") or DEFAULT_EMBEDDING_MODEL)
+        vector = embedder.embed(q[:2000])
+        qdrant = QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection).resolve_collection_for_embedding(
+            vector_size=len(vector),
+            model_name_or_path=model_name,
+            strategy=qdrant_strategy,
+        )
+        points = qdrant.search(vector=vector, limit=limit)
+        out = []
+        for p in points:
+            cid = scored_point_canonical_id(p) or str(p.id)
+            a = get_article(engine, cid)
+            v = get_latest_version(engine, cid)
+            an = get_analysis(engine, cid)
+            if not a:
+                continue
+            out.append(
+                {
+                    "canonical_id": cid,
+                    "score": float(p.score or 0.0),
+                    "title": a.title,
+                    "url": v.url if v else None,
+                    "published_at": v.published_at.isoformat() if v and v.published_at else None,
+                    "analysis": an.data if an else None,
+                    "text": a.text,
+                }
+            )
+        return out
+
     if name == "get_article_analysis":
         cid = str(arguments.get("canonical_id") or "")
         a = get_article(engine, cid)
@@ -124,6 +180,24 @@ def tool_call(name: str, arguments: dict[str, Any]) -> Any:
             "latest_url": v.url if v else None,
             "published_at": v.published_at.isoformat() if v and v.published_at else None,
             "analysis": an.data if an else None,
+        }
+
+    if name == "get_article_full_text":
+        if not allow_full_text:
+            return {"error": "full_text_disabled"}
+        cid = str(arguments.get("canonical_id") or "")
+        a = get_article(engine, cid)
+        if not a:
+            return {"error": "not_found"}
+        v = get_latest_version(engine, cid)
+        an = get_analysis(engine, cid)
+        return {
+            "canonical_id": cid,
+            "title": a.title,
+            "latest_url": v.url if v else None,
+            "published_at": v.published_at.isoformat() if v and v.published_at else None,
+            "analysis": an.data if an else None,
+            "text": a.text,
         }
 
     if name == "get_event_timeline":

@@ -1,5 +1,5 @@
-# Input: 本地 Python/Docker 环境 + Node.js（可选）+ config/.env 配置
-# Output: 启动 v1 单机栈（infra + worker/collector/api/config），并写入 var/log 与 .run
+# Input: Windows + PowerShell + Python/Docker + Node.js + config/.env 配置 +（可选）WSL/Git-Bash（用于启动 vLLM）
+# Output: 自动安装匹配的 torch、预检 embedding 下载/加载、可选启动 vLLM、本地栈拉起并做启动健康检查
 # Pos: 运维启动脚本（Windows PowerShell 版；变更时同步更新以上注释与所属目录 FOLDER.md）
 
 Set-StrictMode -Version Latest
@@ -25,18 +25,6 @@ function Die {
   param([Parameter(Mandatory = $true)][string]$Message)
   Write-Log "ERROR: $Message"
   exit 1
-}
-
-function Invoke-Checked {
-  param(
-    [Parameter(Mandatory = $true)][scriptblock]$ScriptBlock,
-    [string]$ErrorMessage = "Command failed"
-  )
-  try {
-    & $ScriptBlock
-  } catch {
-    Die "$ErrorMessage`n$($_.Exception.Message)"
-  }
 }
 
 function Test-ProcessRunning {
@@ -77,6 +65,42 @@ function Wait-Port {
   Die "TIMEOUT waiting for $Name on ${Host}:${Port}"
 }
 
+function Wait-Http {
+  param(
+    [Parameter(Mandatory = $true)][string]$Url,
+    [Parameter(Mandatory = $true)][string]$Name,
+    [int]$TimeoutSec = 60
+  )
+  Write-Log "Waiting for $Name HTTP $Url (timeout ${TimeoutSec}s)..."
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  $lastErr = $null
+  $handler = New-Object System.Net.Http.HttpClientHandler
+  $handler.AllowAutoRedirect = $true
+  $client = New-Object System.Net.Http.HttpClient($handler)
+  $client.Timeout = [TimeSpan]::FromSeconds(3)
+
+  try {
+    while ((Get-Date) -lt $deadline) {
+      try {
+        $resp = $client.GetAsync($Url).GetAwaiter().GetResult()
+        if ($resp -and $resp.IsSuccessStatusCode) {
+          return
+        }
+        $lastErr = "status=" + [int]$resp.StatusCode
+      } catch {
+        $lastErr = $_.Exception.Message
+      }
+      Start-Sleep -Seconds 1
+    }
+  } finally {
+    $client.Dispose()
+    $handler.Dispose()
+  }
+
+  Die "TIMEOUT waiting for $Name HTTP $Url (last_err=$lastErr)"
+}
+
 function Invoke-Compose {
   param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
   if (Get-Command docker -ErrorAction SilentlyContinue) {
@@ -115,6 +139,172 @@ function Import-DotEnv {
     }
     Set-Item -Path "Env:$key" -Value $value
   }
+}
+
+function Setup-HfEnv {
+  if (-not $env:HF_ENDPOINT) {
+    $env:HF_ENDPOINT = "https://hf-mirror.com"
+  }
+
+  if (-not $env:HF_HOME) {
+    $env:HF_HOME = [System.IO.Path]::GetFullPath((Join-Path $RootDir "var/hf"))
+  } else {
+    # If relative, treat it as relative to repo root (same as bash script).
+    $hf = "$($env:HF_HOME)".Trim()
+    if ($hf -and -not ([System.IO.Path]::IsPathRooted($hf))) {
+      $env:HF_HOME = [System.IO.Path]::GetFullPath((Join-Path $RootDir $hf))
+    }
+  }
+  New-Item -ItemType Directory -Force -Path $env:HF_HOME | Out-Null
+}
+
+function Detect-TorchVariant {
+  # Output: cpu | cu121 | cu124
+  if ($env:TORCH_VARIANT) {
+    return "$($env:TORCH_VARIANT)".Trim()
+  }
+
+  $nvsmi = Get-Command "nvidia-smi" -ErrorAction SilentlyContinue
+  if (-not $nvsmi) {
+    return "cpu"
+  }
+
+  try {
+    $out = & $nvsmi.Source 2>$null | Out-String
+    $m = [regex]::Match($out, "CUDA Version:\\s*([0-9.]+)")
+    if (-not $m.Success) {
+      return "cu121"
+    }
+    $cuda = $m.Groups[1].Value
+    $parts = $cuda.Split(".")
+    if ($parts.Count -lt 2) { return "cu121" }
+    $major = [int]$parts[0]
+    $minor = [int]$parts[1]
+    if (($major -gt 12) -or (($major -eq 12) -and ($minor -ge 4))) {
+      return "cu124"
+    }
+    return "cu121"
+  } catch {
+    return "cu121"
+  }
+}
+
+function Install-TorchAuto {
+  $auto = if ($env:AUTO_TORCH) { "$($env:AUTO_TORCH)".Trim() } else { "1" }
+  if ($auto -ne "1") {
+    Write-Log "AUTO_TORCH=0; skip torch auto-install."
+    return
+  }
+
+  $variant = Detect-TorchVariant
+
+  $torchOk = $false
+  $torchCuda = ""
+  try {
+    $torchInfo = & $VenvPython -c "import torch; print(torch.__version__); print(getattr(torch.version,'cuda','') or '')" 2>$null
+    if ($LASTEXITCODE -eq 0 -and $torchInfo) {
+      $torchOk = $true
+      $lines = @($torchInfo)
+      if ($lines.Count -ge 2) { $torchCuda = "$($lines[1])".Trim() }
+    }
+  } catch {
+    $torchOk = $false
+  }
+
+  if ($torchOk) {
+    if ($variant -ne "cpu" -and -not $torchCuda) {
+      Write-Log "Torch is installed but CUDA is not enabled; reinstalling PyTorch ($variant)..."
+      (& $VenvPython -m pip uninstall -y torch 2>&1) | Tee-Object -FilePath $BootstrapLog -Append | Out-Host
+    } else {
+      $cudaMsg = if ($torchCuda) { $torchCuda } else { "none" }
+      Write-Log "Torch already installed. (variant=$variant cuda=$cudaMsg)"
+      return
+    }
+  }
+
+  $indexUrl = ""
+  if ($env:TORCH_INDEX_URL) {
+    $indexUrl = "$($env:TORCH_INDEX_URL)".Trim()
+  } else {
+    switch ($variant) {
+      "cpu" { $indexUrl = "https://download.pytorch.org/whl/cpu" }
+      "cu121" { $indexUrl = "https://download.pytorch.org/whl/cu121" }
+      "cu124" { $indexUrl = "https://download.pytorch.org/whl/cu124" }
+      default { Die "invalid TORCH_VARIANT: $variant (expected cpu/cu121/cu124)" }
+    }
+  }
+
+  Write-Log "Installing PyTorch ($variant) from $indexUrl ..."
+  (& $VenvPython -m pip install --upgrade "torch" --index-url $indexUrl 2>&1) | Tee-Object -FilePath $BootstrapLog -Append | Out-Host
+  if ($LASTEXITCODE -ne 0) { Die "pip install torch failed (exit=$LASTEXITCODE)" }
+}
+
+function Preflight-Embedding {
+  $enabled = if ($env:PREFLIGHT_EMBEDDING) { "$($env:PREFLIGHT_EMBEDDING)".Trim() } else { "1" }
+  if ($enabled -ne "1") {
+    Write-Log "PREFLIGHT_EMBEDDING=0; skip embedding preflight."
+    return
+  }
+
+  Setup-HfEnv
+
+  Write-Log "Preflight: torch/GPU/HF/embedding..."
+  $script = @'
+import os
+import time
+
+from tx_news.settings import get_settings
+
+settings = get_settings()
+file_cfg = settings.load_file_settings()
+embedding_cfg = settings.resolve_embedding_cfg(file_cfg)
+
+device_cfg = str(embedding_cfg.get("device", "auto")).strip().lower()
+model_name = str(embedding_cfg.get("model_name") or "").strip()
+
+print("HF_ENDPOINT =", os.environ.get("HF_ENDPOINT"))
+print("HF_HOME     =", os.environ.get("HF_HOME"))
+print("TXNEWS_ACCELERATOR      =", os.environ.get("TXNEWS_ACCELERATOR"))
+print("TXNEWS_EMBEDDING_DEVICE =", os.environ.get("TXNEWS_EMBEDDING_DEVICE"))
+
+try:
+    import torch
+
+    print("torch       =", torch.__version__)
+    print("torch.cuda.is_available =", bool(torch.cuda.is_available()))
+    print("torch.version.cuda      =", getattr(torch.version, "cuda", None))
+    if torch.cuda.is_available():
+        n = torch.cuda.device_count()
+        print("cuda.device_count       =", n)
+        for i in range(n):
+            print(f"cuda[{i}] name          =", torch.cuda.get_device_name(i))
+except Exception as e:
+    raise SystemExit(f"ERROR: torch import failed: {e}")
+
+if device_cfg in {"auto"} or device_cfg.startswith("cuda"):
+    import torch
+
+    if not torch.cuda.is_available():
+        raise SystemExit(
+            "ERROR: embedding.device expects CUDA, but torch.cuda.is_available() is False. "
+            "Fix your torch CUDA build/driver, or set TXNEWS_ACCELERATOR=cpu / TXNEWS_EMBEDDING_DEVICE=cpu."
+        )
+
+from tx_news.embedding.embedder import build_embedder
+
+t0 = time.time()
+embedder, strategy = build_embedder(embedding_cfg)
+vec = embedder.embed("embedding 预检")
+dt = time.time() - t0
+
+print("embedding.model_name    =", model_name)
+print("embedding.device        =", device_cfg)
+print("embedding.dim           =", len(vec))
+print("qdrant.strategy         =", strategy)
+print(f"embedding.preflight_sec = {dt:.2f}")
+'@
+  (& $VenvPython -c $script 2>&1) | Tee-Object -FilePath $BootstrapLog -Append | Out-Host
+  if ($LASTEXITCODE -ne 0) { Die "Embedding preflight failed (exit=$LASTEXITCODE)" }
 }
 
 function Start-Bg {
@@ -177,13 +367,29 @@ if (-not (Get-Command $PythonBin -ErrorAction SilentlyContinue)) {
   Die "python not found: $PythonBin"
 }
 
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+  Die "Node.js is required for frontend build. Please install it."
+}
+if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+  Die "npm is required for frontend build. Please install it."
+}
+
+$Accelerator = if ($env:TXNEWS_ACCELERATOR) { "$($env:TXNEWS_ACCELERATOR)".Trim().ToLowerInvariant() } else { "cpu" }
+if (-not $Accelerator) { $Accelerator = "cpu" }
+
+Write-Log "Step 0/12: Building frontend (apps/web)..."
+& npm --prefix apps/web install --no-audit --no-fund --silent
+if ($LASTEXITCODE -ne 0) { Die "npm install failed (exit=$LASTEXITCODE)" }
+& npm --prefix apps/web run build:all
+if ($LASTEXITCODE -ne 0) { Die "npm run build:all failed (exit=$LASTEXITCODE)" }
+
 if (-not (Test-Path ".venv")) {
-  Write-Log "Step 1/9: Creating virtualenv in .venv (this may take a moment)..."
+  Write-Log "Step 1/12: Creating virtualenv in .venv (this may take a moment)..."
   & $PythonBin -m venv .venv
   if ($LASTEXITCODE -ne 0) { Die "Failed to create virtualenv (exit=$LASTEXITCODE)" }
   Write-Log "Virtualenv created."
 } else {
-  Write-Log "Step 1/9: Virtualenv already exists (.venv)."
+  Write-Log "Step 1/12: Virtualenv already exists (.venv)."
 }
 
 $VenvPython = Join-Path $RootDir ".venv\\Scripts\\python.exe"
@@ -191,15 +397,18 @@ if (-not (Test-Path $VenvPython)) {
   Die "Virtualenv python not found: $VenvPython"
 }
 
-Write-Log "Step 2/9: Upgrading pip..."
+Write-Log "Step 2/12: Upgrading pip..."
 (& $VenvPython -m pip install --upgrade pip 2>&1) | Tee-Object -FilePath $BootstrapLog -Append | Out-Host
 if ($LASTEXITCODE -ne 0) { Die "pip upgrade failed (exit=$LASTEXITCODE)" }
 
-Write-Log "Step 3/9: Installing Python dependencies (requirements.txt)..."
+Write-Log "Step 3/12: Auto-installing torch (CPU/CUDA)..."
+Install-TorchAuto
+
+Write-Log "Step 4/12: Installing Python dependencies (requirements.txt)..."
 (& $VenvPython -m pip install -r requirements.txt 2>&1) | Tee-Object -FilePath $BootstrapLog -Append | Out-Host
 if ($LASTEXITCODE -ne 0) { Die "pip install -r requirements.txt failed (exit=$LASTEXITCODE)" }
 
-Write-Log "Step 4/9: Installing this repo as editable package (pip install -e .)..."
+Write-Log "Step 5/12: Installing this repo as editable package (pip install -e .)..."
 (& $VenvPython -m pip install -e . 2>&1) | Tee-Object -FilePath $BootstrapLog -Append | Out-Host
 if ($LASTEXITCODE -ne 0) { Die "pip install -e . failed (exit=$LASTEXITCODE)" }
 Write-Log "Python deps installed. (bootstrap log: $BootstrapLog)"
@@ -224,17 +433,10 @@ if (-not (Test-Path ".env")) {
 
 Import-DotEnv -Path ".env"
 
-Write-Log "Step 5/9: Building frontend (public/admin; optional)..."
-if (Get-Command npm -ErrorAction SilentlyContinue) {
-  & npm --prefix apps/web install
-  if ($LASTEXITCODE -ne 0) { Die "npm install failed (exit=$LASTEXITCODE)" }
-  & npm --prefix apps/web run build:all
-  if ($LASTEXITCODE -ne 0) { Die "npm run build:all failed (exit=$LASTEXITCODE)" }
-} else {
-  Write-Log "WARN: npm not found; skip frontend build (UI may be missing)."
-}
+Write-Log "Step 6/12: Preflight embedding (HF mirror + model load)..."
+Preflight-Embedding
 
-Write-Log "Step 6/9: Starting Docker services (postgres/redis/nats/minio/qdrant)..."
+Write-Log "Step 7/12: Starting Docker services (postgres/redis/nats/minio/qdrant)..."
 Invoke-Compose up -d
 if ($LASTEXITCODE -ne 0) { Die "docker compose up failed (exit=$LASTEXITCODE)" }
 
@@ -245,7 +447,7 @@ Wait-Port -Host "127.0.0.1" -Port 9000 -Name "MinIO" -TimeoutSec 60
 Wait-Port -Host "127.0.0.1" -Port 6333 -Name "Qdrant" -TimeoutSec 60
 Write-Log "Docker services are ready."
 
-Write-Log "Step 7/9: Optional Tushare A-share master data sync..."
+Write-Log "Step 8/12: Optional Tushare A-share master data sync..."
 $tushareToken = (& $VenvPython -c @"
 import yaml
 from pathlib import Path
@@ -262,7 +464,46 @@ if ($tushareToken) {
   Write-Log "WARN: tushare.token is empty; skip A-share master data sync."
 }
 
-Write-Log "Step 8/9: Starting background processes (Celery worker / NATS bridge / Collector / API / Config)..."
+if ($Accelerator -eq "gpu") {
+  Write-Log "Step 9/12: Starting vLLM for deep analysis..."
+  $VllmScript = if ($env:TXNEWS_VLLM_SCRIPT) { "$($env:TXNEWS_VLLM_SCRIPT)".Trim() } else { "finetune/result_model/deepseekr1_merged/serve_vllm_gpu0_9999.sh" }
+  $VllmPort = if ($env:TXNEWS_VLLM_PORT) { [int]("$($env:TXNEWS_VLLM_PORT)".Trim()) } else { 9999 }
+  $VllmTimeout = if ($env:TXNEWS_VLLM_TIMEOUT_SECONDS) { [int]("$($env:TXNEWS_VLLM_TIMEOUT_SECONDS)".Trim()) } else { 600 }
+
+  if (-not (Test-Path $VllmScript)) {
+    Die "TXNEWS_ACCELERATOR=gpu but vLLM script not found: $VllmScript"
+  }
+
+  $bash = Get-Command "bash" -ErrorAction SilentlyContinue
+  $wsl = Get-Command "wsl" -ErrorAction SilentlyContinue
+
+  if ($bash) {
+    Start-Bg -Name "vllm" -FilePath $bash.Source `
+      -ArgumentList @("-lc", "cd '$RootDir' && PORT='$VllmPort' bash '$VllmScript'") `
+      -StdoutLog (Join-Path $LogDir "vllm.log") `
+      -StderrLog (Join-Path $LogDir "vllm.err.log")
+    Wait-Http -Url "http://127.0.0.1:$VllmPort/v1/models" -Name "vLLM" -TimeoutSec $VllmTimeout
+    Write-Log "vLLM is ready."
+  } elseif ($wsl) {
+    $wslRoot = (& $wsl.Source wslpath -a "$RootDir" 2>$null | Select-Object -First 1)
+    if (-not $wslRoot) { Die "WSL is present but failed to resolve repo path via: wsl wslpath -a" }
+    $wslScript = (& $wsl.Source wslpath -a (Join-Path $RootDir $VllmScript) 2>$null | Select-Object -First 1)
+    if (-not $wslScript) { Die "WSL is present but failed to resolve vLLM script path via: wsl wslpath -a" }
+
+    Start-Bg -Name "vllm" -FilePath $wsl.Source `
+      -ArgumentList @("bash", "-lc", "cd '$wslRoot' && PORT='$VllmPort' bash '$wslScript'") `
+      -StdoutLog (Join-Path $LogDir "vllm.log") `
+      -StderrLog (Join-Path $LogDir "vllm.err.log")
+    Wait-Http -Url "http://127.0.0.1:$VllmPort/v1/models" -Name "vLLM" -TimeoutSec $VllmTimeout
+    Write-Log "vLLM is ready."
+  } else {
+    Die "TXNEWS_ACCELERATOR=gpu requires bash or WSL to run vLLM script on Windows. Install WSL or Git-Bash."
+  }
+} else {
+  Write-Log "Step 9/12: Skip vLLM (TXNEWS_ACCELERATOR=$Accelerator)."
+}
+
+Write-Log "Step 10/12: Starting background processes (Celery worker / NATS bridge / Collector / API / Config)..."
 Start-Bg -Name "celery_worker" -FilePath $VenvPython `
   -ArgumentList @("-m","celery","-A","tx_news.tasks.celery_app.celery_app","worker","-l","INFO","--pool=solo","--concurrency=1") `
   -StdoutLog (Join-Path $LogDir "celery_worker.log") `
@@ -288,10 +529,23 @@ Start-Bg -Name "config" -FilePath $VenvPython `
   -StdoutLog (Join-Path $LogDir "config.log") `
   -StderrLog (Join-Path $LogDir "config.err.log")
 
-Write-Log "Step 9/9: Startup complete."
+Write-Log "Step 11/12: Startup checks..."
+Wait-Http -Url "http://127.0.0.1:8000/health" -Name "API /health" -TimeoutSec 60
+Wait-Http -Url "http://127.0.0.1:8001/health" -Name "Config /health" -TimeoutSec 60
+if ($Accelerator -eq "gpu") {
+  $VllmPort = if ($env:TXNEWS_VLLM_PORT) { [int]("$($env:TXNEWS_VLLM_PORT)".Trim()) } else { 9999 }
+  Wait-Http -Url "http://127.0.0.1:$VllmPort/v1/models" -Name "vLLM /v1/models" -TimeoutSec 10
+}
+Write-Log "Startup checks passed."
+
+Write-Log "Step 12/12: Startup complete."
 Write-Log "Web UI: http://localhost:8000/"
 Write-Log "Config UI: http://localhost:8001/"
 Write-Log "API: http://localhost:8000 (health: /health, search: /search?q=...)"
+if ($Accelerator -eq "gpu") {
+  $VllmPort = if ($env:TXNEWS_VLLM_PORT) { "$($env:TXNEWS_VLLM_PORT)".Trim() } else { "9999" }
+  Write-Log "vLLM: http://localhost:$VllmPort/v1 (models: /v1/models)"
+}
 Write-Log "Logs: $LogDir/ (bootstrap: $BootstrapLog)"
 Write-Log "Stop: Ctrl+C here, or run: scripts\\stop.cmd"
 Write-Log "Container services remain running until: docker compose down"

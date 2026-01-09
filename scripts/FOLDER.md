@@ -9,7 +9,7 @@
 架构（≤3行）：
 - `start.sh`：构建前端（public/admin 两套产物）→ 准备 `.venv`/依赖（可自动安装匹配的 torch）→ 预检 embedding（总是使用 CPU）→ 启动 Docker infra →（可选）启动本地 vLLM → 启动后台进程（8000 API + 8001 配置服务）并做健康检查。
 - `stop.sh`：停止 `.run/*.pid` 记录的后台进程（不自动 `docker compose down`）。
-- `start.ps1`：Windows PowerShell 一键启动（功能对齐 `start.sh`）。
+- `start.ps1`：Windows PowerShell 一键启动（尽量对齐 `start.sh`：前端构建、torch 自动安装、embedding 预检、启动 Docker infra、仅 `TXNEWS_ACCELERATOR=gpu` 时尝试启动 vLLM 并做 `/health`/`/v1/models` 检查；vLLM 需要 WSL 或 Git-Bash）。
 - `stop.ps1`：Windows PowerShell 停止 `.run/*.pid` 记录的后台进程。
 - `start.cmd`/`stop.cmd`：Windows 双击入口（调用对应 `.ps1`）。
 - 运行态输出：日志在 `var/log/`，PID 在 `.run/`。

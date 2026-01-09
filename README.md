@@ -49,7 +49,7 @@ bash scripts/start.sh
 启动脚本会：
 - 创建 `.venv` 并安装依赖（可自动安装合适的 torch CPU/CUDA 版本）
 - 设置 HuggingFace 镜像/缓存并做 embedding 预检（提前下载/加载模型）
-- （可选）当 `.env` 设置 `TXNEWS_ACCELERATOR=gpu` 时，启动本地 vLLM（用于 `deep_analysis`）
+- （可选）当 `.env` 设置 `TXNEWS_ACCELERATOR=gpu` 时，启动本地 vLLM（用于 worker 常规分析 + 深分析，优先节约 token 成本）
 - `docker compose up -d` 启动 Postgres/Redis/NATS/MinIO/Qdrant
 - 启动后台进程：Celery worker、NATS bridge、Collector、API（8000）、Config（8001，可选）
 - 启动完成后做健康检查（API `/health`；若启用 vLLM 则检查 `/v1/models`）
@@ -59,7 +59,7 @@ bash scripts/start.sh
 - `TORCH_VARIANT=cpu|cu121|cu124`：强制 torch 版本选择
 - `PREFLIGHT_EMBEDDING=0/1`：是否启动前预检 embedding（建议开启）
 - `HF_HOME=var/hf`：HuggingFace cache 目录
-- `TXNEWS_ACCELERATOR=cpu|gpu|auto`：CPU/GPU 模式（`gpu` 会尝试启动本地 vLLM，并让深分析优先走 `llm.deep`）
+- `TXNEWS_ACCELERATOR=cpu|gpu|auto`：CPU/GPU 模式（`gpu` 会尝试启动本地 vLLM，并让 worker 常规分析 + 深分析优先走 `llm.deep`；不可用时回退到 `llm.chat`）
 - `TXNEWS_EMBEDDING_DEVICE=cpu|cuda:1|...`：embedding 设备显式指定（默认 `cpu`；设置后覆盖默认行为）
 - `TXNEWS_VLLM_SCRIPT=...` / `TXNEWS_VLLM_PORT=...`：一键启动时 vLLM 启动脚本与端口（默认 `9999`）
 
@@ -190,7 +190,7 @@ FastAPI OpenAPI：
 curl -s http://localhost:8000/health
 ```
 
-- `GET /search?q=...&limit=10`：向量检索（不返回原文）
+- `GET /search?q=...&limit=10`：知识库向量检索（Qdrant 召回 + Postgres 回表组装；不返回新闻原文）
 ```bash
 curl -s "http://localhost:8000/search?q=央行%20降准&limit=10" | jq .
 ```
@@ -202,10 +202,13 @@ curl -s "http://localhost:8000/search?q=央行%20降准&limit=10" | jq .
   - `event_type`：分析产出的事件类型
   - `tickers`：分析产出的相关标的（结构化 JSON）
 
-- `GET /articles/{canonical_id}`：文章元信息 + 分析结果
+- `GET /articles/{canonical_id}`：数据库读取（Postgres；文章元信息 + 分析结果；不返回 `articles.text` 原文）
 ```bash
 curl -s "http://localhost:8000/articles/<canonical_id>" | jq .
 ```
+
+- （可选）`GET /kb/search?q=...&limit=10`：知识库检索 + 返回抽取后的全文（默认关闭；需设置 `TXNEWS_ALLOW_FULL_TEXT=1`）
+- （可选）`GET /kb/articles/{canonical_id}`：返回抽取后的全文（默认关闭；需设置 `TXNEWS_ALLOW_FULL_TEXT=1`）
 
 - `GET /signals?limit=50`：最新信号（breaking/analysis_updated/deep_analysis_updated 等；返回已整理的 title/url/event_type/tickers/summary 字段，适合前端直接展示）
 ```bash
@@ -425,7 +428,7 @@ python -m apps.mcp.server
 ```
 
 ### 6.7.1 本地微调 LLM（Deep Analyse）与训练集规则
-本项目支持将 **worker 侧“深分析”**（`src/tx_news/tasks/deep_analysis.py:deep_optimize()`）切换为本地微调模型（通常通过 vLLM 提供 OpenAI-compatible `/v1/chat/completions`），以降低 token 成本并提升输出 JSON 的稳定性；对话与常规分析仍可保持云端模型（`llm.chat`）。
+本项目支持在 GPU 模式下让 **worker 常规分析 + 深分析** 优先使用本地 vLLM（OpenAI-compatible `/v1/chat/completions`），以降低 token 成本并提升输出 JSON 的稳定性；对话（`/chat`）仍可保持云端模型（`llm.chat`）。
 
 相关目录/文件（以实际文件为准）：
 - 微调与推理入口：`finetune/README.md`、`finetune/sft.yaml`、`finetune/run_sft.sh`、`finetune/serve_vllm.sh`
@@ -440,14 +443,22 @@ python -m apps.mcp.server
 - **覆盖与配比**：样本需覆盖 `policy/macro_data/liquidity/company_event/geopolitics/industry_supply_demand/other`；建议包含一定比例“初步分析错误→深分析纠错”与“证据不足→输出 uncertain”的样本。
 - **自动质检（建议强制）**：解析 JSON、字段齐全、event_type 合法、evidence URL 不越界、tickers schema 稳定（建议统一为 `[{ts_code,name,confidence?}]`），并做去重与长度裁剪（`cutoff_len` 约束）。
 
-### 6.8 数据模型（v0：核心表）
-（以 `src/tx_news/db.py` 的 ORM 为准；这里给出理解调用链所需的最小心智模型）
-- `raw_documents`：抓取记录（url/status/checksum/s3_key/created_at）
-- `articles`：canonical 文章（canonical_id/title/text/checksum/embedding_ref/embedding_dim/…）
-- `article_versions`：来源版本链（canonical_id/source_id/url/fetched_at/published_at/…）
-- `analyses`：结构化分析结果（event_type/data/json/llm_used/created_at）
+### 6.8 数据库与知识库（v0：存储心智模型）
+本项目把“可审计的结构化事实”放在 **数据库（Postgres）**，把“语义召回索引”放在 **知识库（Qdrant 向量索引）**，二者用 `canonical_id` 串联：
+- **数据库（Postgres）**：事实主存储（canonical/版本链/分析结果/信号/主数据/抓取审计索引）；`articles.text` 与 raw 仅用于内部去重/分析/回放，HTTP API 默认不返回原文（合规/版权）。
+- **知识库（KB = Qdrant 向量索引 + Postgres 回表）**：`/search` 先在 Qdrant 做向量召回拿到 `canonical_id`（与少量 payload），再回表 Postgres 拼装 `title/url/published_at/event_type/tickers` 等结构化字段；Agent/MCP 的 `search_news` 同理。
+
+Postgres 核心表（以 `src/tx_news/db.py` 为准）：
+- `raw_documents`：抓取记录（url/status/checksum/s3_key/headers/…；raw bytes 在 MinIO）
+- `articles`：canonical 文章（canonical_id/title/text/checksum/lsh_signature/embedding_model/embedding_dim/embedding_ref/…）
+- `article_versions`：来源版本链（canonical_id/source_id/url/fetched_at/published_at/raw_s3_key/…）
+- `analyses`：结构化分析结果（event_type/data(JSONB)/llm_used/created_at）
 - `signals`：系统信号（breaking/analysis_updated/deep_analysis_updated 等）
 - `a_share_basic`：A 股主数据（ts_code/name/aliases/…）
+
+Qdrant（知识库向量索引）写入形态（以 `src/tx_news/tasks/pipeline.py:dedup_store()` 为准）：
+- 每条 canonical 1 个 point：`vector = embedding(articles.text)`；`point_id` 使用 `canonical_id` 派生的确定性 UUID（兼容 Qdrant id 类型限制）
+- payload（最小元信息）：`canonical_id/title/source_id/url/published_at`（用于检索命中后的快速展示/过滤；最终仍以 Postgres 为准）
 
 ### 6.9 配置参考（v0 常用项）
 推荐只改这两处：`config/config.yaml`（业务参数）与 `.env`（连接串/密钥/运行开关）。
@@ -455,6 +466,7 @@ python -m apps.mcp.server
 `.env`（常用）：
 - `TXNEWS_PG_DSN`/`TXNEWS_REDIS_URL`/`TXNEWS_NATS_URL`/`TXNEWS_S3_*`/`TXNEWS_QDRANT_*`：基础设施连接
 - `TXNEWS_LLM_BASE_URL`/`TXNEWS_LLM_MODEL_NAME`/`TXNEWS_LLM_API_KEY`：LLM（OpenAI 兼容）
+- `TXNEWS_ALLOW_FULL_TEXT`：是否允许内部 KB 接口返回抽取后的全文（默认 0）
 - `DASHSCOPE_API_KEY`：兼容旧方式（未设置 `TXNEWS_LLM_API_KEY` 时会回退）
 - `HF_ENDPOINT`/`HF_HOME`：Embedding 模型下载镜像与缓存目录
 
@@ -477,12 +489,21 @@ python -m apps.mcp.server
 缺点：复杂编排与可观测性不如专门工作流引擎（Argo/Temporal）。
 
 ### 7.3 Postgres（主存储）
-优点：组件最少、事务一致性强；适合元数据/分析结果/审计；运维成本低。  
-缺点：做复杂检索/聚合时可能需要外置 OLAP/搜索引擎。
+定位：**事实主存储（source-of-truth）**，承载可审计数据与结构化结果；API 的 `/articles`、`/signals`、`/events`、`/entities` 主要读路径都来自这里。  
+主要存储内容：
+- 抓取审计索引：`raw_documents`（抓取时间/状态码/headers/checksum + 对应 MinIO `s3_key`）
+- canonical 文章：`articles`（去重后稳定 `canonical_id`，含 `text/checksum` 与 embedding 元信息/引用）
+- 来源版本链：`article_versions`（url/published_at/fetched_at/raw_s3_key）
+- 分析结果与信号：`analyses`（JSONB）+ `signals`
+- 实体主数据：`a_share_basic`（供标的识别与画像）
+注意：`articles.text` 会入库用于内部分析/去重，但对外接口默认不返回原文（合规/版权）。
 
 ### 7.4 Qdrant（向量库）
-优点：过滤能力强、性能稳定；适合“向量检索为主”的新闻召回。  
-缺点：需要额外组件；版本对齐与 schema 演进需要规范（collection/维度/point id）。
+定位：**知识库的语义召回索引**（向量检索为主），用于 `/search`、Agent/MCP 的 `search_news`、以及去重/深分析的相似证据召回。  
+主要存储内容：
+- `canonical_id -> embedding 向量`：每条 canonical 1 个 point（Cosine 相似度）
+- payload：少量可展示/可过滤字段（如 `canonical_id/title/source_id/url/published_at`；不存分析 JSON，也不作为最终事实来源）
+- collection 策略：支持 `auto/base/scoped`；当 embedding 模型/维度变化时可自动切换到“模型+维度隔离”的 collection（避免维度不匹配）
 
 ### 7.5 MinIO（对象存储）
 优点：保留 raw 全文用于审计/回放；与 DB 解耦；成本低。  
@@ -584,7 +605,7 @@ v1 建议聚焦“检索质量 + 可观测性 + 成本治理 + 规模化”：
 - `apps/api/static/`：原静态资源文件夹已不再被 API 默认引用，但保留用于参考或回滚。
 - 分析 LLM：目前支持通过 `.env` 配置本地 vLLM（OpenAI 兼容接口）以替代云端 API，从而降低 Token 消耗。
 
-### 11.4 大模型微调：深分析本地化、对话保留云端 (2025-12-30)
+### 11.4 大模型微调：分析链路本地化、对话保留云端 (2025-12-30)
 
 修改范围（Scope）：
 - **仅替换“深度分析”模块的 LLM**：`src/tx_news/tasks/deep_analysis.py` 的二次推理与结构化回写计划切换到本地微调模型。
@@ -601,16 +622,17 @@ v1 建议聚焦“检索质量 + 可观测性 + 成本治理 + 规模化”：
    - `CUDA_VISIBLE_DEVICES=0`（GPU0）
    - `PORT=9999`（`base_url=http://127.0.0.1:9999/v1`）
    - `SERVED_MODEL_NAME=deepseekr1-merged`（`model=deepseekr1-merged`）
-4) **队列级分流（推荐的最小改造方案）**：
+4) **队列级分流（可选）**：
    - 将 `tx_news.tasks.deep_analysis.*` 路由到独立队列（例如 `deep`），启动 `deep-worker` 仅消费该队列，并把它的 LLM 指向本地 vLLM；
-   - 默认 `worker` 继续消费 `default` 队列（`pipeline.*` 包含 `analyze`），仍指向云端 API；
+   - 默认 `worker` 继续消费 `default` 队列（`pipeline.*` 包含 `analyze`），可独立选择指向本地或云端；
    - API 进程的 chat 仍指向云端 API。
-   - 备注：如果不做队列拆分，而是仅用“进程级 env 分流”，由于 `analyze` 与 `deep_optimize` 同在 worker 侧，会一起切到本地模型（不符合“仅深分析本地化”的目标）。
+   - 备注：本仓库当前默认策略是“GPU 模式下 analyze 与 deep_optimize 都优先走本地 vLLM”，因此是否做队列拆分取决于你是否需要把两条链路分别指向不同模型/资源配额。
 5) **代码级分流（已落地）**：
-   - `deep_analysis.py` 读取 `llm.deep`，`apps/api` 与 `pipeline.analyze()` 读取 `llm.chat`；
+   - worker（`pipeline.analyze()` + `deep_analysis.py`）GPU 模式下优先读取 `llm.deep`（本地 vLLM），失败时回退到 `llm.chat`（需 api_key）；
+   - `apps/api` 的 `/chat` 与 `/chat/stream` 仍读取 `llm.chat`（并支持每用户 Redis 配置覆盖）；
    - env 支持：`TXNEWS_LLM_CHAT_*` 与 `TXNEWS_LLM_DEEP_*`（兼容旧的 `TXNEWS_LLM_*` / `DASHSCOPE_API_KEY`）；
    - 双卡建议：在 `.env` 设置 `TXNEWS_ACCELERATOR=gpu`，并用 `TXNEWS_EMBEDDING_DEVICE=cuda:1` 把 embedding 固定到 GPU1（GPU0 留给 vLLM）。
-   - CPU 保底：在 `.env` 设置 `TXNEWS_ACCELERATOR=cpu`，深分析自动回退到在线 LLM（与 `llm.chat` 一致）。
+   - CPU 保底：在 `.env` 设置 `TXNEWS_ACCELERATOR=cpu`，worker 分析链路使用在线 LLM（`llm.chat`；无 key 则规则降级）。
 
 预期收益：
 - 深分析输出格式更稳定（严格 JSON、事件类型/字段更贴合本项目）。
