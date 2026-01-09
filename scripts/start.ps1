@@ -547,7 +547,7 @@ if ($Accelerator -eq "gpu") {
   Write-Log "vLLM: http://localhost:$VllmPort/v1 (models: /v1/models)"
 }
 Write-Log "Logs: $LogDir/ (bootstrap: $BootstrapLog)"
-Write-Log "Stop: Ctrl+C here, or run: scripts\\stop.cmd"
+Write-Log "Stop: Ctrl+C here, or run: scripts\stop.cmd"
 Write-Log "Container services remain running until: docker compose down"
 
 $script:StopRequested = $false

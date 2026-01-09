@@ -21,7 +21,7 @@
 | --- | --- | --- |
 | `start.sh` | 运维入口 | 一键启动本地开发/演示环境。 |
 | `stop.sh` | 运维入口 | 停止由 `start.sh` 启动的后台进程。 |
-| `start.ps1` | 运维入口 | Windows PowerShell 一键启动（对齐 `start.sh`）。 |
+| `start.ps1` | 运维入口 | Windows PowerShell 一键启动（尽量对齐 `start.sh`；仅 `TXNEWS_ACCELERATOR=gpu` 才尝试启动 vLLM，且需 WSL 或 Git-Bash）。 |
 | `stop.ps1` | 运维入口 | Windows PowerShell 停止由 `start.ps1` 启动的后台进程。 |
 | `start.cmd` | 运维入口 | Windows 双击启动（调用 `start.ps1`）。 |
 | `stop.cmd` | 运维入口 | Windows 双击停止（调用 `stop.ps1`）。 |

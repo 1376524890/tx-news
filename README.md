@@ -42,16 +42,23 @@
 - 编辑 `config/config.yaml`：crawler/embedding/llm/tushare 等
 
 3) 启动：
+- Linux/macOS：
 ```bash
 bash scripts/start.sh
 ```
+- Windows：
+```powershell
+scripts\start.cmd
+# 或：pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start.ps1
+```
+> 备注：Windows 下如需启用本地 vLLM（`TXNEWS_ACCELERATOR=gpu`），需安装 WSL 或 Git-Bash 用于执行 vLLM 的 `.sh` 启动脚本；不需要 vLLM 时保持默认 `TXNEWS_ACCELERATOR=cpu` 即可。
 
 启动脚本会：
 - 创建 `.venv` 并安装依赖（可自动安装合适的 torch CPU/CUDA 版本）
 - 设置 HuggingFace 镜像/缓存并做 embedding 预检（提前下载/加载模型）
 - （可选）当 `.env` 设置 `TXNEWS_ACCELERATOR=gpu` 时，启动本地 vLLM（用于 worker 常规分析 + 深分析，优先节约 token 成本）
 - `docker compose up -d` 启动 Postgres/Redis/NATS/MinIO/Qdrant
-- 启动后台进程：Celery worker、NATS bridge、Collector、API（8000）、Config（8001，可选）
+- 启动后台进程：Celery worker、NATS bridge、Collector、API（8000）、Config（8001；单端口环境可直接使用 `8000/config`）
 - 启动完成后做健康检查（API `/health`；若启用 vLLM 则检查 `/v1/models`）
 
 常用启动参数（写入 `.env`）：
@@ -82,8 +89,13 @@ curl -s http://localhost:8000/status | jq .
 对话页侧栏会展示基础计数与依赖健康（来自 `/status`）。
 
 ### 1.4 停止
+- Linux/macOS：
 ```bash
 bash scripts/stop.sh
+```
+- Windows：
+```powershell
+scripts\stop.cmd
 ```
 （仅停止 `start.sh` 拉起的本地进程；Docker infra 仍在运行，需手动 `docker compose down` 才会停止）
 
