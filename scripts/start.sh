@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
-# Input: 本地 Python/Docker/NVIDIA 环境 + config/.env + HuggingFace 镜像/缓存配置 + (可选) conda env `vllm`
-# Output: 自动安装匹配的 torch、预检 embedding 下载/加载、可选启动 vLLM、本地栈拉起并做启动健康检查
-# Pos: 运维启动脚本（变更时同步更新以上注释与所属目录 FOLDER.md）
+# Input: Docker + Docker Compose + config/.env（可选）+（可选）宿主机 vLLM 脚本
+# Output: 通过 docker compose 一键启动 infra + 主程序容器，并做基础健康检查；并输出容器日志到终端与文件
+# Pos: 运维启动脚本（Docker 版；变更时同步更新以上注释与所属目录 FOLDER.md）
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
 LOG_DIR="${LOG_DIR:-var/log}"
 RUN_DIR="${RUN_DIR:-.run}"
-BOOTSTRAP_LOG="${BOOTSTRAP_LOG:-${LOG_DIR}/bootstrap.log}"
-
-mkdir -p "${LOG_DIR}" "${RUN_DIR}"
+mkdir -p "${LOG_DIR}"
+mkdir -p "${RUN_DIR}"
 
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -27,188 +25,36 @@ have() {
   command -v "$1" >/dev/null 2>&1
 }
 
-setup_hf_env() {
-  # HF_ENDPOINT controls HuggingFace Hub base URL for model downloads.
-  # Default to hf-mirror for users in restricted networks.
-  export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
-
-  # Keep cache in-repo by default to avoid polluting ~ and ease cleanup.
-  export HF_HOME="${HF_HOME:-${ROOT_DIR}/var/hf}"
-  if [[ "${HF_HOME}" != /* ]]; then
-    export HF_HOME="${ROOT_DIR}/${HF_HOME}"
-  fi
-  mkdir -p "${HF_HOME}"
-}
-
-detect_torch_variant() {
-  # echo: cpu | cu121 | cu124
-  if [[ -n "${TORCH_VARIANT:-}" ]]; then
-    echo "${TORCH_VARIANT}"
+docker_accessible() {
+  if have docker && docker info >/dev/null 2>&1; then
     return 0
   fi
-
-  if ! have nvidia-smi; then
-    echo "cpu"
+  if have sudo && sudo -n docker info >/dev/null 2>&1; then
     return 0
   fi
-
-  local cuda_ver major minor
-  cuda_ver="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: \\([0-9.]*\\).*/\\1/p' | head -n 1 || true)"
-  if [[ -z "${cuda_ver}" ]]; then
-    echo "cu121"
-    return 0
-  fi
-
-  major="${cuda_ver%%.*}"
-  minor="${cuda_ver#*.}"
-  minor="${minor%%.*}"
-  if [[ -z "${major}" || -z "${minor}" ]]; then
-    echo "cu121"
-    return 0
-  fi
-
-  if (( major > 12 )) || (( major == 12 && minor >= 4 )); then
-    echo "cu124"
-  else
-    echo "cu121"
-  fi
-}
-
-install_torch_auto() {
-  local auto="${AUTO_TORCH:-1}"
-  if [[ "${auto}" != "1" ]]; then
-    log "AUTO_TORCH=0; skip torch auto-install."
-    return 0
-  fi
-
-  local variant index_url
-  variant="$(detect_torch_variant)"
-
-  if python -c "import torch; print(torch.__version__)" >/dev/null 2>&1; then
-    local torch_ver torch_cuda
-    torch_ver="$(python -c 'import torch; print(torch.__version__)' 2>/dev/null || true)"
-    torch_cuda="$(python -c 'import torch; print(getattr(torch.version, "cuda", "") or "")' 2>/dev/null || true)"
-    if [[ "${variant}" != "cpu" && -z "${torch_cuda}" ]]; then
-      log "Torch is installed but CUDA is not enabled; reinstalling PyTorch (${variant})..."
-      pip uninstall -y torch 2>&1 | tee -a "${BOOTSTRAP_LOG}"
-    else
-      log "Torch already installed: ${torch_ver} (cuda=${torch_cuda:-none})"
-      return 0
-    fi
-  fi
-
-  if [[ -n "${TORCH_INDEX_URL:-}" ]]; then
-    index_url="${TORCH_INDEX_URL}"
-  else
-    case "${variant}" in
-      cpu) index_url="https://download.pytorch.org/whl/cpu" ;;
-      cu121) index_url="https://download.pytorch.org/whl/cu121" ;;
-      cu124) index_url="https://download.pytorch.org/whl/cu124" ;;
-      *) die "invalid TORCH_VARIANT: ${variant} (expected cpu/cu121/cu124)" ;;
-    esac
-  fi
-
-  log "Installing PyTorch (${variant}) from ${index_url} ..."
-  pip install --upgrade "torch" --index-url "${index_url}" 2>&1 | tee -a "${BOOTSTRAP_LOG}"
-}
-
-preflight_embedding() {
-  local enabled="${PREFLIGHT_EMBEDDING:-1}"
-  if [[ "${enabled}" != "1" ]]; then
-    log "PREFLIGHT_EMBEDDING=0; skip embedding preflight."
-    return 0
-  fi
-
-  setup_hf_env
-
-  log "Preflight: torch/GPU/HF/embedding..."
-  python - <<'PY'
-import os
-import time
-
-from tx_news.settings import get_settings
-
-settings = get_settings()
-file_cfg = settings.load_file_settings()
-embedding_cfg = settings.resolve_embedding_cfg(file_cfg)
-
-device_cfg = str(embedding_cfg.get("device", "auto")).strip().lower()
-model_name = str(embedding_cfg.get("model_name") or "").strip()
-
-print("HF_ENDPOINT =", os.environ.get("HF_ENDPOINT"))
-print("HF_HOME     =", os.environ.get("HF_HOME"))
-print("TXNEWS_ACCELERATOR      =", os.environ.get("TXNEWS_ACCELERATOR"))
-print("TXNEWS_EMBEDDING_DEVICE =", os.environ.get("TXNEWS_EMBEDDING_DEVICE"))
-
-try:
-    import torch
-
-    print("torch       =", torch.__version__)
-    print("torch.cuda.is_available =", bool(torch.cuda.is_available()))
-    print("torch.version.cuda      =", getattr(torch.version, "cuda", None))
-    if torch.cuda.is_available():
-        n = torch.cuda.device_count()
-        print("cuda.device_count       =", n)
-        for i in range(n):
-            print(f"cuda[{i}] name          =", torch.cuda.get_device_name(i))
-except Exception as e:
-    raise SystemExit(f"ERROR: torch import failed: {e}")
-
-if device_cfg in {"auto"} or device_cfg.startswith("cuda"):
-    import torch
-
-    if not torch.cuda.is_available():
-        raise SystemExit(
-            "ERROR: embedding.device expects CUDA, but torch.cuda.is_available() is False. "
-            "Fix your torch CUDA build/driver, or set TXNEWS_ACCELERATOR=cpu / TXNEWS_EMBEDDING_DEVICE=cpu."
-        )
-
-from tx_news.embedding.embedder import build_embedder
-
-t0 = time.time()
-embedder, strategy = build_embedder(embedding_cfg)
-vec = embedder.embed("embedding 预检")
-dt = time.time() - t0
-
-print("embedding.model_name    =", model_name)
-print("embedding.device        =", device_cfg)
-print("embedding.dim           =", len(vec))
-print("qdrant.strategy         =", strategy)
-print(f"embedding.preflight_sec = {dt:.2f}")
-PY
+  return 1
 }
 
 compose() {
-  if have docker && docker compose version >/dev/null 2>&1; then
-    docker compose "$@"
-  elif have docker-compose; then
-    docker-compose "$@"
-  else
-    die "docker compose not found (install Docker + Compose)"
+  if have docker; then
+    if docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+      docker compose "$@"
+      return
+    fi
+    if have sudo && sudo -n docker info >/dev/null 2>&1 && sudo -n docker compose version >/dev/null 2>&1; then
+      sudo docker compose "$@"
+      return
+    fi
   fi
-}
-
-wait_port() {
-  local host="$1"
-  local port="$2"
-  local name="$3"
-  local timeout="${4:-60}"
-  log "Waiting for ${name} on ${host}:${port} (timeout ${timeout}s)..."
-  "${PYTHON_BIN}" - <<PY
-import socket, time, sys
-host="${host}"
-port=int("${port}")
-deadline=time.time()+int("${timeout}")
-while time.time() < deadline:
-  try:
-    with socket.create_connection((host, port), timeout=2):
-      print("OK")
-      sys.exit(0)
-  except OSError:
-    time.sleep(1)
-print("TIMEOUT", file=sys.stderr)
-sys.exit(1)
-PY
+  if have docker-compose; then
+    docker-compose "$@"
+    return
+  fi
+  if have sudo && have docker-compose && sudo -n docker-compose version >/dev/null 2>&1; then
+    sudo docker-compose "$@"
+    return
+  fi
+  die "docker compose not available (install Docker + Compose; or run with sudo / add user to docker group)"
 }
 
 wait_http() {
@@ -216,25 +62,31 @@ wait_http() {
   local name="$2"
   local timeout="${3:-60}"
   log "Waiting for ${name} HTTP ${url} (timeout ${timeout}s)..."
-  "${PYTHON_BIN}" - <<PY
-import time
-import urllib.request
+  local deadline
+  deadline="$(( $(date +%s) + timeout ))"
+  while [[ "$(date +%s)" -lt "${deadline}" ]]; do
+    if have curl; then
+      if curl -fsS --max-time 3 "${url}" >/dev/null 2>&1; then
+        return 0
+      fi
+    elif have wget; then
+      if wget -q -T 3 -O /dev/null "${url}" >/dev/null 2>&1; then
+        return 0
+      fi
+    else
+      die "need curl or wget for health checks"
+    fi
+    sleep 1
+  done
+  return 1
+}
 
-url="${url}"
-deadline=time.time()+int("${timeout}")
-last_err=None
-while time.time() < deadline:
-  try:
-    with urllib.request.urlopen(url, timeout=3) as r:  # noqa: S310
-      status = int(getattr(r, "status", 200))
-      if 200 <= status < 300:
-        print("OK")
-        raise SystemExit(0)
-  except Exception as e:
-    last_err=e
-    time.sleep(1)
-raise SystemExit(f"TIMEOUT: {last_err}")
-PY
+stop_pid() {
+  local pid="${1:-}"
+  [[ -n "${pid}" ]] || return 0
+  # If the pid is a process group leader (e.g. started via setsid), try killing the whole group first.
+  kill -- -"${pid}" >/dev/null 2>&1 || true
+  kill "${pid}" >/dev/null 2>&1 || true
 }
 
 start_bg() {
@@ -250,178 +102,128 @@ start_bg() {
       log "Already running: ${name} (pid=${pid})"
       return 0
     fi
-    rm -f "${pidfile}"
+    rm -f "${pidfile}" || true
   fi
 
   log "Starting ${name}..."
-  (bash -lc "${cmd}" >>"${logfile}" 2>&1) &
+  if have setsid; then
+    (setsid bash -lc "${cmd}" >>"${logfile}" 2>&1) &
+  else
+    (bash -lc "${cmd}" >>"${logfile}" 2>&1) &
+  fi
   echo $! > "${pidfile}"
   log "Started ${name} pid=$(cat "${pidfile}") log=${logfile}"
 }
 
-stop_all() {
-  log "Stopping processes..."
-  for pidfile in "${RUN_DIR}"/*.pid; do
-    [[ -e "${pidfile}" ]] || continue
-    local pid
-    pid="$(cat "${pidfile}" || true)"
-    if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
-      log "Killing $(basename "${pidfile}" .pid) pid=${pid}"
-      kill "${pid}" >/dev/null 2>&1 || true
-    fi
-    rm -f "${pidfile}" || true
-  done
-  log "Done."
+TAIL_PID=""
+start_tail_file() {
+  local path="$1"
+  local tail_lines="${2:-200}"
+  TAIL_PID=""
+  if ! have tail; then
+    return 0
+  fi
+  (
+    set +e
+    # -F: follow by name (handles file creation/rotation); fallback to -f if unsupported.
+    tail -n "${tail_lines}" -F "${path}" 2>/dev/null || tail -n "${tail_lines}" -f "${path}"
+  ) &
+  TAIL_PID="$!"
 }
 
-trap stop_all INT TERM
+compose_logs() {
+  local follow="$1"
+  local outfile="$2"
+  local tail="${3:-200}"
 
-have "${PYTHON_BIN}" || die "python not found: ${PYTHON_BIN}"
-
-if ! have node || ! have npm; then
-  die "Node.js and npm are required for frontend build. Please install them."
-fi
-
-log "Step 0/12: Building frontend (apps/web)..."
-(
-  cd "${ROOT_DIR}/apps/web"
-  npm install --no-audit --no-fund --quiet
-  npm run build:all
-) || die "Frontend build failed."
-
-if [[ ! -d ".venv" ]]; then
-  log "Step 1/12: Creating virtualenv in .venv (this may take a moment)..."
-  "${PYTHON_BIN}" -m venv .venv
-  log "Virtualenv created."
-else
-  log "Step 1/12: Virtualenv already exists (.venv)."
-fi
-
-# shellcheck disable=SC1091
-source .venv/bin/activate
-log "Step 2/12: Upgrading pip..."
-python -m pip install --upgrade pip 2>&1 | tee -a "${BOOTSTRAP_LOG}"
-
-log "Step 3/12: Auto-installing torch (CPU/CUDA)..."
-install_torch_auto
-
-log "Step 4/12: Installing Python dependencies (requirements.txt)..."
-pip install -r requirements.txt 2>&1 | tee -a "${BOOTSTRAP_LOG}"
-
-log "Step 5/12: Installing this repo as editable package (pip install -e .)..."
-pip install -e . 2>&1 | tee -a "${BOOTSTRAP_LOG}"
-log "Python deps installed. (bootstrap log: ${BOOTSTRAP_LOG})"
-
-log "Sanity check: verifying Celery tasks are registered..."
-python - <<'PY'
-from tx_news.tasks.celery_app import celery_app
-keys = [k for k in celery_app.tasks.keys() if k.startswith("tx_news.tasks.")]
-print(f"Registered tasks: {len(keys)}")
-for k in sorted(keys):
-    print(" -", k)
-if not keys:
-    raise SystemExit("ERROR: no tx_news.tasks.* registered; worker would discard tasks")
-PY
+  if [[ "${follow}" == "1" ]]; then
+    if ! compose --profile app logs --no-color --timestamps -f 2>&1 | tee -a "${outfile}"; then
+      compose --profile app logs -f 2>&1 | tee -a "${outfile}"
+    fi
+  else
+    if ! compose --profile app logs --no-color --timestamps --tail "${tail}" 2>&1 | tee -a "${outfile}"; then
+      compose --profile app logs --tail "${tail}" 2>&1 | tee -a "${outfile}"
+    fi
+  fi
+}
 
 if [[ ! -f ".env" ]]; then
   log "Creating .env from .env.example ..."
   cp .env.example .env
 fi
 
-# Export .env for processes started by this script.
 set -a
 # shellcheck disable=SC1091
 source .env
 set +a
 
-log "Step 6/12: Preflight embedding (HF mirror + model load)..."
-preflight_embedding
+START_VLLM="$(printf '%s' "${TXNEWS_START_VLLM:-1}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+ACCEL="$(printf '%s' "${TXNEWS_ACCELERATOR:-cpu}" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+FOLLOW_LOGS="${TXNEWS_FOLLOW_LOGS:-1}"
+COMPOSE_LOG_FILE="${TXNEWS_COMPOSE_LOG_FILE:-${LOG_DIR}/compose.log}"
+VLLM_LOG_FILE="${TXNEWS_VLLM_LOG_FILE:-${LOG_DIR}/vllm.log}"
 
-log "Step 7/12: Starting Docker services (postgres/redis/nats/minio/qdrant)..."
-compose up -d
-
-wait_port "127.0.0.1" "5432" "Postgres" 90
-wait_port "127.0.0.1" "6379" "Redis" 60
-wait_port "127.0.0.1" "4222" "NATS" 60
-wait_port "127.0.0.1" "9000" "MinIO" 60
-wait_port "127.0.0.1" "6333" "Qdrant" 60
-log "Docker services are ready."
-
-# Optional: sync A-share master data if tushare.token is configured.
-log "Step 8/12: Optional Tushare A-share master data sync..."
-TUSHARE_TOKEN="$("${PYTHON_BIN}" - <<'PY'
-import yaml
-from pathlib import Path
-p=Path("config/config.yaml")
-cfg=yaml.safe_load(p.read_text(encoding="utf-8")) if p.exists() else {}
-print(((cfg.get("tushare") or {}).get("token") or "").strip())
-PY
-)"
-if [[ -n "${TUSHARE_TOKEN}" ]]; then
-  log "Syncing A-share master data from Tushare..."
-  python -m apps.sync_tushare || echo "WARN: Tushare sync failed (check token/network)."
-else
-  log "WARN: tushare.token is empty; skip A-share master data sync."
-fi
-
-if [[ "${TXNEWS_ACCELERATOR:-cpu}" == "gpu" ]]; then
-  log "Step 9/12: Starting vLLM (GPU0,1) for deep analysis..."
+if [[ "${ACCEL}" == "gpu" && "${START_VLLM}" == "1" ]]; then
+  log "Starting host vLLM (outside Docker; preferred for stability)..."
   VLLM_SCRIPT="${TXNEWS_VLLM_SCRIPT:-finetune/result_model/deepseekr1_merged/serve_vllm_gpu0_9999.sh}"
   VLLM_PORT="${TXNEWS_VLLM_PORT:-9999}"
-  VLLM_TIMEOUT="${TXNEWS_VLLM_TIMEOUT_SECONDS:-600}"
-  if [[ ! -x "${VLLM_SCRIPT}" ]]; then
-    die "TXNEWS_ACCELERATOR=gpu but vLLM script not found/executable: ${VLLM_SCRIPT}"
+  VLLM_TIMEOUT="${TXNEWS_VLLM_TIMEOUT_SECONDS:-900}"
+  if [[ ! -f "${VLLM_SCRIPT}" ]]; then
+    die "TXNEWS_ACCELERATOR=gpu but vLLM script not found: ${VLLM_SCRIPT}"
   fi
-  start_bg "vllm" \
-    "cd '${ROOT_DIR}' && PORT='${VLLM_PORT}' bash '${VLLM_SCRIPT}'" \
-    "${LOG_DIR}/vllm.log"
-  wait_http "http://127.0.0.1:${VLLM_PORT}/v1/models" "vLLM" "${VLLM_TIMEOUT}"
-  log "vLLM is ready."
+
+  start_bg "vllm" "cd '${ROOT_DIR}' && HOST='0.0.0.0' PORT='${VLLM_PORT}' bash '${VLLM_SCRIPT}'" "${VLLM_LOG_FILE}"
+  sleep 1
+  vllm_pid="$(cat "${RUN_DIR}/vllm.pid" 2>/dev/null || true)"
+  if [[ -n "${vllm_pid}" ]] && ! kill -0 "${vllm_pid}" >/dev/null 2>&1; then
+    log "vLLM process exited early; last logs:"
+    tail -n 200 "${VLLM_LOG_FILE}" 2>/dev/null || true
+    die "Failed to start vLLM. If you use a venv, set TXNEWS_VLLM_PYTHON to the correct python."
+  fi
+  log "Tailing vLLM log while waiting -> ${VLLM_LOG_FILE}"
+  start_tail_file "${VLLM_LOG_FILE}" 200
+  vllm_tail_pid="${TAIL_PID}"
+  trap 'stop_pid "${vllm_tail_pid:-}"; exit 1' INT TERM
+  if ! wait_http "http://127.0.0.1:${VLLM_PORT}/v1/models" "vLLM /v1/models" "${VLLM_TIMEOUT}"; then
+    stop_pid "${vllm_tail_pid:-}"
+    die "vLLM not ready (timeout). Check ${VLLM_LOG_FILE}."
+  fi
+  stop_pid "${vllm_tail_pid:-}"
+  log "vLLM is ready. (containers use TXNEWS_LLM_DEEP_BASE_URL=${TXNEWS_LLM_DEEP_BASE_URL:-http://host.docker.internal:${VLLM_PORT}/v1})"
 else
-  log "Step 9/12: Skip vLLM (TXNEWS_ACCELERATOR=${TXNEWS_ACCELERATOR:-cpu})."
+  log "Skip host vLLM (TXNEWS_ACCELERATOR=${ACCEL} TXNEWS_START_VLLM=${START_VLLM})."
 fi
 
-log "Step 10/12: Starting background processes (Celery worker / NATS bridge / Collector / API / Config)..."
-start_bg "celery_worker" \
-  "cd '${ROOT_DIR}' && source .venv/bin/activate && celery -A tx_news.tasks.celery_app.celery_app worker -l INFO --pool=solo --concurrency=1" \
-  "${LOG_DIR}/celery_worker.log"
+log "Starting containers (profile=app)..."
+if ! docker_accessible; then
+  die "Docker daemon is not accessible (cannot connect to /var/run/docker.sock). Run with sudo / fix docker permissions, then retry."
+fi
+compose --profile app up -d --build
 
-start_bg "nats_bridge" \
-  "cd '${ROOT_DIR}' && source .venv/bin/activate && python -m apps.worker.nats_bridge" \
-  "${LOG_DIR}/nats_bridge.log"
-
-start_bg "collector" \
-  "cd '${ROOT_DIR}' && source .venv/bin/activate && python -m apps.collector.main" \
-  "${LOG_DIR}/collector.log"
-
-start_bg "api" \
-  "cd '${ROOT_DIR}' && source .venv/bin/activate && uvicorn apps.api.main:app --host 0.0.0.0 --port 8000" \
-  "${LOG_DIR}/api.log"
-
-start_bg "config" \
-  "cd '${ROOT_DIR}' && source .venv/bin/activate && uvicorn apps.admin.main:app --host 0.0.0.0 --port 8001" \
-  "${LOG_DIR}/config.log"
-
-log "Step 11/12: Startup checks..."
-wait_http "http://127.0.0.1:8000/health" "API /health" 60
-wait_http "http://127.0.0.1:8001/health" "Config /health" 60
-if [[ "${TXNEWS_ACCELERATOR:-cpu}" == "gpu" ]]; then
+log "Startup checks..."
+if ! wait_http "http://127.0.0.1:8000/health" "API /health" 120; then
+  compose --profile app logs --tail 200 api || true
+  die "API not ready (timeout)."
+fi
+if have curl; then
+  if curl -fsS --max-time 5 "http://127.0.0.1:8000/status" 2>/dev/null | grep -Eq '"a_share_basic"[[:space:]]*:[[:space:]]*0'; then
+    log "WARN: a_share_basic is empty (bootstrap may still be running or failed)."
+    compose --profile app logs --tail 200 bootstrap || true
+  fi
+fi
+wait_http "http://127.0.0.1:8001/health" "Admin /health" 120 || true
+if [[ "${ACCEL}" == "gpu" ]]; then
   VLLM_PORT="${TXNEWS_VLLM_PORT:-9999}"
-  wait_http "http://127.0.0.1:${VLLM_PORT}/v1/models" "vLLM /v1/models" 10
+  wait_http "http://127.0.0.1:${VLLM_PORT}/v1/models" "vLLM /v1/models" 10 || true
 fi
-log "Startup checks passed."
 
 log "Startup complete."
 log "Web UI: http://localhost:8000/"
 log "Config UI: http://localhost:8001/"
 log "API: http://localhost:8000 (health: /health, search: /search?q=..., status: /status)"
-if [[ "${TXNEWS_ACCELERATOR:-cpu}" == "gpu" ]]; then
+if [[ "${ACCEL}" == "gpu" ]]; then
   log "vLLM: http://localhost:${TXNEWS_VLLM_PORT:-9999}/v1 (models: /v1/models)"
 fi
-log "Logs: ${LOG_DIR}/ (bootstrap: ${BOOTSTRAP_LOG})"
-log "Stop: Ctrl+C here, or run: bash scripts/stop.sh"
-log "Container services remain running until: docker compose down"
-
-while true; do
-  sleep 2
-done
+log "Streaming docker logs (follow=${FOLLOW_LOGS}) -> ${COMPOSE_LOG_FILE}"
+log "Stop containers: bash scripts/stop.sh"
+compose_logs "${FOLLOW_LOGS}" "${COMPOSE_LOG_FILE}"

@@ -20,9 +20,10 @@
 
 ## Build, Test, and Development Commands
 
-- `bash scripts/start.sh`: creates `.venv`, installs deps, brings up Docker services, starts worker/collector/API.
-- `bash scripts/stop.sh`: stops background processes started by `start.sh` (Docker services keep running).
+- `bash scripts/start.sh`: starts the Docker stack (profile=app); in `TXNEWS_ACCELERATOR=gpu` mode it can also start host vLLM (outside Docker) when `TXNEWS_START_VLLM=1`.
+- `bash scripts/stop.sh`: stops the Docker stack (profile=app; volumes are preserved) and tries to stop host vLLM started by `start.*`.
 - `docker compose up -d`: starts infra only (Postgres/Redis/NATS/MinIO/Qdrant).
+- `docker compose --profile app up -d --build`: starts infra + app services (API/Admin/Worker/Collector/NATS-Bridge).
 - `uvicorn apps.api.main:app --reload --port 8000`: run API locally during development.
 - `celery -A tx_news.tasks.celery_app.celery_app worker -l INFO --pool=solo --concurrency=1`: run a worker.
 

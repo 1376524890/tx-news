@@ -39,7 +39,7 @@ This repo includes a starter dataset and dataset registry for LLaMA-Factory:
    - `bash finetune/run_sft.sh`
 
 ## Serving
-This repo assumes you run vLLM from a dedicated conda env `vllm`.
+This repo assumes you run vLLM from a dedicated environment (conda env or a Python venv).
 
 - Generic helper: `finetune/serve_vllm.sh` (fill `MODEL_DIR`, choose a port).
 - For the bundled merged model (GPU0 + port 9999): `finetune/result_model/deepseekr1_merged/serve_vllm_gpu0_9999.sh`
@@ -51,6 +51,9 @@ After vLLM is up, point **deep analysis only** to it via `config/config.yaml`:
 You can also control CPU/GPU behavior via `.env`:
 - `TXNEWS_ACCELERATOR=gpu`: deep analysis uses local vLLM; embedding defaults to GPU (recommended set `TXNEWS_EMBEDDING_DEVICE=cuda:1`)
 - `TXNEWS_ACCELERATOR=cpu`: deep analysis falls back to online LLM (`llm.chat`) as a safe baseline
+
+Tip:
+- If you use a venv, set `TXNEWS_VLLM_PYTHON` to the venv interpreter (e.g. `.venv/bin/python`) so the serve script can reliably find `vllm`.
 
 ## How to use it for Deep Analysis only (recommended)
 To keep chat and normal analysis on API LLM while running **deep analysis** on local model, the recommended wiring is:

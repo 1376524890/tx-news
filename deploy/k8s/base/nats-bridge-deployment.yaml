@@ -1,0 +1,40 @@
+# Input: tx-news-nats-bridge 镜像 + 外部依赖地址/密钥 + 配置挂载
+# Output: Deployment(tx-news-nats-bridge)
+# Pos: Kubernetes 资源清单（变更时同步更新以上注释与所属目录 FOLDER.md）
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tx-news-nats-bridge
+  namespace: tx-news
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tx-news-nats-bridge
+  template:
+    metadata:
+      labels:
+        app: tx-news-nats-bridge
+    spec:
+      containers:
+        - name: nats-bridge
+          image: tx-news-nats-bridge
+          envFrom:
+            - configMapRef:
+                name: tx-news-env
+            - secretRef:
+                name: tx-news-secrets
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: tx-news-files
+            items:
+              - key: config.yaml
+                path: config.yaml
+              - key: sources.txt
+                path: sources.txt

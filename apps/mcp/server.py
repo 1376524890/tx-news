@@ -1,6 +1,6 @@
 # Input: stdin JSON-RPC 请求 + 本地 Postgres/Qdrant 数据
 # Output: stdout JSON-RPC 响应（tools/list, tools/call）
-# Pos: MCP 工具服务入口（变更时同步更新以上注释与所属目录 FOLDER.md）
+# Pos: MCP 工具服务入口（变更时同步更新以上注释与所属目录 FOLDER.md；并在主数据缺失时尝试从本地缓存引导）
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import Any
 from tx_news.embedding.embedder import DEFAULT_EMBEDDING_MODEL, build_embedder
 from tx_news.settings import get_settings
 from tx_news.storage.postgres import (
+    bootstrap_a_share_basic_from_cache,
     get_a_share,
     get_analysis,
     get_article,
@@ -226,7 +227,10 @@ def tool_call(name: str, arguments: dict[str, Any]) -> Any:
         ts_code = str(arguments.get("ts_code") or "")
         row = get_a_share(engine, ts_code)
         if not row:
-            return {"error": "not_found"}
+            bootstrap = bootstrap_a_share_basic_from_cache(engine)
+            row = get_a_share(engine, ts_code)
+            if not row:
+                return {"error": "not_found", "bootstrap": bootstrap}
         return {
             "ts_code": row.ts_code,
             "name": row.name,

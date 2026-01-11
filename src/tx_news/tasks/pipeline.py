@@ -5,11 +5,13 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from celery import chain
 from redis import Redis
@@ -46,6 +48,39 @@ ANALYZE_LOCK_TTL_SECONDS = 10 * 60
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _is_local_llm_base_url(base_url: str) -> bool:
+    """
+    Best-effort detection for "local" OpenAI-compatible endpoints.
+
+    Used to decide whether api_key can be omitted for llm.deep (e.g. host vLLM or in-cluster service).
+    """
+    s = (base_url or "").strip()
+    if not s:
+        return False
+    try:
+        p = urlparse(s)
+        host = (p.hostname or "").strip().lower()
+        scheme = (p.scheme or "").strip().lower()
+    except Exception:
+        return False
+
+    if host in {"localhost", "127.0.0.1", "::1", "host.docker.internal"}:
+        return True
+
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_loopback or ip.is_private:
+            return True
+    except ValueError:
+        pass
+
+    # docker-compose / k8s service DNS (often single-label) usually means in-network local service.
+    if scheme == "http" and host and "." not in host:
+        return True
+
+    return host.endswith((".cluster.local", ".local"))
 
 
 def sha256_hex(text: str) -> str:
@@ -337,7 +372,7 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
         deep_llm = settings.resolve_llm_deep(file_cfg)
         deep_base_url = str(deep_llm.get("base_url") or "")
         deep_api_key = deep_llm.get("api_key")
-        is_local = deep_base_url.startswith(("http://127.0.0.1", "http://localhost"))
+        is_local = _is_local_llm_base_url(deep_base_url)
         if deep_api_key or is_local:
             deep_optimize.delay(canonical)
 

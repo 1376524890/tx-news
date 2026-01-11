@@ -1,0 +1,8 @@
+# Input: k8s 集群
+# Output: Namespace(tx-news)
+# Pos: Kubernetes 资源清单（变更时同步更新以上注释与所属目录 FOLDER.md）
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tx-news

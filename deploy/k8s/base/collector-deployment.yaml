@@ -1,0 +1,45 @@
+# Input: tx-news-collector 镜像 + 外部依赖地址/密钥 + 配置挂载
+# Output: Deployment(tx-news-collector)
+# Pos: Kubernetes 资源清单（变更时同步更新以上注释与所属目录 FOLDER.md）
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tx-news-collector
+  namespace: tx-news
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tx-news-collector
+  template:
+    metadata:
+      labels:
+        app: tx-news-collector
+    spec:
+      containers:
+        - name: collector
+          image: tx-news-collector
+          envFrom:
+            - configMapRef:
+                name: tx-news-env
+            - secretRef:
+                name: tx-news-secrets
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+            - name: hf-cache
+              mountPath: /app/var/hf
+      volumes:
+        - name: config
+          configMap:
+            name: tx-news-files
+            items:
+              - key: config.yaml
+                path: config.yaml
+              - key: sources.txt
+                path: sources.txt
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: tx-news-hf-cache

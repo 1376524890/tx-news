@@ -9,7 +9,7 @@
 架构（≤3行）：
 - 单机数据流（v1）：`apps/collector` → NATS → `apps/worker`(Celery) → Postgres/Qdrant/MinIO。
 - 运行入口在 `apps/`，可复用库在 `src/tx_news/`，配置在 `config/`。
-- 运维脚本在 `scripts/`；日志与缓存在 `var/`（gitignored）；进程 pid 在 `.run/`（用于管理台进程状态，尽量不要把运行态变更纳入提交）。
+- 运维脚本在 `scripts/`；主程序推荐通过 Docker 运行（脚本会同步输出容器日志并落盘到 `var/log/compose.log`）；运行态目录（`var/`、`.run/`）均 gitignore。
 
 ## 文件
 
@@ -18,7 +18,8 @@
 | `README.md` | 主文档 | 快速开始、API/UI 使用、架构与技术细节、取舍与路线图。 |
 | `AGENTS.md` | 贡献指南 | 本仓库的开发与协作约定。 |
 | `REQUIREMENTS.md` | 运维文档 | 环境/依赖/网络与密钥要求。 |
-| `docker-compose.yml` | 基础设施编排 | 本地启动 Postgres/Redis/NATS/MinIO/Qdrant。 |
+| `docker-compose.yml` | 单机编排 | 默认启动基础设施；`profile=app` 时构建并启动主程序容器（含 `db-init` 建表与 `bootstrap` 一次性引导主数据）。 |
+| `.dockerignore` | Docker 构建 | 缩小构建上下文，避免把运行态/缓存打进镜像。 |
 | `pyproject.toml` | 工具/打包配置 | `setuptools` + `ruff` 等配置入口。 |
 | `requirements.txt` | 运行依赖 | 服务运行所需 Python 依赖。 |
 | `requirements-dev.txt` | 开发依赖 | `pytest`/`ruff` 等开发工具依赖。 |
@@ -34,4 +35,6 @@
 | `src/tx_news/` | 核心库 | 采集、清洗、去重、存储、任务、Agent。 |
 | `config/` | 配置层 | `config.yaml` 与抓取源列表。 |
 | `scripts/` | 运维脚本 | 一键启动/停止与本地开发辅助。 |
+| `docker/` | 镜像定义 | 多目标 Dockerfile（按功能拆分构建镜像）。 |
+| `deploy/` | 部署清单 | Kubernetes 等部署侧资产（预留）。 |
 | `finetune/` | 可选模块 | SFT/vLLM 相关脚本与配置。 |

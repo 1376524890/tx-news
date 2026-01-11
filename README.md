@@ -23,11 +23,10 @@
 ## 1. 快速开始（单机 v1）
 
 ### 1.1 前置条件
-- Python >= 3.10
-- Node.js >= 18 (for frontend build)
-- Docker + Docker Compose
-- （可选）NVIDIA GPU（用于 vLLM 加速；无 GPU 也可跑，embedding 默认使用 CPU，除非显式设置 `TXNEWS_EMBEDDING_DEVICE`）
-- 网络：需要拉取 Docker 镜像；首次运行可能需要下载 embedding 模型与（可选）torch wheel
+- Docker + Docker Compose（必需；用于构建镜像与一键启动）
+- （可选）NVIDIA GPU（用于外置 vLLM 加速；vLLM 不随主程序打包）
+- 网络：需要拉取 Docker 镜像；首次运行可能需要下载 embedding 模型（建议设置 `HF_ENDPOINT` 镜像）
+- （开发/二次开发）Python >= 3.10、Node.js >= 18（本地运行/调试用；Docker 部署不要求宿主机安装）
 
 ### 1.2 一键启动
 1) 配置环境变量：
@@ -51,24 +50,29 @@ bash scripts/start.sh
 scripts\start.cmd
 # 或：pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start.ps1
 ```
-> 备注：Windows 下如需启用本地 vLLM（`TXNEWS_ACCELERATOR=gpu`），需安装 WSL 或 Git-Bash 用于执行 vLLM 的 `.sh` 启动脚本；不需要 vLLM 时保持默认 `TXNEWS_ACCELERATOR=cpu` 即可。
+> 备注：vLLM **不随主程序打包**（优先稳定性与可控性）；当 `TXNEWS_ACCELERATOR=gpu` 且 `TXNEWS_START_VLLM=1` 时，一键脚本会在**宿主机（Docker 外）**启动 vLLM（CPU 模式会跳过）。
 
 启动脚本会：
-- 创建 `.venv` 并安装依赖（可自动安装合适的 torch CPU/CUDA 版本）
-- 设置 HuggingFace 镜像/缓存并做 embedding 预检（提前下载/加载模型）
-- （可选）当 `.env` 设置 `TXNEWS_ACCELERATOR=gpu` 时，启动本地 vLLM（用于 worker 常规分析 + 深分析，优先节约 token 成本）
-- `docker compose up -d` 启动 Postgres/Redis/NATS/MinIO/Qdrant
-- 启动后台进程：Celery worker、NATS bridge、Collector、API（8000）、Config（8001；单端口环境可直接使用 `8000/config`）
+- （可选）当 `.env` 设置 `TXNEWS_ACCELERATOR=gpu` 且 `TXNEWS_START_VLLM=1` 时，启动宿主机 vLLM（Docker 外），并在等待就绪时持续输出 vLLM 日志（默认 `var/log/vllm.log`）
+- `docker compose --profile app up -d --build` 构建并启动：Postgres/Redis/NATS/MinIO/Qdrant + Worker/NATS-Bridge/Collector + API（8000）+ Admin（8001，可选）+ `bootstrap`（一次性引导主数据）
 - 启动完成后做健康检查（API `/health`；若启用 vLLM 则检查 `/v1/models`）
+- 持续输出容器日志并落盘到 `var/log/compose.log`（可用 `TXNEWS_COMPOSE_LOG_FILE` 覆盖；设置 `TXNEWS_FOLLOW_LOGS=0` 则只打印 tail 并退出）
 
 常用启动参数（写入 `.env`）：
-- `AUTO_TORCH=0/1`：是否自动安装 torch
-- `TORCH_VARIANT=cpu|cu121|cu124`：强制 torch 版本选择
-- `PREFLIGHT_EMBEDDING=0/1`：是否启动前预检 embedding（建议开启）
-- `HF_HOME=var/hf`：HuggingFace cache 目录
-- `TXNEWS_ACCELERATOR=cpu|gpu|auto`：CPU/GPU 模式（`gpu` 会尝试启动本地 vLLM，并让 worker 常规分析 + 深分析优先走 `llm.deep`；不可用时回退到 `llm.chat`）
+- `TXNEWS_ACCELERATOR=cpu|gpu`：CPU/GPU 模式（`gpu` 优先使用外置 vLLM：`llm.deep`；不可用时回退到 `llm.chat`）
+- `TXNEWS_START_VLLM=0/1`：一键启动脚本是否启动宿主机 vLLM（仅 `gpu` 模式生效）
+- `TXNEWS_LLM_DEEP_BASE_URL=...`：容器内访问 vLLM 的地址（Docker Compose 默认：`http://host.docker.internal:9999/v1`；K8s 推荐指向集群内 Service）
+- `TXNEWS_VLLM_SCRIPT=...`：一键脚本在宿主机启动 vLLM 时使用的启动脚本（默认 `finetune/result_model/deepseekr1_merged/serve_vllm_gpu0_9999.sh`）
+- `TXNEWS_VLLM_PYTHON=...`：宿主机运行 vLLM 的 Python 解释器（可指向 `.venv`；用于避免 conda/环境不一致）
+- `TXNEWS_VLLM_AUTO_INSTALL=0/1`：是否在检测到 conda 环境缺少 `vllm` 时自动安装（默认 `1`；安装很重，首次耗时较长）
+- `TXNEWS_VLLM_TIMEOUT_SECONDS=...`：等待 vLLM 就绪超时（默认 `900`）
+- `HF_ENDPOINT=https://hf-mirror.com`：HuggingFace 镜像（建议设置）
+- `HF_HOME=/app/var/hf`：容器内 HuggingFace cache 目录（compose 默认挂载 volume）
 - `TXNEWS_EMBEDDING_DEVICE=cpu|cuda:1|...`：embedding 设备显式指定（默认 `cpu`；设置后覆盖默认行为）
-- `TXNEWS_VLLM_SCRIPT=...` / `TXNEWS_VLLM_PORT=...`：一键启动时 vLLM 启动脚本与端口（默认 `9999`）
+- `TXNEWS_VLLM_PORT=...`：对外暴露的 vLLM 端口（默认 `9999`；用于访问 `http://localhost:<port>/v1/models`）
+- `TXNEWS_VLLM_LOG_FILE=...`：宿主机 vLLM 日志文件（默认 `var/log/vllm.log`）
+- `TXNEWS_FOLLOW_LOGS=0/1`：启动脚本是否持续跟随容器日志（默认 `1`；输出并落盘）
+- `TXNEWS_COMPOSE_LOG_FILE=...`：容器日志落盘文件路径（默认 `var/log/compose.log`）
 
 多 GPU（例如 4090×2）建议：
 - v1 是“多进程”模型：worker/API/collector 都是独立进程；vLLM 会自动使用两张 GPU（tensor-parallel-size=2）解决 KV 缓存不足问题。
@@ -97,12 +101,24 @@ bash scripts/stop.sh
 ```powershell
 scripts\stop.cmd
 ```
-（仅停止 `start.sh` 拉起的本地进程；Docker infra 仍在运行，需手动 `docker compose down` 才会停止）
+（停止 `docker compose --profile app` 启动的服务；数据卷默认保留；若由 `start.*` 启动宿主机 vLLM 也会尽力停止）
 
 ### 1.5 手动启动（仅 infra 或开发模式）
 - 仅启动基础设施：
 ```bash
 docker compose up -d
+```
+- 启动全栈（含主程序容器）：
+```bash
+docker compose --profile app up -d --build
+```
+- 停止全栈：
+```bash
+docker compose --profile app down
+```
+- （GPU，可选）单独启动宿主机 vLLM（Docker 外；OpenAI-compatible `/v1`）：
+```bash
+bash finetune/result_model/deepseekr1_merged/serve_vllm_gpu0_9999.sh
 ```
 - 单独启动 API：
 ```bash
@@ -121,11 +137,10 @@ celery -A tx_news.tasks.celery_app.celery_app worker -l INFO --pool=solo --concu
 `.env` 推荐：
 ```bash
 HF_ENDPOINT=https://hf-mirror.com
-HF_HOME=var/hf
-TORCH_VARIANT=cu121
-PREFLIGHT_EMBEDDING=1
 TXNEWS_LOG_LEVEL=INFO
 TXNEWS_ACCELERATOR=gpu
+TXNEWS_START_VLLM=1
+TXNEWS_LLM_DEEP_BASE_URL=http://host.docker.internal:9999/v1
 # TXNEWS_EMBEDDING_DEVICE=cpu  # embedding 默认使用 CPU（除非显式设置为 cuda:...）
 # (optional) if you use the bundled vLLM script:
 # TXNEWS_VLLM_PORT=9999
@@ -162,10 +177,6 @@ llm:
 `.env` 推荐：
 ```bash
 HF_ENDPOINT=https://hf-mirror.com
-HF_HOME=var/hf
-AUTO_TORCH=1
-TORCH_VARIANT=cpu
-PREFLIGHT_EMBEDDING=1
 TXNEWS_LOG_LEVEL=INFO
 TXNEWS_ACCELERATOR=cpu
 ```
@@ -453,9 +464,11 @@ sequenceDiagram
   - point id：Qdrant 只接受 `int/uuid`，v0 使用确定性 UUID（uuid5）写入，同时把原 `canonical_id` 放入 payload，检索时优先从 payload 取回 canonical_id。
   - collection：若换模型导致向量维度变化，`auto` 会自动切换到 `base__<model>__<dim>`，避免维度不匹配直接报错。
 
-Embedding 启动前预检（preflight）：
-- 目标：把“下载/加载模型”前置到启动阶段，避免 worker 运行到一半才报错。
-- 建议：保持 `PREFLIGHT_EMBEDDING=1`；并设置 `HF_ENDPOINT=https://hf-mirror.com` 与 `HF_HOME=var/hf` 以提升稳定性。
+Embedding 首次下载提示：
+- 首次启动可能需要下载 embedding 模型（取决于 `config/config.yaml: embedding.model_name`）。
+- 建议设置 `HF_ENDPOINT=https://hf-mirror.com` 并使用持久化的 `HF_HOME`（compose 默认挂载到 `/app/var/hf`）。
+- 如需“预热”下载，可在镜像构建完成后执行一次：
+  - `docker compose --profile app run --rm --no-deps worker python -c "from tx_news.settings import get_settings; from tx_news.embedding.embedder import build_embedder; s=get_settings(); e,_=build_embedder(s.resolve_embedding_cfg(s.load_file_settings())); print('dim=', len(e.embed('prewarm')))"` 
 
 ### 6.5 分析（规则 + 可选 LLM）
 - 无 LLM：规则分类/事件窗口/实体匹配仍可跑通主流程
@@ -474,11 +487,14 @@ TXNEWS_LLM_API_KEY="<api-key>"
 
 ### 6.6 A 股主数据（Tushare/AkShare）
 - 缓存文件：`var/cache/a_share/stock_basic.json`
+- Docker 运行：compose 默认挂载 `./var/cache:/app/var/cache`，便于跨重启复用缓存与引导空库
 - 默认 TTL：12 小时（`tushare.cache_ttl_hours`）；未过期直接使用缓存入库，避免频繁请求
 - 失败回退：Tushare → AkShare → 本地 cache
 
 维护入口（手动触发）：
 - `python -m apps.sync_tushare`：同步/刷新主数据缓存并入库（通常不需要频繁运行）
+- `python -m apps.bootstrap`：仅在 `a_share_basic` 为空时尝试同步（best-effort；适合作为 Docker/K8s Job 的引导步骤）
+ - `python -m apps.db_init`：仅建表初始化（create_all；适合作为 Docker/K8s Job，避免空库导致接口 500）
 
 ### 6.6.1 Raw 保留与清理（Retention）
 - `retention.raw_days` 控制 raw 全文与抓取记录的保留天数（默认 7 天）
@@ -592,11 +608,11 @@ Qdrant（知识库向量索引）写入形态（以 `src/tx_news/tasks/pipeline.
 
 ### 8.1 常见依赖问题
 - Qdrant `ApiException`：优先看 `/status` 的 `dependencies.qdrant.ok` 与错误信息；确认 `docker compose ps` 中 qdrant 正常、`TXNEWS_QDRANT_URL` 可达。
-- embedding 无法加载/超慢：设置 `HF_ENDPOINT=https://hf-mirror.com`、`HF_HOME=var/hf`，并开启 `PREFLIGHT_EMBEDDING=1`。
-- GPU 不生效：确认 `nvidia-smi` 可用；torch 是否为 CUDA 版本；必要时设置 `TORCH_VARIANT=cu121|cu124` 重新启动（或 `AUTO_TORCH=0` 自己管理 torch）。
+- embedding 无法加载/超慢：设置 `HF_ENDPOINT=https://hf-mirror.com`；并确保 HuggingFace cache（`HF_HOME`）是持久化卷（compose 默认挂载到 `/app/var/hf`）。
+- GPU/vLLM 不生效：确认宿主机 vLLM 已启动且 `/v1/models` 可访问（默认 `http://127.0.0.1:9999/v1/models`）；并检查容器内 `TXNEWS_LLM_DEEP_BASE_URL`（compose 默认 `http://host.docker.internal:9999/v1`）。
 - Postgres `FATAL: sorry, too many clients already`：
   - 症状：API（如 `/status`）或 worker/collector 入库路径报 `sqlalchemy.exc.OperationalError`，日志提示连接数已满。
-  - 处理：先重启本仓库进程释放连接（`bash scripts/stop.sh && bash scripts/start.sh`），再观察 `var/log/api.log`/`var/log/celery_worker.log` 是否仍持续报错。
+  - 处理：先重启容器释放连接（`docker compose --profile app restart`），再观察 `docker compose --profile app logs -f` 是否仍持续报错。
   - 根因说明：长跑场景需要复用进程内 SQLAlchemy `Engine`/连接池；若代码在高频路径里反复创建 `Engine`，会快速耗尽 Postgres 连接。
 
 ### 8.2 对话“长时间无回复”
@@ -605,8 +621,8 @@ Qdrant（知识库向量索引）写入形态（以 `src/tx_news/tasks/pipeline.
   - 工具：`tool_call name=...`（卡住通常在检索/向量化/DB/Qdrant）
 
 ### 8.3 日志与定位
-- 日志目录：`var/log/`
-- 常用日志名：`api`、`collector`、`nats_bridge`、`celery_worker`、`bootstrap`
+- 容器日志：`docker compose --profile app logs -f`
+- vLLM 日志（宿主机进程）：`tail -f var/log/vllm.log`（Windows：`Get-Content var\\log\\vllm.log -Wait -Tail 200`）
 
 ### 8.4 Cloudflare Tunnel / 反代仅暴露单端口
 - 若仅能访问 `8000`：使用配置页 `http://<host>:8000/config`（而不是 `8001`），并确保反代不要缓存 `/status`、`/signals`、`/dashboard/summary`（本项目已对这些接口默认设置 `Cache-Control: no-store`）。
@@ -658,7 +674,7 @@ v1 建议聚焦“检索质量 + 可观测性 + 成本治理 + 规模化”：
   - 构建模式区分：public/admin 输出不同 bundle（多端口部署时可将配置 UI 独立到 `8001`；单端口部署也可直接使用 `8000/config`）。
   - 交互优化：流式对话增加工具调用可视化（进度栏 + 完成自动折叠），侧栏增加轮询接口平均耗时统计。
 - **运维集成**：
-  - `scripts/start.sh` 增加 Node.js 环境检查与自动构建步骤（`npm install && npm run build:all`），并启动 8000/8001 两个端口服务。
+  - `scripts/start.sh`/`scripts/start.ps1` 提供 Docker 版一键启动：通过 `docker compose --profile app` 拉起全栈；GPU 模式下可选启动宿主机 vLLM（Docker 外）。
 
 ### 11.2 文档治理 (Documentation)
 - 全面补充了 `FOLDER.md` 目录索引，覆盖 `src/` 根目录及 `apps/web/` 各级子目录。
@@ -681,7 +697,7 @@ v1 建议聚焦“检索质量 + 可观测性 + 成本治理 + 规模化”：
    - 数据集名：`txnews_deep_analysis_sft`（见 `finetune/txdatasets/dataset_info.json`）
    - 训练文件：`finetune/txdatasets/txnews_deep_analysis_sft_alpaca.jsonl`
 2) **SFT 微调**：按 `finetune/sft.yaml` 配置 `dataset_dir=finetune/txdatasets`、`dataset=txnews_deep_analysis_sft`，运行 `bash finetune/run_sft.sh`。
-3) **本地推理服务**：用 `finetune/result_model/deepseekr1_merged/serve_vllm_gpu0_9999.sh` 启动 vLLM（conda env: `vllm`），默认：
+3) **本地推理服务**：用 `finetune/result_model/deepseekr1_merged/serve_vllm_gpu0_9999.sh` 启动 vLLM（支持 `TXNEWS_VLLM_PYTHON`/venv；否则使用 conda env `vllm`），默认：
    - `CUDA_VISIBLE_DEVICES=0`（GPU0）
    - `PORT=9999`（`base_url=http://127.0.0.1:9999/v1`）
    - `SERVED_MODEL_NAME=deepseekr1-merged`（`model=deepseekr1-merged`）

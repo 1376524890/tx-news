@@ -8,7 +8,7 @@
 
 架构（≤3行）：
 - `TxNewsAgent`：围绕“先检索证据再回答”的工具循环。
-- `TxNewsTools`：提供 search/list/timeline/profile 等可调用工具。
+- `TxNewsTools`：提供 search/list/timeline/profile 等可调用工具（主数据缺失时可从本地缓存引导）。
 - 底层依赖 `storage/` 与 `embedding/`（embedding 默认强制 CPU；可用 `TXNEWS_EMBEDDING_DEVICE` 覆盖），上层由 `apps/api` 调用。
 
 ## 文件

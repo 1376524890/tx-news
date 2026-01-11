@@ -1,0 +1,24 @@
+# Input: Docker build context
+# Output: 缩小构建上下文与避免把运行态/缓存打进镜像
+# Pos: Docker 目录忽略规则（变更时同步更新以上注释与所属目录 FOLDER.md）
+
+.git
+.gitignore
+.venv
+.pytest_cache
+.ruff_cache
+.run
+var
+data
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+.env
+
+apps/web/node_modules
+apps/web/dist_public
+apps/web/dist_admin
+

@@ -1,0 +1,37 @@
+# Input: k8s 集群 + 镜像仓库 + base 资源清单
+# Output: kustomize 入口（组合 base 资源与镜像替换）
+# Pos: Kubernetes kustomize 配置（变更时同步更新以上注释与所属目录 FOLDER.md）
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - configmap-env.yaml
+  - secret-env.yaml
+  - configmap-files.yaml
+  - pvc-hf-cache.yaml
+  - api-deployment.yaml
+  - api-service.yaml
+  - admin-deployment.yaml
+  - admin-service.yaml
+  - worker-deployment.yaml
+  - collector-deployment.yaml
+  - nats-bridge-deployment.yaml
+
+images:
+  - name: tx-news-api
+    newName: tx-news-api
+    newTag: latest
+  - name: tx-news-admin
+    newName: tx-news-admin
+    newTag: latest
+  - name: tx-news-worker
+    newName: tx-news-worker
+    newTag: latest
+  - name: tx-news-collector
+    newName: tx-news-collector
+    newTag: latest
+  - name: tx-news-nats-bridge
+    newName: tx-news-nats-bridge
+    newTag: latest

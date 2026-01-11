@@ -1,6 +1,6 @@
 # Input: HTTP 请求 + Postgres/Qdrant/Redis 等依赖 + 用户 Cookie（可选）
 # Output: 公网/用户侧 API + 对话 UI（8000；不提供运维管理台 UI）
-# Pos: Public API 进程入口（变更时同步更新以上注释与所属目录 FOLDER.md）
+# Pos: Public API 进程入口（变更时同步更新以上注释与所属目录 FOLDER.md；并在主数据缺失时尝试从本地缓存引导）
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -24,13 +25,13 @@ from tx_news.embedding.embedder import DEFAULT_EMBEDDING_MODEL, build_embedder
 from tx_news.logging import configure_logging
 from tx_news.settings import get_settings
 from tx_news.storage.postgres import (
+    bootstrap_a_share_basic_from_cache,
     get_a_share,
     get_analysis,
     get_article,
     get_event_canonical_ids,
     get_latest_version,
     init_db,
-    list_signals,
     make_engine,
 )
 from tx_news.storage.qdrant import QdrantStore, scored_point_canonical_id
@@ -557,7 +558,10 @@ def entity_profile(ts_code: str) -> dict[str, Any]:
     init_db(engine)
     row = get_a_share(engine, ts_code)
     if not row:
-        return {"error": "not_found"}
+        bootstrap = bootstrap_a_share_basic_from_cache(engine)
+        row = get_a_share(engine, ts_code)
+        if not row:
+            return {"error": "not_found", "bootstrap": bootstrap}
     return {
         "ts_code": row.ts_code,
         "name": row.name,
@@ -615,6 +619,29 @@ def _config_url(request: Request) -> str:
         return f"{base}/config"
     return "/config"
 
+def _is_local_llm_base_url(base_url: str) -> bool:
+    s = (base_url or "").strip().lower()
+    if not s:
+        return False
+    if "host.docker.internal" in s:
+        return True
+    if "localhost" in s or "127.0.0.1" in s:
+        return True
+    if "://vllm" in s:
+        return True
+    return False
+
+
+def _has_network_error(e: BaseException) -> bool:
+    cur: BaseException | None = e
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, (httpx.TimeoutException, httpx.TransportError)):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
 
 @app.post("/chat", response_model=ChatResponse, operation_id="chat_agent")
 def chat_agent(req: ChatRequest, request: Request) -> ChatResponse:
@@ -625,6 +652,20 @@ def chat_agent(req: ChatRequest, request: Request) -> ChatResponse:
     api_key = user_llm.get("api_key") or llm.get("api_key")
     model = user_llm.get("model") or llm.get("model") or "qwen3-max"
     base_url = user_llm.get("base_url") or llm.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    timeout_seconds = int(llm.get("timeout_seconds") or 60)
+
+    accel = (settings.accelerator or "").strip().lower() or "cpu"
+    deep_llm = settings.resolve_llm_deep(file_cfg) if accel == "gpu" else {}
+    deep_base_url = str(deep_llm.get("base_url") or "").strip()
+    deep_model = str(deep_llm.get("model") or "deepseekr1-merged").strip()
+    deep_timeout = int(deep_llm.get("timeout_seconds") or 120)
+    can_fallback_to_deep = (
+        not settings.require_user_llm
+        and accel == "gpu"
+        and deep_base_url
+        and deep_base_url != str(base_url)
+        and _is_local_llm_base_url(deep_base_url)
+    )
 
     if not api_key:
         if settings.require_user_llm:
@@ -635,19 +676,30 @@ def chat_agent(req: ChatRequest, request: Request) -> ChatResponse:
                     "meta": {"tools": [], "evidence": []},
                 }
             )
-        return ChatResponse(
-            message={
-                "role": "assistant",
-                "content": (
-                    "未配置 LLM API Key：请在环境变量 `TXNEWS_LLM_API_KEY`（或兼容的 `DASHSCOPE_API_KEY` / `OPENAI_API_KEY`），"
-                    "或 `config/config.yaml` 的 `llm.chat.api_key`（兼容 `llm.api_key`）中配置后再试。"
-                ),
-                "meta": {"tools": [], "evidence": []},
-            }
-        )
+        if can_fallback_to_deep:
+            api_key = ""
+            model = deep_model
+            base_url = deep_base_url
+            timeout_seconds = deep_timeout
+        else:
+            return ChatResponse(
+                message={
+                    "role": "assistant",
+                    "content": (
+                        "未配置 LLM API Key：请在环境变量 `TXNEWS_LLM_API_KEY`（或兼容的 `DASHSCOPE_API_KEY` / `OPENAI_API_KEY`），"
+                        "或 `config/config.yaml` 的 `llm.chat.api_key`（兼容 `llm.api_key`）中配置后再试。"
+                    ),
+                    "meta": {"tools": [], "evidence": []},
+                }
+            )
 
     try:
-        agent = TxNewsAgent(api_key=str(api_key), model=str(model), base_url=str(base_url))
+        agent = TxNewsAgent(
+            api_key=str(api_key or ""),
+            model=str(model),
+            base_url=str(base_url),
+            timeout_seconds=timeout_seconds,
+        )
         out = agent.run(
             messages=[m.model_dump() for m in req.messages],
             max_steps=req.max_steps,
@@ -663,6 +715,22 @@ def chat_agent(req: ChatRequest, request: Request) -> ChatResponse:
             }
         )
     except Exception as e:
+        if can_fallback_to_deep and _has_network_error(e):
+            try:
+                agent = TxNewsAgent(
+                    api_key=str(deep_llm.get("api_key") or ""),
+                    model=deep_model,
+                    base_url=deep_base_url,
+                    timeout_seconds=deep_timeout,
+                )
+                out = agent.run(
+                    messages=[m.model_dump() for m in req.messages],
+                    max_steps=req.max_steps,
+                    recent_minutes=req.recent_minutes,
+                )
+                return ChatResponse(message=out)
+            except Exception:
+                pass
         return ChatResponse(
             message={
                 "role": "assistant",
@@ -689,6 +757,19 @@ def chat_agent_stream(req: ChatRequest, request: Request) -> StreamingResponse:
     timeout_seconds = int(llm.get("timeout_seconds") or 60)
     trace_id = secrets.token_hex(4)
 
+    accel = (settings.accelerator or "").strip().lower() or "cpu"
+    deep_llm = settings.resolve_llm_deep(file_cfg) if accel == "gpu" else {}
+    deep_base_url = str(deep_llm.get("base_url") or "").strip()
+    deep_model = str(deep_llm.get("model") or "deepseekr1-merged").strip()
+    deep_timeout = int(deep_llm.get("timeout_seconds") or 120)
+    can_fallback_to_deep = (
+        not settings.require_user_llm
+        and accel == "gpu"
+        and deep_base_url
+        and deep_base_url != str(base_url)
+        and _is_local_llm_base_url(deep_base_url)
+    )
+
     def gen():
         started = time.time()
         user_chars = sum(len(m.content or "") for m in req.messages if m.role == "user")
@@ -714,95 +795,133 @@ def chat_agent_stream(req: ChatRequest, request: Request) -> StreamingResponse:
                     },
                 )
                 return
-            yield _sse(
-                "done",
-                {
-                    "role": "assistant",
-                    "content": (
-                    "未配置 LLM API Key：请在环境变量 `TXNEWS_LLM_API_KEY`（或兼容的 `DASHSCOPE_API_KEY` / `OPENAI_API_KEY`），"
-                    "或 `config/config.yaml` 的 `llm.chat.api_key`（兼容 `llm.api_key`）中配置后再试。"
-                    ),
-                    "meta": {"tools": [], "evidence": []},
-                },
-            )
-            return
+            if can_fallback_to_deep:
+                # Allow local vLLM for chat in GPU mode when no cloud key is configured.
+                api_key_local = ""
+                model_local = deep_model
+                base_url_local = deep_base_url
+                timeout_local = deep_timeout
+            else:
+                yield _sse(
+                    "done",
+                    {
+                        "role": "assistant",
+                        "content": (
+                            "未配置 LLM API Key：请在环境变量 `TXNEWS_LLM_API_KEY`（或兼容的 `DASHSCOPE_API_KEY` / `OPENAI_API_KEY`），"
+                            "或 `config/config.yaml` 的 `llm.chat.api_key`（兼容 `llm.api_key`）中配置后再试。"
+                        ),
+                        "meta": {"tools": [], "evidence": []},
+                    },
+                )
+                return
+        else:
+            api_key_local = str(api_key)
+            model_local = str(model)
+            base_url_local = str(base_url)
+            timeout_local = int(timeout_seconds)
+
         try:
-            agent = TxNewsAgent(
-                api_key=str(api_key),
-                model=str(model),
-                base_url=str(base_url),
-                timeout_seconds=timeout_seconds,
-            )
+            def _run_stream(*, agent: TxNewsAgent) -> None:
+                nonlocal first_delta_at, delta_chars
+                for ev in agent.run_stream(
+                    messages=[m.model_dump() for m in req.messages],
+                    max_steps=req.max_steps,
+                    recent_minutes=req.recent_minutes,
+                ):
+                    t = ev.get("type")
+                    if t == "delta":
+                        chunk = ev.get("content") or ""
+                        if chunk:
+                            delta_chars += len(chunk)
+                            if first_delta_at is None:
+                                first_delta_at = time.time()
+                                logger.info(
+                                    "chat_stream first_delta trace=%s ttfb=%.2fs",
+                                    trace_id,
+                                    first_delta_at - started,
+                                )
+                            if logger.isEnabledFor(logging.DEBUG) and delta_chars % 400 < len(chunk):
+                                logger.debug("chat_stream progress trace=%s chars=%s", trace_id, delta_chars)
+                        yield _sse("delta", {"content": chunk})
+                    elif t == "tool_call":
+                        logger.info(
+                            "chat_stream tool_call trace=%s name=%s arguments=%s",
+                            trace_id,
+                            ev.get("name"),
+                            ev.get("arguments"),
+                        )
+                        yield _sse("tool", {"name": ev.get("name"), "arguments": ev.get("arguments")})
+                    elif t == "tool_result":
+                        logger.info(
+                            "chat_stream tool_result trace=%s name=%s ok=%s duration_ms=%s summary=%s",
+                            trace_id,
+                            ev.get("name"),
+                            ev.get("ok"),
+                            ev.get("duration_ms"),
+                            ev.get("summary"),
+                        )
+                        yield _sse(
+                            "tool_result",
+                            {
+                                "name": ev.get("name"),
+                                "ok": ev.get("ok"),
+                                "duration_ms": ev.get("duration_ms"),
+                                "summary": ev.get("summary"),
+                            },
+                        )
+                    elif t == "done":
+                        done_at = time.time()
+                        msg = ev.get("message") or {}
+                        meta = msg.get("meta") if isinstance(msg, dict) else None
+                        tools_n = len((meta or {}).get("tools") or []) if isinstance(meta, dict) else 0
+                        ev_n = len((meta or {}).get("evidence") or []) if isinstance(meta, dict) else 0
+                        logger.info(
+                            "chat_stream done trace=%s elapsed=%.2fs delta_chars=%s tools=%s evidence=%s",
+                            trace_id,
+                            done_at - started,
+                            delta_chars,
+                            tools_n,
+                            ev_n,
+                        )
+                        yield _sse("done", ev.get("message") or {})
+                        return
+                logger.warning("chat_stream ended without done trace=%s", trace_id)
+                yield _sse(
+                    "done",
+                    {"role": "assistant", "content": "对话失败：无返回", "meta": {"tools": [], "evidence": []}},
+                )
+
             first_delta_at: float | None = None
             delta_chars = 0
-            for ev in agent.run_stream(
-                messages=[m.model_dump() for m in req.messages],
-                max_steps=req.max_steps,
-                recent_minutes=req.recent_minutes,
-            ):
-                t = ev.get("type")
-                if t == "delta":
-                    chunk = ev.get("content") or ""
-                    if chunk:
-                        delta_chars += len(chunk)
-                        if first_delta_at is None:
-                            first_delta_at = time.time()
-                            logger.info(
-                                "chat_stream first_delta trace=%s ttfb=%.2fs",
-                                trace_id,
-                                first_delta_at - started,
-                            )
-                        # Avoid log spam: only log progress on DEBUG level.
-                        if logger.isEnabledFor(logging.DEBUG) and delta_chars % 400 < len(chunk):
-                            logger.debug("chat_stream progress trace=%s chars=%s", trace_id, delta_chars)
-                    yield _sse("delta", {"content": chunk})
-                elif t == "tool_call":
-                    logger.info(
-                        "chat_stream tool_call trace=%s name=%s arguments=%s",
-                        trace_id,
-                        ev.get("name"),
-                        ev.get("arguments"),
-                    )
-                    yield _sse("tool", {"name": ev.get("name"), "arguments": ev.get("arguments")})
-                elif t == "tool_result":
-                    logger.info(
-                        "chat_stream tool_result trace=%s name=%s ok=%s duration_ms=%s summary=%s",
-                        trace_id,
-                        ev.get("name"),
-                        ev.get("ok"),
-                        ev.get("duration_ms"),
-                        ev.get("summary"),
-                    )
-                    yield _sse(
-                        "tool_result",
-                        {
-                            "name": ev.get("name"),
-                            "ok": ev.get("ok"),
-                            "duration_ms": ev.get("duration_ms"),
-                            "summary": ev.get("summary"),
-                        },
-                    )
-                elif t == "done":
-                    done_at = time.time()
-                    msg = ev.get("message") or {}
-                    meta = msg.get("meta") if isinstance(msg, dict) else None
-                    tools_n = len((meta or {}).get("tools") or []) if isinstance(meta, dict) else 0
-                    ev_n = len((meta or {}).get("evidence") or []) if isinstance(meta, dict) else 0
-                    logger.info(
-                        "chat_stream done trace=%s elapsed=%.2fs delta_chars=%s tools=%s evidence=%s",
-                        trace_id,
-                        done_at - started,
-                        delta_chars,
-                        tools_n,
-                        ev_n,
-                    )
-                    yield _sse("done", ev.get("message") or {})
-                    return
-            logger.warning("chat_stream ended without done trace=%s", trace_id)
-            yield _sse(
-                "done",
-                {"role": "assistant", "content": "对话失败：无返回", "meta": {"tools": [], "evidence": []}},
+
+            primary = TxNewsAgent(
+                api_key=str(api_key_local or ""),
+                model=str(model_local),
+                base_url=str(base_url_local),
+                timeout_seconds=int(timeout_local),
             )
+
+            # Try primary first; on transient network errors, fall back to local vLLM in GPU mode.
+            try:
+                yield from _run_stream(agent=primary)
+                return
+            except Exception as e:
+                if can_fallback_to_deep and _has_network_error(e):
+                    logger.warning(
+                        "chat_stream primary llm failed; fallback to deep llm trace=%s err=%s",
+                        trace_id,
+                        e,
+                    )
+                    yield _sse("delta", {"content": "\n\n（网络不稳定，已切换到本地 vLLM）\n"})
+                    fallback = TxNewsAgent(
+                        api_key=str(deep_llm.get("api_key") or ""),
+                        model=deep_model,
+                        base_url=deep_base_url,
+                        timeout_seconds=deep_timeout,
+                    )
+                    yield from _run_stream(agent=fallback)
+                    return
+                raise
         except AgentChatError as e:
             logger.warning("chat_stream agent error trace=%s err=%s", trace_id, e)
             yield _sse(

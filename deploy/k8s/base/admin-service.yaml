@@ -1,0 +1,16 @@
+# Input: tx-news-admin Deployment 选择器
+# Output: Service(tx-news-admin)
+# Pos: Kubernetes 资源清单（变更时同步更新以上注释与所属目录 FOLDER.md）
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: tx-news-admin
+  namespace: tx-news
+spec:
+  selector:
+    app: tx-news-admin
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001

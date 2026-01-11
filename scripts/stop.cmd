@@ -1,6 +1,6 @@
 @echo off
-REM Input: .run\*.pid（由 scripts\start.ps1 生成）
-REM Output: 一键停止（调用 scripts\stop.ps1）
+REM Input: docker compose 编排 +（可选）.run\vllm.pid
+REM Output: 一键停止（调用 scripts\stop.ps1；停止 docker compose profile=app）
 REM Pos: Windows 双击入口（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 setlocal

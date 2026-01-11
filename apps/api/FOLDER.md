@@ -9,7 +9,8 @@
 架构（≤3行）：
 - FastAPI 对外提供检索/对话等用户侧 HTTP 接口（8000）。
 - 静态挂载 `apps/web/dist_public` 作为用户侧 UI（对话 `/`、看板 `/dashboard`、配置 `/config`；不提供运维管理台 UI）。
-- LLM：默认读取 `llm.chat`；也支持从 cookie 用户标识在 Redis 中读取“个人在线 LLM 配置”，用于按用户分摊 chat 成本。
+- LLM：默认读取 `llm.chat`；也支持从 cookie 用户标识在 Redis 中读取“个人在线 LLM 配置”；在 GPU 模式下若在线 LLM 网络不稳定，可回退到本地 vLLM（`llm.deep`）。
+ - 主数据：当 `a_share_basic` 为空且存在本地缓存时，可在查询时自动引导一次（避免“首次启动 DB 为空”导致画像缺失）。
 
 补充：
 - `/chat/stream` 使用 SSE 逐步输出 `delta`（文本增量）、`tool`/`tool_result`（工具调用进度）与 `done`（最终消息）。

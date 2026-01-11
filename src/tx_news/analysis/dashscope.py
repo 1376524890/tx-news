@@ -32,6 +32,12 @@ class DashScopeClient:
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     timeout_seconds: int = 60
 
+    def _timeout(self) -> httpx.Timeout:
+        # Use a shorter connect timeout so we can fail fast and fall back (e.g. to local vLLM).
+        connect = min(5.0, float(self.timeout_seconds))
+        total = float(self.timeout_seconds)
+        return httpx.Timeout(connect=connect, read=total, write=total, pool=total)
+
     def _headers(self) -> dict[str, str]:
         if not self.api_key:
             return {}
@@ -49,7 +55,7 @@ class DashScopeClient:
             "temperature": 0.2,
             "response_format": {"type": "json_object"},
         }
-        with httpx.Client(timeout=self.timeout_seconds) as client:
+        with httpx.Client(timeout=self._timeout()) as client:
             r = client.post(url, headers=headers, json=payload)
             if r.status_code in {400, 422}:
                 # Some OpenAI-compatible services (or older vLLM) may not support response_format.
@@ -64,7 +70,7 @@ class DashScopeClient:
         return json.loads(obj)
 
     def _iter_sse_json(self, *, url: str, headers: dict[str, str], payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
-        with httpx.Client(timeout=self.timeout_seconds) as client:
+        with httpx.Client(timeout=self._timeout()) as client:
             with client.stream("POST", url, headers=headers, json=payload) as r:
                 r.raise_for_status()
                 for line in r.iter_lines():
@@ -92,7 +98,7 @@ class DashScopeClient:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
-        with httpx.Client(timeout=self.timeout_seconds) as client:
+        with httpx.Client(timeout=self._timeout()) as client:
             r = client.post(url, headers=headers, json=payload)
             r.raise_for_status()
             data = r.json()

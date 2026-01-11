@@ -1,5 +1,5 @@
 # Input: Postgres DSN（进程内缓存 Engine）与 ORM 模型
-# Output: 建表与 CRUD/查询函数（articles/versions/analysis/signals/a_share 等）
+# Output: 建表与 CRUD/查询函数（articles/versions/analysis/signals/a_share 等）+（可选）从本地缓存引导主数据
 # Pos: Postgres 数据访问层（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from threading import Lock
 
 from sqlalchemy import create_engine, desc, select
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from tx_news.db import AShareBasic, Analysis, Article, ArticleVersion, Base, RawDoc, Signal, Source
@@ -228,32 +229,65 @@ def get_a_share(engine: Engine, ts_code: str):
 
 
 def upsert_a_share_basic(engine: Engine, rows: list[dict]) -> None:
+    if not rows:
+        return
     with session_scope(engine) as s:
+        # Fast path: empty table -> bulk insert without per-row SELECT.
+        any_existing = s.scalar(select(AShareBasic.ts_code).limit(1))
+        if not any_existing:
+            now = utcnow()
+            for r in rows:
+                ts_code = str(r.get("ts_code") or "").strip()
+                if not ts_code:
+                    continue
+                s.add(
+                    AShareBasic(
+                        ts_code=ts_code,
+                        name=str(r.get("name") or ""),
+                        area=r.get("area"),
+                        industry=r.get("industry"),
+                        market=r.get("market"),
+                        list_date=r.get("list_date"),
+                        aliases=r.get("aliases") or {"names": [str(r.get("name") or "")]},
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            return
+
+        ts_codes = [str(r.get("ts_code") or "").strip() for r in rows]
+        ts_codes = [c for c in ts_codes if c]
+        existing_rows = s.scalars(select(AShareBasic).where(AShareBasic.ts_code.in_(ts_codes))).all()
+        existing_by_code = {r.ts_code: r for r in existing_rows}
+
+        now = utcnow()
         for r in rows:
-            ts_code = r["ts_code"]
-            existing = s.scalar(select(AShareBasic).where(AShareBasic.ts_code == ts_code))
+            ts_code = str(r.get("ts_code") or "").strip()
+            if not ts_code:
+                continue
+            existing = existing_by_code.get(ts_code)
             if existing:
-                existing.name = r.get("name") or existing.name
+                existing.name = str(r.get("name") or existing.name or "")
                 existing.area = r.get("area")
                 existing.industry = r.get("industry")
                 existing.market = r.get("market")
                 existing.list_date = r.get("list_date")
                 existing.aliases = r.get("aliases") or {"names": [existing.name]}
-                existing.updated_at = utcnow()
-                continue
-            s.add(
-                AShareBasic(
-                    ts_code=ts_code,
-                    name=r.get("name") or "",
-                    area=r.get("area"),
-                    industry=r.get("industry"),
-                    market=r.get("market"),
-                    list_date=r.get("list_date"),
-                    aliases=r.get("aliases") or {"names": [r.get("name") or ""]},
-                    created_at=utcnow(),
-                    updated_at=utcnow(),
+                existing.updated_at = now
+            else:
+                s.add(
+                    AShareBasic(
+                        ts_code=ts_code,
+                        name=str(r.get("name") or ""),
+                        area=r.get("area"),
+                        industry=r.get("industry"),
+                        market=r.get("market"),
+                        list_date=r.get("list_date"),
+                        aliases=r.get("aliases") or {"names": [str(r.get("name") or "")]},
+                        created_at=now,
+                        updated_at=now,
+                    )
                 )
-            )
 
 
 def load_a_share_name_map(engine: Engine) -> dict[str, str]:
@@ -261,3 +295,34 @@ def load_a_share_name_map(engine: Engine) -> dict[str, str]:
         rows = s.execute(select(AShareBasic.ts_code, AShareBasic.name)).all()
     # name -> ts_code
     return {name: ts_code for ts_code, name in rows if name and ts_code}
+
+
+def a_share_basic_has_any(engine: Engine) -> bool:
+    with session_scope(engine) as s:
+        return s.scalar(select(AShareBasic.ts_code).limit(1)) is not None
+
+
+def bootstrap_a_share_basic_from_cache(engine: Engine) -> dict[str, object]:
+    """
+    Best-effort bootstrap for first-run deployments:
+    - If `a_share_basic` is empty, try loading `var/cache/a_share/stock_basic.json` and upsert into Postgres.
+    - Never performs network requests (call maintenance task for that).
+    """
+    if a_share_basic_has_any(engine):
+        return {"status": "skipped_not_empty"}
+
+    try:
+        from tx_news.integrations.tushare_sync import TushareSync
+    except Exception as e:  # pragma: no cover
+        return {"status": "failed", "reason": f"import_tushare_sync_failed: {e}"}
+
+    rows = (TushareSync(token="").load_cached_stock_basic() or [])[:]
+    if not rows:
+        return {"status": "no_cache"}
+
+    try:
+        upsert_a_share_basic(engine, rows)
+        return {"status": "loaded_cache", "rows": len(rows)}
+    except IntegrityError:
+        # Concurrent bootstrap attempts can race; treat as OK and let caller re-read.
+        return {"status": "concurrent_conflict", "rows": len(rows)}

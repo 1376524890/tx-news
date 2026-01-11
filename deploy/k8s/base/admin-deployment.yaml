@@ -1,0 +1,53 @@
+# Input: tx-news-admin 镜像 + 外部依赖地址/密钥 + 配置挂载
+# Output: Deployment(tx-news-admin)（8001 /health）
+# Pos: Kubernetes 资源清单（变更时同步更新以上注释与所属目录 FOLDER.md）
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tx-news-admin
+  namespace: tx-news
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tx-news-admin
+  template:
+    metadata:
+      labels:
+        app: tx-news-admin
+    spec:
+      containers:
+        - name: admin
+          image: tx-news-admin
+          ports:
+            - containerPort: 8001
+          envFrom:
+            - configMapRef:
+                name: tx-news-env
+            - secretRef:
+                name: tx-news-secrets
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+            - name: hf-cache
+              mountPath: /app/var/hf
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: tx-news-files
+            items:
+              - key: config.yaml
+                path: config.yaml
+              - key: sources.txt
+                path: sources.txt
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: tx-news-hf-cache

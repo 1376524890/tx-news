@@ -1,6 +1,14 @@
-# Input: 本地 Docker 环境与镜像拉取权限
-# Output: Postgres/Redis/NATS/MinIO/Qdrant 的本地编排
-# Pos: 本地基础设施定义（变更时同步更新以上注释与所属目录 FOLDER.md）
+# Input: 本地 Docker 环境与镜像拉取权限 +（可选）构建本仓库服务镜像
+# Output: 基础设施（默认）+ 主程序多服务（profile=app；含建表与首次启动引导任务）
+# Pos: 本地/单机编排定义（变更时同步更新以上注释与所属目录 FOLDER.md）
+
+x-build-args: &build_args
+  NPM_REGISTRY: ${TXNEWS_NPM_REGISTRY:-}
+  PIP_INDEX_URL: ${TXNEWS_PIP_INDEX_URL:-}
+  PIP_EXTRA_INDEX_URL: ${TXNEWS_PIP_EXTRA_INDEX_URL:-}
+  PIP_TRUSTED_HOST: ${TXNEWS_PIP_TRUSTED_HOST:-}
+  DEBIAN_MIRROR: ${TXNEWS_DEBIAN_MIRROR:-}
+  DEBIAN_SECURITY_MIRROR: ${TXNEWS_DEBIAN_SECURITY_MIRROR:-}
 
 services:
   postgres:
@@ -48,8 +56,171 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
 
+  api:
+    profiles: ["app"]
+    image: tx-news-api:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: api
+      args: *build_args
+    env_file:
+      - .env
+    environment:
+      TXNEWS_PG_DSN: postgresql+psycopg://txnews:txnews@postgres:5432/txnews
+      TXNEWS_REDIS_URL: redis://redis:6379/0
+      TXNEWS_NATS_URL: nats://nats:4222
+      TXNEWS_S3_ENDPOINT: http://minio:9000
+      TXNEWS_QDRANT_URL: http://qdrant:6333
+      HF_HOME: /app/var/hf
+      TXNEWS_LLM_DEEP_BASE_URL: ${TXNEWS_LLM_DEEP_BASE_URL:-http://host.docker.internal:${TXNEWS_VLLM_PORT:-9999}/v1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config:/app/config:ro
+      - ./var/cache:/app/var/cache
+      - hf_cache:/app/var/hf
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+      - qdrant
+    restart: unless-stopped
+
+  admin:
+    profiles: ["app"]
+    image: tx-news-admin:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: admin
+      args: *build_args
+    env_file:
+      - .env
+    environment:
+      TXNEWS_REDIS_URL: redis://redis:6379/0
+      HF_HOME: /app/var/hf
+    volumes:
+      - ./config:/app/config:ro
+      - hf_cache:/app/var/hf
+    ports:
+      - "8001:8001"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  worker:
+    profiles: ["app"]
+    image: tx-news-worker:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: worker
+      args: *build_args
+    env_file:
+      - .env
+    environment:
+      TXNEWS_PG_DSN: postgresql+psycopg://txnews:txnews@postgres:5432/txnews
+      TXNEWS_REDIS_URL: redis://redis:6379/0
+      TXNEWS_NATS_URL: nats://nats:4222
+      TXNEWS_S3_ENDPOINT: http://minio:9000
+      TXNEWS_QDRANT_URL: http://qdrant:6333
+      HF_HOME: /app/var/hf
+      TXNEWS_LLM_DEEP_BASE_URL: ${TXNEWS_LLM_DEEP_BASE_URL:-http://host.docker.internal:${TXNEWS_VLLM_PORT:-9999}/v1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config:/app/config:ro
+      - ./var/cache:/app/var/cache
+      - hf_cache:/app/var/hf
+    depends_on:
+      - postgres
+      - redis
+      - qdrant
+      - minio
+    restart: unless-stopped
+
+  nats-bridge:
+    profiles: ["app"]
+    image: tx-news-nats-bridge:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: nats-bridge
+      args: *build_args
+    env_file:
+      - .env
+    environment:
+      TXNEWS_REDIS_URL: redis://redis:6379/0
+      TXNEWS_NATS_URL: nats://nats:4222
+      TXNEWS_NATS_STREAM: ${TXNEWS_NATS_STREAM:-txnews}
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      - nats
+      - redis
+    restart: unless-stopped
+
+  collector:
+    profiles: ["app"]
+    image: tx-news-collector:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: collector
+      args: *build_args
+    env_file:
+      - .env
+    environment:
+      TXNEWS_PG_DSN: postgresql+psycopg://txnews:txnews@postgres:5432/txnews
+      TXNEWS_NATS_URL: nats://nats:4222
+      TXNEWS_NATS_STREAM: ${TXNEWS_NATS_STREAM:-txnews}
+      TXNEWS_S3_ENDPOINT: http://minio:9000
+      HF_HOME: /app/var/hf
+    volumes:
+      - ./config:/app/config:ro
+      - hf_cache:/app/var/hf
+    depends_on:
+      - postgres
+      - nats
+      - minio
+    restart: unless-stopped
+
+  db-init:
+    profiles: ["app"]
+    image: tx-news-worker:local
+    command: ["python", "-m", "apps.db_init"]
+    env_file:
+      - .env
+    environment:
+      TXNEWS_PG_DSN: postgresql+psycopg://txnews:txnews@postgres:5432/txnews
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      - postgres
+    restart: "no"
+
+  bootstrap:
+    profiles: ["app"]
+    image: tx-news-worker:local
+    command: ["python", "-m", "apps.bootstrap"]
+    env_file:
+      - .env
+    environment:
+      TXNEWS_PG_DSN: postgresql+psycopg://txnews:txnews@postgres:5432/txnews
+      HF_HOME: /app/var/hf
+    volumes:
+      - ./config:/app/config:ro
+      - ./var/cache:/app/var/cache
+      - hf_cache:/app/var/hf
+    depends_on:
+      - postgres
+    restart: "no"
+
 volumes:
   postgres_data:
   redis_data:
   minio_data:
   qdrant_data:
+  hf_cache:

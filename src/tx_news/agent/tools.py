@@ -1,6 +1,6 @@
 # Input: Postgres/Qdrant/embedding 模型与查询参数
 # Output: search/list/timeline/profile 等工具方法返回结构化结果
-# Pos: Agent 工具实现层（变更时同步更新以上注释与所属目录 FOLDER.md）
+# Pos: Agent 工具实现层（变更时同步更新以上注释与所属目录 FOLDER.md；并在主数据缺失时做本地缓存引导）
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from tx_news.db import Analysis, Article, ArticleVersion
 from tx_news.embedding.embedder import DEFAULT_EMBEDDING_MODEL, Embedder, build_embedder
 from tx_news.settings import get_settings
 from tx_news.storage.postgres import (
+    bootstrap_a_share_basic_from_cache,
     get_a_share,
     get_analysis,
     get_article,
@@ -176,7 +177,10 @@ class TxNewsTools:
     def get_entity_profile(self, *, ts_code: str) -> dict[str, Any]:
         row = get_a_share(self.ctx.engine, ts_code)
         if not row:
-            return {"error": "not_found"}
+            bootstrap = bootstrap_a_share_basic_from_cache(self.ctx.engine)
+            row = get_a_share(self.ctx.engine, ts_code)
+            if not row:
+                return {"error": "not_found", "bootstrap": bootstrap}
         return {
             "ts_code": row.ts_code,
             "name": row.name,

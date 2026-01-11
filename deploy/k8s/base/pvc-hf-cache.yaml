@@ -1,0 +1,15 @@
+# Input: 集群存储类/容量规划（由部署者调整）
+# Output: PersistentVolumeClaim(tx-news-hf-cache)
+# Pos: Kubernetes 资源清单（变更时同步更新以上注释与所属目录 FOLDER.md）
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tx-news-hf-cache
+  namespace: tx-news
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi

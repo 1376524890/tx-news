@@ -1,0 +1,31 @@
+# Input: config/config.yaml 与 config/sources.txt（由部署者替换）
+# Output: ConfigMap(tx-news-files)（以 volume 方式挂载到 /app/config）
+# Pos: Kubernetes 资源清单（变更时同步更新以上注释与所属目录 FOLDER.md）
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tx-news-files
+  namespace: tx-news
+data:
+  # Replace with your real config/config.yaml (this is a minimal placeholder).
+  config.yaml: |
+    crawler:
+      max_concurrency: 1
+      request_timeout_seconds: 20
+      max_retries: 3
+    embedding:
+      model_name: BAAI/bge-small-zh-v1.5
+      device: cpu
+    llm:
+      chat:
+        base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+        model: qwen3-max
+        api_key: ""
+      deep:
+        base_url: http://vllm:9999/v1
+        model: deepseekr1-merged
+        api_key: ""
+  # Replace with your real config/sources.txt
+  sources.txt: |
+    # https://example.com/rss

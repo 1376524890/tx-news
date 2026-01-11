@@ -17,6 +17,8 @@
 | 文件 | 地位 | 功能 |
 | --- | --- | --- |
 | `__init__.py` | 包标识 | 标记 `apps` 为 Python 包。 |
+| `bootstrap.py` | 部署引导 | 首次启动时引导/同步 `a_share_basic`（best-effort；供 Docker/K8s Job 使用）。 |
+| `db_init.py` | 部署引导 | 建表初始化（create_all；供 Docker/K8s Job 使用，避免空库导致接口 500）。 |
 | `sync_tushare.py` | 手动入口 | 触发 A 股主数据同步（调用 Celery 任务函数）。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |
 

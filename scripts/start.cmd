@@ -1,6 +1,6 @@
 @echo off
-REM Input: Windows + PowerShell + Python/Docker 环境
-REM Output: 一键启动（调用 scripts\start.ps1）
+REM Input: Windows + PowerShell + Docker Desktop(Compose)
+REM Output: 一键启动（调用 scripts\start.ps1；启动 docker compose profile=app）
 REM Pos: Windows 双击入口（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 setlocal

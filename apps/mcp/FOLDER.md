@@ -11,6 +11,7 @@
 - 工具底层复用 Qdrant（向量检索）与 Postgres（元数据/分析结果）。
 - 支持可选返回全文的工具（默认关闭，需设置 `TXNEWS_ALLOW_FULL_TEXT=1`）。
 - 工具检索同样使用本地 embedding 配置（默认强制 CPU；可用 `TXNEWS_EMBEDDING_DEVICE` 覆盖），并在向量维度变化时自动兼容 Qdrant collection。
+ - 当 `a_share_basic` 为空时，`get_entity_profile` 会尝试从本地缓存引导一次，减少首次部署的空库问题。
 
 ## 文件
 
