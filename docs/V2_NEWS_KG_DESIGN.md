@@ -268,6 +268,151 @@ v2 的节点遵循统一思想：每个节点都要有“可引用的文本载�
 
 合并/拆分不追求完美，但必须满足：可回滚、可解释（给出证据 canonical_ids）。
 
+### 4.5 自动迭代功能：图生命周期系统（可落地）
+
+你要的不是“静态图”，而是一个可持续运行的 **Graph Lifecycle System**，满足两条硬约束：
+- **Node**：可增量迭代（versioned rewrite）+ 可过期删除（decay/ttl + GC）。
+- **Edge**：由 LLM 驱动生成与验证，作为“可检验假设（hypothesis）”可重连、可演化。
+
+并且遵守工程护栏：
+- **LLM 不直接写数据库**：LLM 只能输出结构化 `GraphOp JSON`；由执行层校验后落库。
+- **双图机制（Sandbox/Prod）**：LLM 在 sandbox 试错；通过评估/校验后再 commit 到 prod。
+- **快照与回滚**：任何一次 commit 前后可保存 snapshot，出错可回滚。
+- **本地 vLLM 优先**：图构建/迭代相关的 Planner/Critic/Rewire 默认走本地 vLLM；CPU 模式自动降级到在线 LLM（见 4.5.6）。
+
+#### 4.5.1 NodeStore（版本化 + 时间属性 + 逻辑删除）
+
+建议把“节点元数据/版本/状态”落 Postgres，把“节点可检索向量”落 Qdrant（符合本项目“连续知识优先”）。
+
+Node 记录（示意）：
+```json
+{
+  "node_id": "entity:600519.SH",
+  "node_type": "entity|event_snapshot|claim|article",
+  "content": "可引用短文本（1~2KB）",
+  "embedding_ref": "qdrant:txnews_entity_memory:...",
+  "version": 3,
+  "created_at": "2026-01-01T00:00:00Z",
+  "last_updated": "2026-01-10T00:00:00Z",
+  "ttl_days": 90,
+  "decay_score": 0.42,
+  "status": "active|deprecated|archived",
+  "meta": {"source":"...", "evidence_ids":["..."], "quality_score":0.8}
+}
+```
+
+Node 增量迭代（LLM-driven rewrite）的最小闭环：
+1) `candidate_search`：对新证据/新文本向量检索候选节点（同类节点内 TopK）。
+2) `planner_llm`：基于“旧节点 + 新证据”输出动作：`UPDATE|MERGE|DEPRECATE|CREATE`。
+3) `executor`：校验动作合法性（schema/证据/约束），写入 sandbox。
+4) `eval_agent`：抽样或按阈值验证（例如一致性、引用证据是否存在、是否违反合规）。
+5) `commit`：通过则写入 prod，并生成新版本（`version+1`）。
+
+#### 4.5.2 Node 过期删除（Decay + Lazy GC）
+
+三层机制同时启用（缺一不可）：
+- **时间衰减**：`decay_time = exp(-(now - last_updated)/τ)`
+- **使用频率衰减**：`decay_usage = f(retrieval_count, last_retrieved_at)`（越少检索越衰减）
+- **语义被覆盖**：新版本节点覆盖旧节点 → 旧节点 `deprecated`
+
+执行方式：
+- **Lazy deletion**：检索阶段过滤 `status != active` 或 `decay_score < θ` 的节点。
+- **Periodic GC job**：定期把 `deprecated` 且超过窗口的节点标记为 `archived`，并可选择从 Qdrant 删除向量 point（物理删除可延后）。
+
+#### 4.5.3 EdgeStore（边 = 假设，可被否定、可重连）
+
+边不是静态“事实”，而是可检验的推理假设（Hypothesis）。边记录（示意）：
+```json
+{
+  "edge_id": "e123",
+  "src": "event:...",
+  "dst": "event:...",
+  "edge_type": "semantic|temporal|control|reasoning",
+  "relation": "related_to|mentions|evolves_to|supports|refutes|causes|retrieval_priority|ignore",
+  "weight": 0.71,
+  "confidence": 0.61,
+  "evidence_ids": ["canonical_id_1", "canonical_id_2"],
+  "created_by": "llm",
+  "status": "active|weakened|removed",
+  "last_validated": "2026-01-08T00:00:00Z",
+  "meta": {"reason_text":"为什么这样连（短）", "decay_tau_hours":72}
+}
+```
+
+边的 LLM 驱动演化（MVP 三代理）：
+- **Edge Proposal Agent**：在新证据/新快照到来时，提出候选边（ADD/UPDATE）。
+- **Edge Critic Agent**：破坏式验证边是否仍成立（KEEP/WEAKEN/REMOVE），必须引用证据集合。
+- **Edge Rewiring Agent**：当边置信下降或出现更优路径时，提出“重连”方案（REMOVE 旧边 + ADD 新路径边）。
+
+注意：reasoning 类边（`causes/supports/refutes`）只允许在 evidence 足够且包含不确定性标注时进入 prod。
+
+#### 4.5.4 GraphOps DSL（强制护栏：计划-执行分离）
+
+LLM 输出的唯一可执行物是 GraphOps JSON（示意）：
+```json
+{
+  "ops": [
+    {"op":"UPSERT_NODE","node_id":"event_snapshot:...","node_type":"event_snapshot","content":"...","ttl_days":30},
+    {"op":"ADD_EDGE","src":"event:...","dst":"event:...","edge_type":"semantic","relation":"related_to","weight":0.73,"confidence":0.58,"evidence_ids":["..."]},
+    {"op":"WEAKEN_EDGE","edge_id":"e123","confidence":0.41,"reason":"new evidence contradicts"},
+    {"op":"REWIRE","remove_edge_ids":["e123"],"add_edges":[{"src":"A","dst":"D","relation":"supports"}, {"src":"D","dst":"B","relation":"supports"}]}
+  ],
+  "constraints": {"max_degree": 12, "max_hops": 2, "evidence_required": true, "acyclic_reasoning": true},
+  "target": "sandbox"
+}
+```
+
+执行层必须做：
+- JSON schema 校验（字段齐全、类型正确、relation 合法）。
+- 约束校验（最大出入度、最大跳数、reasoning 边禁止形成环、证据必须存在于 articles/versions）。
+- 风险控制（一次 commit 的 ops 数量上限、同一节点/边的修改频率限制）。
+
+#### 4.5.5 程序流程框图（Ingest → 演化 → Query → 反馈闭环）
+
+```mermaid
+flowchart TD
+  subgraph Ingest[Ingest / Update Path]
+    A[New Evidence: canonical_id] --> B[analyze/deep_optimize 完成]
+    B --> C[kg_update_from_canonical]
+    C --> D[Candidate Search<br/>event/entity/edge memory]
+    D --> E[Planner LLM<br/>输出 GraphOps JSON]
+    E --> F[GraphOps Validator<br/>schema+constraints+evidence]
+    F -->|pass| G[Apply Ops to Sandbox Graph]
+    F -->|fail| X[Reject + Log]
+    G --> H[Eval/Critic Agents<br/>edge/node validation]
+    H -->|pass| I[Commit to Prod Stores<br/>Postgres(meta/version)+Qdrant(vectors)]
+    H -->|fail| Y[Discard / Revise Ops]
+    I --> J[Snapshot + Metrics Update]
+  end
+
+  subgraph Query[Query / Retrieval Path]
+    Q[User Query] --> Q1[list_recent<br/>freshness calibration]
+    Q1 --> Q2[search_entities + search_events]
+    Q2 --> Q3[Expand 1~2 hops<br/>neighbors/explain_connection]
+    Q3 --> Q4[Assemble Evidence Bundle<br/>URLs + short summaries]
+    Q4 --> Q5[LLM Answer<br/>with citations + uncertainty]
+    Q5 --> Q6[Feedback/Eval Signal<br/>click/like/correctness]
+  end
+
+  J --> Q2
+  Q6 --> C
+```
+
+#### 4.5.6 LLM 运行策略（本地 vLLM 优先，CPU 降级在线）
+
+图的构建与演化依赖多代理（Planner/Critic/Rewire），其质量与时效直接决定 Graph RAG 的可用性；因此运行策略明确为：
+
+- **GPU 模式（推荐）**：使用本地 vLLM 作为 KG LLM（优先走 `llm.deep`），完成：
+  - `GraphOps Planner`（生成 graph-op JSON）
+  - `Edge Critic / Rewiring`（边验证与重连）
+  - `Node Rewrite`（节点增量改写与合并/弃用判断）
+- **CPU 模式**：不强制本地 vLLM（通常不可用/太慢），统一降级为在线 LLM（走 `llm.chat` 或 `resolve_llm_deep()` 的 CPU 回退逻辑）。
+- **GPU 模式下的容灾**：本地 vLLM 失败/超时/不可达时，允许回退到在线 LLM（保持系统不断流，但在输出中增加“不确定性/可能偏差”提示）。
+
+与现有配置的对齐方式：
+- `TXNEWS_ACCELERATOR=gpu` 时：`llm.deep.base_url` 指向本地 vLLM（例如 `http://127.0.0.1:9999/v1`），可不配置 api_key。
+- `TXNEWS_ACCELERATOR=cpu` 时：`resolve_llm_deep()` 自动回退到 `llm.chat`（即在线 LLM），用于所有 KG 相关 LLM 调用。
+
 ## 5. 查询与 Chat 反馈：从“文章检索”升级为“事件记忆 + 关系路径”
 
 ### 5.1 工具层新增（Agent Tools）
