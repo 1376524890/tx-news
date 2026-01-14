@@ -9,14 +9,16 @@
 架构（≤3行）：
 - FastAPI 对外提供检索/对话等用户侧 HTTP 接口（8000）。
 - 静态挂载 `apps/web/dist_public` 作为用户侧 UI（对话 `/`、看板 `/dashboard`、配置 `/config`；不提供运维管理台 UI）。
-- LLM：默认读取 `llm.chat`；也支持从 cookie 用户标识在 Redis 中读取“个人在线 LLM 配置”；在 GPU 模式下若在线 LLM 网络不稳定，可回退到本地 vLLM（`llm.deep`）。
+- LLM：默认读取 `llm.chat`；也支持从 cookie 用户标识在 Redis 中读取“个人在线 LLM 配置”；对话默认不回退本地 vLLM（如需启用，显式设置 `TXNEWS_CHAT_ALLOW_DEEP_FALLBACK=1`）。
  - 主数据：当 `a_share_basic` 为空且存在本地缓存时，可在查询时自动引导一次（避免“首次启动 DB 为空”导致画像缺失）。
 
 补充：
 - `/chat/stream` 使用 SSE 逐步输出 `delta`（文本增量）、`tool`/`tool_result`（工具调用进度）与 `done`（最终消息）。
+- SSE `done` 事件的 data 结构固定为 `{ "message": { role, content, meta } }`，便于前端稳定解析与展示错误。
 - embedding 配置通过 `Settings.resolve_embedding_cfg()` 统一解析：默认强制使用 CPU（除非显式设置 `TXNEWS_EMBEDDING_DEVICE`），避免在 API/工具侧出现“配置不一致导致 500”。
 - 知识库全文（内部）：提供 `/kb/search` 与 `/kb/articles/{canonical_id}` 返回抽取后的全文（默认关闭，需设置 `TXNEWS_ALLOW_FULL_TEXT=1`）。
 - `/status`、`/signals`、`/dashboard/summary`、`/api/config` 默认返回 `Cache-Control: no-store`，避免被 Cloudflare Tunnel/反代缓存导致“长时间不更新”。
+- 在线 LLM 排障：访问 `/status?llm=1` 会在容器内对 `llm.chat.base_url` 做一次轻量连通性检查（优先 `/models`；不返回明文 key）。
 
 ## 文件
 

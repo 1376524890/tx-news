@@ -11,6 +11,9 @@
 - 前端 `apps/web` 作为构建阶段产物拷贝进 API/Admin 镜像，不依赖宿主机 Node.js。
 - 运行态配置通过环境变量与挂载 `config/` 注入；vLLM 按原有逻辑在 Docker 外单独运行，主程序通过 `TXNEWS_LLM_DEEP_BASE_URL`（默认 `host.docker.internal`）连接。
  - 可选构建加速：通过 build args 支持 pip/npm/apt 国内镜像（见 `.env.example` 的 `TXNEWS_*_MIRROR` 配置）。
+ - 为了避免上游 `python:*-slim` 跟随 Debian suite 变更导致 `apt-get update` 404，运行时镜像固定使用 `*-slim-bookworm`。
+ - 若构建阶段访问 pypi 不稳定：优先设置 `.env` 的 `TXNEWS_PIP_INDEX_URL/TXNEWS_PIP_TRUSTED_HOST`，并支持透传 `HTTP_PROXY/HTTPS_PROXY/NO_PROXY` 作为 build args。
+ - 若运行阶段访问在线 LLM 不稳定：在 `.env` 配置 `HTTP_PROXY/HTTPS_PROXY/NO_PROXY`，compose 会注入到 api/worker/admin 等容器内（以便 httpx/curl 等客户端复用）。
 
 ## 文件
 

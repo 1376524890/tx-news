@@ -18,12 +18,12 @@
 | `README.md` | 主文档 | 快速开始、API/UI 使用、架构与技术细节、取舍与路线图。 |
 | `AGENTS.md` | 贡献指南 | 本仓库的开发与协作约定。 |
 | `REQUIREMENTS.md` | 运维文档 | 环境/依赖/网络与密钥要求。 |
-| `docker-compose.yml` | 单机编排 | 默认启动基础设施；`profile=app` 时构建并启动主程序容器（含 `db-init` 建表与 `bootstrap` 一次性引导主数据）。 |
+| `docker-compose.yml` | 单机编排 | 默认启动基础设施；`profile=app` 时构建并启动主程序容器（含 `db-init` 建表与 `bootstrap` 一次性引导主数据；并支持注入 HTTP(S) 代理用于构建/运行期外网访问）。 |
 | `.dockerignore` | Docker 构建 | 缩小构建上下文，避免把运行态/缓存打进镜像。 |
 | `pyproject.toml` | 工具/打包配置 | `setuptools` + `ruff` 等配置入口。 |
 | `requirements.txt` | 运行依赖 | 服务运行所需 Python 依赖。 |
 | `requirements-dev.txt` | 开发依赖 | `pytest`/`ruff` 等开发工具依赖。 |
-| `.env.example` | 环境变量样例 | `.env` 模板（密钥/连接串建议通过 env 注入）。 |
+| `.env.example` | 环境变量样例 | `.env` 模板（密钥/连接串建议通过 env 注入；含 `TXNEWS_CHAT_ALLOW_DEEP_FALLBACK` 等开关）。 |
 | `.gitignore` | 仓库维护 | 忽略本地运行态与缓存文件。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |
 

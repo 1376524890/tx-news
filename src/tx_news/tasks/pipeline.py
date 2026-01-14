@@ -217,7 +217,16 @@ def dedup_store(normalized: dict[str, Any]) -> dict[str, Any]:
     }
     qdrant.upsert(point_id=canonical_id, vector=vector, payload=payload)
 
-    return {"canonical_id": canonical_id, "is_new_canonical": is_new_canonical, **normalized}
+    canonical = {"canonical_id": canonical_id, "is_new_canonical": is_new_canonical, **normalized}
+
+    # NOTE: We enqueue analyze explicitly instead of relying on Celery chain callbacks.
+    # In some environments, broker/DNS instability can break callbacks, making analysis never run.
+    try:
+        analyze.delay(canonical)
+    except Exception as e:
+        logger.warning("failed to enqueue analyze canonical_id=%s err=%s", canonical_id, e)
+
+    return canonical
 
 
 @celery_app.task(name="tx_news.tasks.pipeline.analyze")
@@ -385,7 +394,6 @@ def ingest_raw(raw: dict[str, Any]) -> dict[str, Any]:
     flow = chain(
         normalize_raw.s(raw),
         dedup_store.s(),
-        analyze.s(),
     )
     async_result = flow.apply_async()
     return {"task_id": async_result.id}

@@ -507,7 +507,7 @@ python -m apps.mcp.server
 ```
 
 ### 6.7.1 本地微调 LLM（Deep Analyse）与训练集规则
-本项目支持在 GPU 模式下让 **worker 常规分析 + 深分析** 优先使用本地 vLLM（OpenAI-compatible `/v1/chat/completions`），以降低 token 成本并提升输出 JSON 的稳定性；对话（`/chat`）仍可保持云端模型（`llm.chat`）。
+本项目支持在 GPU 模式下让 **worker 常规分析 + 深分析** 优先使用本地 vLLM（OpenAI-compatible `/v1/chat/completions`），以降低 token 成本并提升输出 JSON 的稳定性；对话（`/chat`）默认保持云端模型（`llm.chat`，不自动回退本地 vLLM；如需回退，显式设置 `TXNEWS_CHAT_ALLOW_DEEP_FALLBACK=1`）。
 
 相关目录/文件（以实际文件为准）：
 - 微调与推理入口：`finetune/README.md`、`finetune/sft.yaml`、`finetune/run_sft.sh`、`finetune/serve_vllm.sh`
@@ -545,6 +545,7 @@ Qdrant（知识库向量索引）写入形态（以 `src/tx_news/tasks/pipeline.
 `.env`（常用）：
 - `TXNEWS_PG_DSN`/`TXNEWS_REDIS_URL`/`TXNEWS_NATS_URL`/`TXNEWS_S3_*`/`TXNEWS_QDRANT_*`：基础设施连接
 - `TXNEWS_LLM_BASE_URL`/`TXNEWS_LLM_MODEL_NAME`/`TXNEWS_LLM_API_KEY`：LLM（OpenAI 兼容）
+- `TXNEWS_CHAT_ALLOW_DEEP_FALLBACK`：对话在网络不稳定时是否允许回退 `llm.deep`（默认 0；建议保持 0）
 - `TXNEWS_ALLOW_FULL_TEXT`：是否允许内部 KB 接口返回抽取后的全文（默认 0）
 - `DASHSCOPE_API_KEY`：兼容旧方式（未设置 `TXNEWS_LLM_API_KEY` 时会回退）
 - `HF_ENDPOINT`/`HF_HOME`：Embedding 模型下载镜像与缓存目录

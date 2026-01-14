@@ -1,5 +1,5 @@
 # Input: 环境变量（TXNEWS_* / DASHSCOPE_API_KEY / OpenAI兼容 LLM_*）+ config/config.yaml + config/sources.txt
-# Output: Settings/FileSettings（包含 infra/模型/源列表等配置）
+# Output: Settings/FileSettings（包含 infra/模型/源列表等配置；并包含 chat 行为开关）
 # Pos: 全局配置加载入口（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     require_user_llm: bool = Field(
         default=False,
         validation_alias=AliasChoices("TXNEWS_REQUIRE_USER_LLM"),
+    )
+    # Chat behavior: whether /chat may fall back to llm.deep (e.g. local vLLM) on transient failures.
+    # Default: disabled (keep chat on online LLM as documented).
+    chat_allow_deep_fallback: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("TXNEWS_CHAT_ALLOW_DEEP_FALLBACK"),
     )
     user_llm_ttl_seconds: int = Field(
         default=60 * 60 * 24 * 30,  # 30 days

@@ -15,7 +15,7 @@
 - 运行态输出：`start.*` 会同步打印 `docker compose logs` 并落盘（默认 `var/log/compose.log`；可用 `TXNEWS_COMPOSE_LOG_FILE` 覆盖；`TXNEWS_FOLLOW_LOGS=0` 只打印 tail 并退出）。
 - 权限提示：若当前 shell 无法访问 Docker daemon（`/var/run/docker.sock`），`start.sh` 会报错中止，`stop.sh` 会提示并跳过停止容器（仍会停止宿主机 vLLM）。
 - 国内拉取加速：`setup_docker_mirror.sh` 可写入 Docker daemon `registry-mirrors` 配置（需要 root），用于加速基础镜像 `docker pull`。
-- 在线 LLM 排障：`check_online_llm.sh` 用 `.env` 的在线 LLM 配置做“宿主机 vs 容器”连通性对比（DNS/HTTP/SSE）。
+- 在线 LLM 排障：`check_online_llm.sh` 用 `.env` 的在线 LLM 配置做“宿主机 vs 容器”连通性对比（DNS/TLS/HTTP/SSE，并做 IPv4(-4)/IPv6(-6) 对比，打印 resolv.conf 与 proxy/no_proxy；用于定位 `_ssl.c:999 handshake timed out`）。
 - 演示/回归脚本：`demo_kb_api_test.py`（知识库 API：/status + /search）、`demo_db_api_test.py`（数据库 API：/status + /signals + /articles/{id}）。
 
 ## 文件

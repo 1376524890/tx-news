@@ -1,5 +1,5 @@
-# Input: OpenAI 兼容 LLM 返回的消息 + TxNewsTools 工具查询结果
-# Output: 对话回答文本 + 工具调用轨迹 + 证据链接列表
+# Input: OpenAI 兼容 LLM 返回的消息（可流式）+ TxNewsTools 工具查询结果
+# Output: 对话回答文本 + 工具调用轨迹 + 证据链接列表（流式失败时自动回退非流式）
 # Pos: 工具增强对话 Agent（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -9,6 +9,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 from collections.abc import Iterator
+
+import httpx
 
 from tx_news.analysis.dashscope import DashScopeClient
 from tx_news.agent.tools import TxNewsTools
@@ -72,38 +74,64 @@ class TxNewsAgent:
         role = "assistant"
         tool_calls_by_index: dict[int, dict[str, Any]] = {}
 
-        for chunk in self.client.chat_stream(messages=convo, tools=tools):
-            choices = chunk.get("choices") or []
-            if not choices:
-                continue
-            c0 = choices[0] or {}
-            delta = c0.get("delta") or {}
-            if "role" in delta:
-                role = delta.get("role") or role
-            if "content" in delta and delta.get("content"):
-                d = str(delta.get("content") or "")
-                content += d
-                yield None, d
+        def _is_network_error(e: BaseException) -> bool:
+            cur: BaseException | None = e
+            seen: set[int] = set()
+            while cur is not None and id(cur) not in seen:
+                seen.add(id(cur))
+                if isinstance(cur, (httpx.TimeoutException, httpx.TransportError)):
+                    return True
+                cur = cur.__cause__ or cur.__context__
+            return False
 
-            # tool_calls are streamed in pieces (arguments are partial strings).
-            for tc in delta.get("tool_calls") or []:
-                idx = int(tc.get("index") or 0)
-                entry = tool_calls_by_index.setdefault(
-                    idx, {"id": None, "type": "function", "function": {"name": "", "arguments": ""}}
-                )
-                if tc.get("id"):
-                    entry["id"] = tc["id"]
-                if tc.get("type"):
-                    entry["type"] = tc["type"]
-                fn = tc.get("function") or {}
-                if fn.get("name"):
-                    entry["function"]["name"] = fn["name"]
-                if fn.get("arguments"):
-                    entry["function"]["arguments"] += str(fn["arguments"])
+        try:
+            for chunk in self.client.chat_stream(messages=convo, tools=tools):
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                c0 = choices[0] or {}
+                delta = c0.get("delta") or {}
+                if "role" in delta:
+                    role = delta.get("role") or role
+                if "content" in delta and delta.get("content"):
+                    d = str(delta.get("content") or "")
+                    content += d
+                    yield None, d
 
-            finish_reason = c0.get("finish_reason")
-            if finish_reason:
-                break
+                # tool_calls are streamed in pieces (arguments are partial strings).
+                for tc in delta.get("tool_calls") or []:
+                    idx = int(tc.get("index") or 0)
+                    entry = tool_calls_by_index.setdefault(
+                        idx, {"id": None, "type": "function", "function": {"name": "", "arguments": ""}}
+                    )
+                    if tc.get("id"):
+                        entry["id"] = tc["id"]
+                    if tc.get("type"):
+                        entry["type"] = tc["type"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        entry["function"]["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        entry["function"]["arguments"] += str(fn["arguments"])
+
+                finish_reason = c0.get("finish_reason")
+                if finish_reason:
+                    break
+        except Exception as e:
+            # Fallback for flaky provider streaming (TLS handshake timeout etc): use non-stream call and
+            # stream a single chunk to the UI, so /chat/stream remains usable.
+            if _is_network_error(e) and not content and not tool_calls_by_index:
+                msg = self.client.chat(messages=convo, tools=tools)
+                role = str(msg.get("role") or role)
+                content = str(msg.get("content") or "")
+                if content:
+                    yield None, content
+                out_msg: dict[str, Any] = {"role": role, "content": content}
+                if msg.get("tool_calls"):
+                    out_msg["tool_calls"] = msg.get("tool_calls")
+                yield out_msg, None
+                return
+            raise
 
         tool_calls = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index.keys())]
         for i, call in enumerate(tool_calls, start=1):

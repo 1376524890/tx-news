@@ -1,5 +1,5 @@
 # Input: 仓库源码 + requirements.txt + apps/web(Vite) 构建产物
-# Output: 可复用的多目标镜像（api/admin/worker/collector/nats-bridge）
+# Output: 可复用的多目标镜像（api/admin/worker/collector/nats-bridge；Python 运行时固定 Debian suite 以避免 apt 404）
 # Pos: Docker 构建定义（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 ARG PYTHON_VERSION=3.11
@@ -23,10 +23,16 @@ COPY apps/web/ ./
 RUN npm run build:all
 
 
-FROM python:${PYTHON_VERSION}-slim AS py-runtime
+FROM python:${PYTHON_VERSION}-slim-bookworm AS py-runtime
 ARG PIP_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL
 ARG PIP_TRUSTED_HOST
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
 ARG DEBIAN_MIRROR
 ARG DEBIAN_SECURITY_MIRROR
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -57,11 +63,11 @@ RUN if [ -n "$DEBIAN_MIRROR" ]; then \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
-RUN python -m pip install --no-cache-dir --upgrade pip \
+RUN python -m pip install --no-cache-dir --default-timeout=60 --retries=10 --upgrade pip \
     && if [ -n "$PIP_INDEX_URL" ]; then python -m pip config set global.index-url "$PIP_INDEX_URL"; fi \
     && if [ -n "$PIP_EXTRA_INDEX_URL" ]; then python -m pip config set global.extra-index-url "$PIP_EXTRA_INDEX_URL"; fi \
     && if [ -n "$PIP_TRUSTED_HOST" ]; then python -m pip config set global.trusted-host "$PIP_TRUSTED_HOST"; fi \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir --default-timeout=60 --retries=10 -r requirements.txt
 
 COPY src/ ./src/
 COPY apps/ ./apps/

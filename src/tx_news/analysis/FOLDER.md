@@ -8,7 +8,7 @@
 
 架构（≤3行）：
 - `rules.py` 提供规则分类与事件窗口逻辑（无外部依赖）。
-- `dashscope.py` 封装 OpenAI 兼容的 chat/json 接口（可用于 DashScope/其他兼容服务；本地 vLLM 可不填 api_key）。
+- `dashscope.py` 封装 OpenAI 兼容的 chat/json 接口（可用于 DashScope/其他兼容服务；本地 vLLM 可不填 api_key；connect 超时相对保守以适配容器网络，并对握手/传输超时做少量重试）。
 - `tickers.py` 做 A 股名称→ts_code 的朴素匹配，辅助分析。
 
 ## 文件

@@ -1,16 +1,18 @@
-# Input: HTTP 请求 + Postgres/Qdrant/Redis 等依赖 + 用户 Cookie（可选）
-# Output: 公网/用户侧 API + 对话 UI（8000；不提供运维管理台 UI）
+# Input: HTTP 请求 + Postgres/Qdrant/Redis 等依赖 + 用户 Cookie（可选）+（可选）在线 LLM 配置
+# Output: 公网/用户侧 API + 对话 UI（8000；默认使用在线 LLM，不自动回退本地 vLLM）
 # Pos: Public API 进程入口（变更时同步更新以上注释与所属目录 FOLDER.md；并在主数据缺失时尝试从本地缓存引导）
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -119,11 +121,12 @@ def ui_config() -> Response:
 
 
 @app.get("/status", operation_id="status")
-def status() -> Response:
+def status(llm: bool = Query(False)) -> Response:
     """
     Public-facing status for the chat UI (keep minimal; do not expose admin UI).
     """
     settings = get_settings()
+    file_cfg = settings.load_file_settings()
     engine = make_engine(settings.pg_dsn)
     init_db(engine)
 
@@ -148,6 +151,60 @@ def status() -> Response:
         deps["qdrant"] = {"ok": True}
     except Exception as e:
         deps["qdrant"] = {"ok": False, "error": str(e)}
+
+    if llm:
+        llm_cfg = settings.resolve_llm_chat(file_cfg)
+        base_url = str(llm_cfg.get("base_url") or "").strip().rstrip("/")
+        model = str(llm_cfg.get("model") or "").strip()
+        api_key = str(llm_cfg.get("api_key") or "").strip()
+        host = (urlparse(base_url).hostname or "").strip() if base_url else ""
+        proxy = (
+            os.environ.get("HTTPS_PROXY")
+            or os.environ.get("https_proxy")
+            or os.environ.get("HTTP_PROXY")
+            or os.environ.get("http_proxy")
+        )
+        no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy")
+        api_key_masked = (api_key[:4] + "…" + api_key[-4:]) if len(api_key) >= 10 else ("***" if api_key else "")
+
+        info: dict[str, Any] = {
+            "reachable": False,
+            "auth_ok": False,
+            "ok": False,
+            "base_url": base_url,
+            "host": host,
+            "model": model,
+            "api_key_set": bool(api_key),
+            "api_key_masked": api_key_masked,
+            "require_user_llm": bool(settings.require_user_llm),
+            "proxy_set": bool(proxy),
+            "no_proxy_set": bool(no_proxy),
+        }
+        if not base_url:
+            info["error"] = "missing_base_url"
+        elif not api_key and not settings.require_user_llm:
+            info["error"] = "missing_api_key"
+        else:
+            try:
+                # Prefer /models to avoid spending tokens; still validates DNS/TLS/HTTP path.
+                url = f"{base_url}/models"
+                headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+                timeout = httpx.Timeout(connect=10.0, read=20.0, write=20.0, pool=20.0)
+                with httpx.Client(timeout=timeout, trust_env=True) as client:
+                    r = client.get(url, headers=headers)
+                info["reachable"] = True
+                info["http_status"] = int(r.status_code)
+                if r.status_code in {401, 403}:
+                    info["error"] = "unauthorized"
+                else:
+                    # 200: /models supported; 404: some providers may not implement it but are reachable.
+                    info["auth_ok"] = True
+                    info["ok"] = True
+                    if r.status_code == 404:
+                        info["note"] = "models_endpoint_404"
+            except Exception as e:
+                info["error"] = str(e)
+        deps["llm_chat"] = info
 
     return JSONResponse({"dependencies": deps, "counts": counts}, headers=NO_STORE_HEADERS)
 
@@ -612,6 +669,13 @@ def _sse(event: str, data: Any) -> str:
     payload = json.dumps(data, ensure_ascii=False)
     return f"event: {event}\ndata: {payload}\n\n"
 
+def _sse_done(message: dict[str, Any]) -> str:
+    """
+    Standardize the `done` SSE payload shape for the frontend.
+    The UI expects: event=done, data={"message": {...}}.
+    """
+    return _sse("done", {"message": message})
+
 def _config_url(request: Request) -> str:
     # Prefer the public same-origin config page (works behind reverse proxies / tunnels).
     base = str(getattr(request, "base_url", "") or "").rstrip("/")
@@ -659,8 +723,9 @@ def chat_agent(req: ChatRequest, request: Request) -> ChatResponse:
     deep_base_url = str(deep_llm.get("base_url") or "").strip()
     deep_model = str(deep_llm.get("model") or "deepseekr1-merged").strip()
     deep_timeout = int(deep_llm.get("timeout_seconds") or 120)
-    can_fallback_to_deep = (
-        not settings.require_user_llm
+    can_fallback_to_deep = bool(
+        settings.chat_allow_deep_fallback
+        and (not settings.require_user_llm)
         and accel == "gpu"
         and deep_base_url
         and deep_base_url != str(base_url)
@@ -735,10 +800,10 @@ def chat_agent(req: ChatRequest, request: Request) -> ChatResponse:
             message={
                 "role": "assistant",
                 "content": (
-                    "对话失败：系统检索/向量化组件不可用。\n"
+                    "对话失败：LLM/检索/向量化组件不可用。\n"
                     f"错误：{e}\n"
-                    "请检查：`config/config.yaml` 的 `embedding.model_name`（建议本地模型目录或 `BAAI/bge-small-zh-v1.5`），"
-                    "以及 Qdrant 是否正常运行。"
+                    "请检查：容器内是否能访问 `llm.chat.base_url`（网络/代理/证书/超时），以及 LLM 的 base_url/api_key 配置；"
+                    "并确认 Qdrant 正常运行与 embedding 模型可用。"
                 ),
                 "meta": {"tools": [], "evidence": []},
             }
@@ -762,8 +827,9 @@ def chat_agent_stream(req: ChatRequest, request: Request) -> StreamingResponse:
     deep_base_url = str(deep_llm.get("base_url") or "").strip()
     deep_model = str(deep_llm.get("model") or "deepseekr1-merged").strip()
     deep_timeout = int(deep_llm.get("timeout_seconds") or 120)
-    can_fallback_to_deep = (
-        not settings.require_user_llm
+    can_fallback_to_deep = bool(
+        settings.chat_allow_deep_fallback
+        and (not settings.require_user_llm)
         and accel == "gpu"
         and deep_base_url
         and deep_base_url != str(base_url)
@@ -786,24 +852,22 @@ def chat_agent_stream(req: ChatRequest, request: Request) -> StreamingResponse:
         if not api_key:
             logger.warning("chat_stream no api key trace=%s", trace_id)
             if settings.require_user_llm:
-                yield _sse(
-                    "done",
+                yield _sse_done(
                     {
                         "role": "assistant",
                         "content": f"未配置个人 LLM：请先访问 {_config_url(request)} 设置 base_url/model/api_key。",
                         "meta": {"tools": [], "evidence": []},
-                    },
+                    }
                 )
                 return
             if can_fallback_to_deep:
-                # Allow local vLLM for chat in GPU mode when no cloud key is configured.
+                # Explicit opt-in: allow local vLLM for chat in GPU mode when no cloud key is configured.
                 api_key_local = ""
                 model_local = deep_model
                 base_url_local = deep_base_url
                 timeout_local = deep_timeout
             else:
-                yield _sse(
-                    "done",
+                yield _sse_done(
                     {
                         "role": "assistant",
                         "content": (
@@ -811,7 +875,7 @@ def chat_agent_stream(req: ChatRequest, request: Request) -> StreamingResponse:
                             "或 `config/config.yaml` 的 `llm.chat.api_key`（兼容 `llm.api_key`）中配置后再试。"
                         ),
                         "meta": {"tools": [], "evidence": []},
-                    },
+                    }
                 )
                 return
         else:
@@ -883,13 +947,10 @@ def chat_agent_stream(req: ChatRequest, request: Request) -> StreamingResponse:
                             tools_n,
                             ev_n,
                         )
-                        yield _sse("done", ev.get("message") or {})
+                        yield _sse_done(ev.get("message") or {})
                         return
                 logger.warning("chat_stream ended without done trace=%s", trace_id)
-                yield _sse(
-                    "done",
-                    {"role": "assistant", "content": "对话失败：无返回", "meta": {"tools": [], "evidence": []}},
-                )
+                yield _sse_done({"role": "assistant", "content": "对话失败：无返回", "meta": {"tools": [], "evidence": []}})
 
             first_delta_at: float | None = None
             delta_chars = 0
@@ -901,7 +962,7 @@ def chat_agent_stream(req: ChatRequest, request: Request) -> StreamingResponse:
                 timeout_seconds=int(timeout_local),
             )
 
-            # Try primary first; on transient network errors, fall back to local vLLM in GPU mode.
+            # Try primary first; on transient network errors, optionally fall back to local vLLM.
             try:
                 yield from _run_stream(agent=primary)
                 return
@@ -924,20 +985,17 @@ def chat_agent_stream(req: ChatRequest, request: Request) -> StreamingResponse:
                 raise
         except AgentChatError as e:
             logger.warning("chat_stream agent error trace=%s err=%s", trace_id, e)
-            yield _sse(
-                "done",
-                {"role": "assistant", "content": f"对话失败：{e}", "meta": {"tools": [], "evidence": []}},
-            )
+            yield _sse_done({"role": "assistant", "content": f"对话失败：{e}", "meta": {"tools": [], "evidence": []}})
         except Exception as e:
             logger.exception("chat_stream exception trace=%s", trace_id)
-            yield _sse(
-                "done",
+            yield _sse_done(
                 {
                     "role": "assistant",
                     "content": (
-                        "对话失败：系统检索/向量化/LLM 组件不可用。\n"
+                        "对话失败：LLM/检索/向量化组件不可用。\n"
                         f"错误：{e}\n"
-                        "请检查：`config/config.yaml` 的 `embedding.model_name`、Qdrant 是否正常运行，以及 LLM 的 base_url/api_key 配置。"
+                        "请检查：容器内是否能访问 `llm.chat.base_url`（网络/代理/证书/超时），以及 LLM 的 base_url/api_key 配置；"
+                        "并确认 Qdrant 正常运行与 embedding 模型可用。"
                     ),
                     "meta": {"tools": [], "evidence": []},
                 },
