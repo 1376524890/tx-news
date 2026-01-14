@@ -1,5 +1,5 @@
 <!-- Input: 现有 TX-News 数据流（collector→worker→Postgres/Qdrant）与 Chat 工具增强对话需求 -->
-<!-- Output: v2 自连接自迭代新闻知识图谱（语义连续知识库）系统设计与里程碑 -->
+<!-- Output: v2 自连接自迭代新闻知识图谱（语义连续知识库）系统设计与里程碑（含闭环流程图与通俗实现讲解） -->
 <!-- Pos: 版本更新设计文档（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
 # TX-News v2：自连接自迭代新闻知识图谱（语义连续知识库）设计
@@ -371,32 +371,73 @@ LLM 输出的唯一可执行物是 GraphOps JSON（示意）：
 
 ```mermaid
 flowchart TD
-  subgraph Ingest[Ingest / Update Path]
-    A[New Evidence: canonical_id] --> B[analyze/deep_optimize 完成]
-    B --> C[kg_update_from_canonical]
-    C --> D[Candidate Search<br/>event/entity/edge memory]
-    D --> E[Planner LLM<br/>输出 GraphOps JSON]
-    E --> F[GraphOps Validator<br/>schema+constraints+evidence]
-    F -->|pass| G[Apply Ops to Sandbox Graph]
-    F -->|fail| X[Reject + Log]
-    G --> H[Eval/Critic Agents<br/>edge/node validation]
-    H -->|pass| I[Commit to Prod Stores<br/>Postgres(meta/version)+Qdrant(vectors)]
-    H -->|fail| Y[Discard / Revise Ops]
-    I --> J[Snapshot + Metrics Update]
+  %% 4.5.5 Ingest → 演化 → Query → 反馈闭环
+
+  subgraph S1["Ingest（采集/入库）"]
+    direction TB
+    A["New Evidence: canonical_id"] --> B["analyze/deep_optimize 完成"]
+    B --> C["kg_update_from_canonical"]
   end
 
-  subgraph Query[Query / Retrieval Path]
-    Q[User Query] --> Q1[list_recent<br/>freshness calibration]
-    Q1 --> Q2[search_entities + search_events]
-    Q2 --> Q3[Expand 1~2 hops<br/>neighbors/explain_connection]
-    Q3 --> Q4[Assemble Evidence Bundle<br/>URLs + short summaries]
-    Q4 --> Q5[LLM Answer<br/>with citations + uncertainty]
-    Q5 --> Q6[Feedback/Eval Signal<br/>click/like/correctness]
+  subgraph S2["演化（GraphOps 演化/评估）"]
+    direction TB
+    C --> D["Candidate Search<br/>event/entity/edge memory"]
+    D --> E["Planner LLM<br/>输出 GraphOps JSON"]
+    E --> F["GraphOps Validator<br/>schema & constraints & evidence"]
+    F -->|pass| G["Apply Ops to Sandbox Graph"]
+    F -->|fail| X["Reject & Log"]
+    G --> H["Eval/Critic Agents<br/>edge/node validation"]
+    H -->|pass| I["Commit to Prod Stores<br/>Postgres (meta/version) & Qdrant (vectors)"]
+    H -->|fail| Y["Discard / Revise Ops"]
+    I --> J["Snapshot & Metrics Update"]
+  end
+
+  subgraph S3["Query（检索/生成）"]
+    direction TB
+    Q["User Query"] --> Q1["list_recent<br/>freshness calibration"]
+    Q1 --> Q2["search_entities & search_events"]
+    Q2 --> Q3["Expand 1~2 hops<br/>neighbors / explain_connection"]
+    Q3 --> Q4["Assemble Evidence Bundle<br/>URLs & short summaries"]
+    Q4 --> Q5["LLM Answer<br/>with citations & uncertainty"]
+  end
+
+  subgraph S4["反馈闭环（信号→调参→再演化）"]
+    direction TB
+    Q5 --> Q6["Feedback/Eval Signal<br/>click/like/correctness"]
+    Q6 --> FL["Postgres<br/>feedback logs"]
+    FL --> T["Offline eval & tuning<br/>prompt / rules / model"]
+    T --> E
   end
 
   J --> Q2
   Q6 --> C
 ```
+
+#### 4.5.5.1 通俗版：这条“闭环流水线”到底在干什么
+
+可以把它想象成一个“会不断写笔记、会自我纠错的新闻研究员”，每天做四件事：**收材料（Ingest）→写出阶段性结论（演化）→回答提问（Query）→根据反馈改进（反馈闭环）**。核心思路不是“一次性建完图”，而是让图像新闻一样**持续更新、可回滚、可审计**。
+
+**1）Ingest：把新闻变成可追溯的“证据包”**
+- 采集器把网页/RSS/API 拉回来，先别急着“理解”，先把原始材料妥善保存（比如 MinIO），确保将来能复盘“这条结论当时依据是什么”。
+- Worker 管道做规范化、去重、提取结构化字段，并产出稳定的 `canonical_id`。它就像“每条新闻的身份证”，后续所有演化、检索、反馈都围绕它串起来。
+- 同时把两份“底稿”写好：一份是 **Postgres**（元数据/版本/审计日志），一份是 **Qdrant**（向量索引，负责语义召回）。一个管得住、可回滚；一个找得快、找得准。
+
+**2）演化：把证据变成“可执行的改图计划”，再谨慎落地**
+- 系统先做候选搜索（从 event/entity/edge memory 里找可能相关的旧知识），把“上下文素材”凑齐。
+- 然后让 Planner LLM 只做一件事：输出一份结构化的 **GraphOps JSON**，相当于“改图施工单”（要新增哪些节点/边、要更新哪些摘要/权重、证据引用是什么）。
+- 施工单不会直接执行：Validator 会做 schema/约束/证据校验，确保“改动说得清、落得下、能追责”。
+- 先落到 Sandbox Graph 里试运行，让 Critic/Eval 再挑刺；通过后才 commit 到生产存储（Postgres 版本 + Qdrant 向量）。这一步的价值是：把“LLM 的创造性”关在护栏里，把线上图的稳定性守住。
+
+**3）Query：回答问题时，先检索证据，再组织叙述**
+- 用户提问进入 API 后，先做 freshness 校准（例如 `list_recent`），避免“相关但过时”的信息压过最新进展。
+- 再做 hybrid 检索：Qdrant 负责语义召回，Postgres 回表补齐结构化字段与版本信息；必要时扩展 1~2 hops，拿到“为什么相关”的连接解释与邻居证据。
+- 最后把证据打包成“可引用的证据束”（URL + 简短摘要 + 不确定性提示），再交给 LLM 生成回答；LLM 的输出应像“有出处的记者稿”，而不是“凭感觉的作文”。
+
+**4）反馈闭环：把用户信号变成下一轮演化的燃料**
+- 用户点击/收藏/纠错等反馈会落库成可分析的日志：它不是立刻改图，而是作为“质量信号”进入离线评估与调参。
+- 离线评估会反向推动三件事：提示词/规则调优、阈值与权重更新、必要时的模型/向量策略迭代；这些改动再回到 Planner/Evolve 流程里持续生效。
+
+一句话总结：这条闭环流水线的关键不是“画出一张很大很复杂的图”，而是建立一套**可持续演化的机制**：每次只做小步改动、每次都能解释依据、每次都能被反馈牵引着变得更准。
 
 #### 4.5.6 LLM 运行策略（本地 vLLM 优先，CPU 降级在线）
 
