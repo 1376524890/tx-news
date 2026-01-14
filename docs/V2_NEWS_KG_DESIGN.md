@@ -1,5 +1,5 @@
 <!-- Input: 现有 TX-News 数据流（collector→worker→Postgres/Qdrant）与 Chat 工具增强对话需求 -->
-<!-- Output: v2 自连接自迭代新闻知识图谱（语义连续知识库）系统设计与里程碑（含闭环流程图与通俗实现讲解） -->
+<!-- Output: v2 自连接自迭代新闻知识图谱（语义连续知识库）系统设计与里程碑（含闭环流程图、GraphOps 规范与通俗实现讲解） -->
 <!-- Pos: 版本更新设计文档（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
 # TX-News v2：自连接自迭代新闻知识图谱（语义连续知识库）设计
@@ -366,6 +366,235 @@ LLM 输出的唯一可执行物是 GraphOps JSON（示意）：
 - JSON schema 校验（字段齐全、类型正确、relation 合法）。
 - 约束校验（最大出入度、最大跳数、reasoning 边禁止形成环、证据必须存在于 articles/versions）。
 - 风险控制（一次 commit 的 ops 数量上限、同一节点/边的修改频率限制）。
+
+##### 4.5.4.1 程序化演化流程（可直接落地的操作步骤）
+
+以“新证据 canonical_id 到来”为触发，图演化程序的**唯一入口**可以抽象为：
+
+`kg_update_from_canonical(canonical_id) -> (sandbox_plan, eval_report, commit_result)`
+
+其程序操作流程（建议按顺序，不要省略护栏）：
+1) **Load evidence**：从 Postgres 拉取该 `canonical_id` 的规范化结果（title/url/published_at/text 摘要、entities、event_id 候选、已有分析版本等），并构造 `evidence_items[]`（见 4.5.4.2）。
+2) **Candidate retrieval**（只取 TopK，控制成本）：
+   - event/entity：Qdrant 从 `txnews_event_memory`/`txnews_entity_memory` 召回 TopK；Postgres 回表补齐版本与状态。
+   - edge：从 `txnews_edge_memory` 或 `kg_edges` 拉与候选 event 相关的出入边（限制窗口与数量）。
+3) **Assemble LLM input**：把“新证据 + 候选子图 + 系统约束”打包成 `GraphOpsRequest` JSON，作为 Planner LLM 的唯一输入（见 4.5.4.2、4.5.4.3）。
+4) **Planner LLM**：输出 `GraphOpsPlan`（只允许 JSON、只允许引用输入里给出的 `canonical_id` 作为证据）。
+5) **Validate**（强制）：
+   - JSON 解析 + schema 校验（字段、类型、枚举、必填）。
+   - 证据校验：`evidence_ids` 必须是输入 `evidence_items[].canonical_id` 的子集；不得编造。
+   - 图约束校验：max_degree、reasoning 边不成环、禁止跨类型乱连、同一对节点边数量上限等。
+   - 风险门控：高风险操作（批量删除/大规模重连/大范围降置信）→ 自动 `requires_human_review=true`，只写 sandbox。
+6) **Apply to sandbox**：把 ops 写入 sandbox（可以是 Postgres 表 `kg_*_sandbox` + Qdrant sandbox collection；或同库用 `graph_env=sandbox` 分区/字段隔离）。
+7) **Critic/Eval**：对 sandbox 变更做破坏式评估（LLM Critic + 规则校验 + 离线指标），输出 `EvalReport`（见 4.5.4.4）。
+8) **Commit**：仅当 Eval 达标且风险门控允许时，将 sandbox 变更“原子化”提交到 prod（版本号 +1，保留回滚快照），并写入审计日志（谁触发、引用哪些证据、改了什么）。
+9) **Index/metrics refresh**：更新 Qdrant payload、检索缓存、统计指标（例如边/节点活跃度、检索命中率、反馈质量）。
+
+可行性要点：
+- 所有 LLM 输出都被限制为“计划（plan）”，执行与提交由程序负责；因此不会出现“LLM 直接写库”的不可控风险。
+- 所有输入都来自检索 TopK 的小子图；成本与延迟可控，且可在 LLM 不可用时降级为规则/向量策略（仍可写入 minimal 边与版本元数据）。
+
+##### 4.5.4.2 Planner 的输入格式（GraphOpsRequest）
+
+Planner 的输入应当是**严格 JSON**（不要拼自然语言大段上下文），建议结构如下（字段可以用 Pydantic/JSON Schema 固化）：
+```json
+{
+  "request_id": "uuid",
+  "trigger": {"canonical_id": "c_...", "reason": "new_evidence"},
+  "now": "2026-01-10T00:00:00Z",
+  "policy": {
+    "target": "sandbox",
+    "max_ops": 20,
+    "max_degree": 12,
+    "max_hops": 2,
+    "evidence_required": true,
+    "acyclic_reasoning": true,
+    "allow_relations": ["related_to", "evolves_to", "supports", "refutes", "causes"],
+    "min_confidence_to_add": 0.55
+  },
+  "evidence_items": [
+    {
+      "canonical_id": "c_...",
+      "published_at": "2026-01-10T00:00:00Z",
+      "title": "...",
+      "url": "...",
+      "summary": "≤ 1200 字的规范化摘要/关键信息（可含要点列表）",
+      "entities": [{"id": "entity:...", "name": "...", "type": "org|person|place|ticker"}],
+      "signals": {"event_id_hint": "event:...", "source_quality": 0.7}
+    }
+  ],
+  "candidate_subgraph": {
+    "nodes": [
+      {
+        "node_id": "event:...",
+        "node_type": "event|entity|event_snapshot",
+        "version": 3,
+        "status": "active",
+        "content": "可引用短文本（用于检索/解释）",
+        "last_updated": "2026-01-08T00:00:00Z"
+      }
+    ],
+    "edges": [
+      {
+        "edge_id": "e123",
+        "src": "event:...",
+        "dst": "event:...",
+        "relation": "related_to",
+        "weight": 0.71,
+        "confidence": 0.61,
+        "evidence_ids": ["c_old_1"]
+      }
+    ]
+  },
+  "expected_outputs": {
+    "ops_json_only": true,
+    "require_evidence_ids": true,
+    "node_content_max_chars": 2000,
+    "reason_text_max_chars": 240
+  }
+}
+```
+
+输入设计的关键点（保证“合理可行有效”）：
+- **证据是列表**：Planner 只能引用 `evidence_items[].canonical_id`，杜绝“凭空引用”。
+- **子图是 TopK**：LLM 永远在“小子图”里工作；复杂度与成本可控。
+- **policy 显式化**：把约束写进输入，Validator 也按同一份 policy 做二次校验，避免“提示词说了但代码没管”。
+
+##### 4.5.4.3 Planner Prompt（模板，可直接用于 vLLM/OpenAI 兼容 Chat API）
+
+推荐把 prompt 分成两段：system 固化护栏，user 只塞 `GraphOpsRequest` JSON。
+
+System（示意，保持短而硬）：
+```text
+你是 GraphOps Planner。你只能输出严格 JSON，不能输出 Markdown/解释文字。
+你不能编造证据 canonical_id；evidence_ids 必须来自输入 evidence_items[].canonical_id。
+你不能直接写数据库；你的输出只是待验证的计划（target 固定为 sandbox）。
+如果信息不足，输出最小变更计划：ops=[] 并在 summary 标注缺失项。
+```
+
+User：
+```text
+根据以下 GraphOpsRequest JSON 生成 GraphOpsPlan JSON（只输出 JSON）：
+{{GRAPH_OPS_REQUEST_JSON}}
+```
+
+Planner 输出（GraphOpsPlan）建议包含“可执行 ops + 摘要 + 风险标记”：
+```json
+{
+  "target": "sandbox",
+  "summary": "用 1~3 句描述这次改图的核心意图",
+  "requires_human_review": false,
+  "ops": [
+    {
+      "op": "UPSERT_NODE",
+      "node_id": "event_snapshot:...",
+      "node_type": "event_snapshot",
+      "content": "≤2000 chars",
+      "ttl_days": 30,
+      "evidence_ids": ["c_..."]
+    },
+    {
+      "op": "ADD_EDGE",
+      "src": "event:...",
+      "dst": "event:...",
+      "edge_type": "semantic",
+      "relation": "related_to",
+      "weight": 0.73,
+      "confidence": 0.58,
+      "evidence_ids": ["c_..."],
+      "reason_text": "≤240 chars"
+    }
+  ]
+}
+```
+
+实现建议（让系统更稳、更像工程而不是“对话”）：
+- 输出 JSON 用“单一对象”而不是多段；服务端直接 `json.loads()` + schema 校验。
+- 对 `weight/confidence` 设定范围与默认：`0.0~1.0`，缺失则 Validator 拒绝（防止模型漏字段导致隐式默认）。
+- `requires_human_review` 用于接住模型“想做大动作”的冲动：例如一次性 `REMOVE_EDGE` 超过阈值、或重连涉及高影响节点时强制人工确认。
+
+##### 4.5.4.4 Critic/Eval：输入输出与 Prompt（破坏式验证）
+
+Critic 的目标不是“写新计划”，而是对 sandbox 变更做**最苛刻的反证**：证据是否真支持？有没有更简单解释？有没有误连？输出必须可机读。
+
+Critic 输入（建议同样用严格 JSON）：
+```json
+{
+  "request_id": "uuid",
+  "trigger": {"canonical_id": "c_..."},
+  "plan": { "...": "GraphOpsPlan 原样" },
+  "sandbox_diff": {
+    "added_nodes": [{"node_id": "...", "content": "..."}],
+    "added_edges": [{"src": "...", "dst": "...", "relation": "...", "evidence_ids": ["c_..."]}],
+    "updated_edges": [{"edge_id": "e123", "confidence_before": 0.61, "confidence_after": 0.41}]
+  },
+  "evidence_items": [ { "...": "同 Planner 输入" } ],
+  "policy": { "...": "同 Planner 输入" }
+}
+```
+
+Critic system prompt（示意）：
+```text
+你是 GraphOps Critic。你只输出严格 JSON。
+你的任务是找出计划中最可能错误的点：证据不足/误连/方向错误/过度推理/违反约束。
+对每条新增或更新的边，给出 verdict=KEEP|WEAKEN|REMOVE，以及理由与置信度(0~1)。
+若发现 reasoning 边形成环或证据不足，必须判定 REMOVE 或 requires_human_review=true。
+```
+
+Critic 输出（EvalReport）：
+```json
+{
+  "requires_human_review": false,
+  "verdict": "pass",
+  "edge_reviews": [
+    {
+      "edge_key": {"src": "event:...", "dst": "event:...", "relation": "related_to"},
+      "verdict": "KEEP",
+      "confidence": 0.72,
+      "reasons": ["证据 c_... 明确提及 ...", "与候选子图一致"]
+    }
+  ],
+  "global_risks": ["可能存在实体同名歧义：..."],
+  "suggested_fixes": [
+    {"op": "WEAKEN_EDGE", "edge_id": "e123", "confidence": 0.45, "reason": "证据不足"}
+  ]
+}
+```
+
+为什么这样有效：
+- Planner 负责“生成假设”，Critic 负责“否定假设”；两者目标相反，更容易降低幻觉带来的误连。
+- EvalReport 是机读结构，可以直接驱动下一步：pass→commit；fail→discard；pass 但有 fixes→先把 fixes 应用到 sandbox 再重评。
+
+##### 4.5.4.5 Validator/Executor 细则（幂等、版本、回滚、可审计）
+
+为了保证“合理可行有效”，执行层需要把不确定性关在几个确定的地方：
+
+**(A) GraphOps op 白名单（其余一律拒绝）**
+- Node：`UPSERT_NODE`、`DEPRECATE_NODE`
+- Edge：`ADD_EDGE`、`UPDATE_EDGE`、`WEAKEN_EDGE`、`REMOVE_EDGE`
+- 组合：`REWIRE`（等价于一组 REMOVE + ADD，但必须显式列出受影响边）
+
+**(B) ID 与幂等（避免重复写入与抖动）**
+- `edge_id` 建议由执行层生成：`uuid5(NAMESPACE, f\"{src}|{dst}|{relation}|{edge_type}\")`，LLM 不提供也可。
+- `node_id` 若是从证据派生（如 event_snapshot/claim），也建议执行层生成确定性 id：`uuid5(NAMESPACE, f\"{node_type}|{canonical_id}|{version_tag}\")`。
+- 对同一 `canonical_id` 的重复触发必须幂等：若 plan 产生相同 op，落库应变为“更新 last_updated/metrics”，而不是制造重复节点/边。
+
+**(C) 版本化写入（任何可见内容变化都产生新版本）**
+- `UPSERT_NODE` 若 `content` 变化：写入新版本（`version+1`），旧版本标记 `deprecated`，并保留 `superseded_by` 指针。
+- `UPDATE_EDGE/WEAKEN_EDGE` 不覆盖历史：写入变更记录（审计表），或把边记录做 versioned（至少保留 `confidence_before/after` 与 evidence 差异）。
+
+**(D) 证据与约束校验（把“可解释”做成硬规则）**
+- `evidence_ids` 必须非空（当 `policy.evidence_required=true`）且都存在于输入 evidence_items。
+- reasoning 关系（`supports/refutes/causes`）必须满足更高门槛：`confidence >= policy.min_confidence_to_add` 且 evidence 条数 ≥ 2（建议），否则自动降级为 `related_to` 或拒绝。
+- 禁止“全图大手术”：单次计划中 `REMOVE_EDGE`/`REWIRE` 的影响数量超过阈值（如 5 条）→ 强制 `requires_human_review=true`，只写 sandbox。
+
+**(E) Sandbox → Prod 的原子提交**
+- 提交前生成 snapshot（prod 当前子图快照 + sandbox diff + plan/eval 原文），写入 Postgres 审计表。
+- commit 采用事务边界：Postgres 事务提交成功后再写 Qdrant；若 Qdrant 写入失败则记录补偿任务（重试/回滚），避免“半提交”。
+
+**(F) 效果度量（保证“有效”不是口号）**
+- 在线：`retrieval_precision@k`、`answer_citation_rate`、`feedback_positive_rate`、`hallucination_reports`。
+- 离线：用固定 query 集与回放证据集跑 `before/after` 对比；只允许在指标不回退或可解释的情况下放量启用。
 
 #### 4.5.5 程序流程框图（Ingest → 演化 → Query → 反馈闭环）
 
