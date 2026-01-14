@@ -7,7 +7,7 @@
 > 一旦我所属的文件夹有所变化，请更新我。
 
 架构（≤3行）：
-- 单机数据流（v1）：`apps/collector` → NATS → `apps/worker`(Celery) → Postgres/Qdrant/MinIO。
+- 单机数据流（v1）：`apps/collector` → NATS → `apps/worker`(Celery) → Postgres/Qdrant/MinIO；v2 设计见 `docs/V2_NEWS_KG_DESIGN.md`。
 - 运行入口在 `apps/`，可复用库在 `src/tx_news/`，配置在 `config/`。
 - 运维脚本在 `scripts/`；主程序推荐通过 Docker 运行（脚本会同步输出容器日志并落盘到 `var/log/compose.log`）；运行态目录（`var/`、`.run/`）均 gitignore。
 
@@ -31,6 +31,7 @@
 
 | 子目录 | 地位 | 功能 |
 | --- | --- | --- |
+| `docs/` | 设计文档 | 版本设计、架构提案与路线图。 |
 | `apps/` | 运行入口层 | Collector/API/Worker/MCP 等可执行模块。 |
 | `src/tx_news/` | 核心库 | 采集、清洗、去重、存储、任务、Agent。 |
 | `config/` | 配置层 | `config.yaml` 与抓取源列表。 |
