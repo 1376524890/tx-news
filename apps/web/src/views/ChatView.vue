@@ -199,7 +199,8 @@ async function sendMessage() {
         const payload = {
             messages: messages.value.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
             recent_minutes: 180, // Default
-            max_steps: 6
+            // Increase the agent's tool-call loop budget for deeper multi-step retrieval.
+            max_steps: 50
         }
         
         const res = await fetch("/chat/stream", {

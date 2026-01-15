@@ -255,7 +255,7 @@ curl -s "http://localhost:8000/signals?limit=50" | jq .
 ```bash
 curl -N -X POST "http://localhost:8000/chat/stream" \\
   -H "Content-Type: application/json" \\
-  -d '{"messages":[{"role":"user","content":"总结今天股市新动向"}],"max_steps":6,"recent_minutes":180}'
+  -d '{"messages":[{"role":"user","content":"总结今天股市新动向"}],"max_steps":50,"recent_minutes":180}'
 ```
 
 兼容保留：
