@@ -14,3 +14,5 @@
 | 文件 | 地位 | 功能 |
 | --- | --- | --- |
 | `HelloWorld.vue` | 示例 | Vite 模板自带组件（可清理）。 |
+| `KG3DGraph.vue` | 组件 | Three.js 实时 3D 知识图谱可视化（dashboard 用）。 |
+| `TimeSeriesChart.vue` | 图表 | 轻量折线图组件（看板时序指标）。 |

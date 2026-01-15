@@ -29,11 +29,13 @@ from tx_news.settings import get_settings
 from tx_news.storage.postgres import (
     bootstrap_a_share_basic_from_cache,
     get_a_share,
+    get_a_shares,
     get_analysis,
     get_article,
     get_event_canonical_ids,
     get_latest_version,
     init_db,
+    insert_feedback,
     make_engine,
 )
 from tx_news.storage.qdrant import QdrantStore, scored_point_canonical_id
@@ -230,6 +232,30 @@ class UserLLMConfigIn(BaseModel):
     api_key: str = Field(min_length=1)
 
 
+class FeedbackIn(BaseModel):
+    kind: str = Field(min_length=1, max_length=64)
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/feedback", operation_id="create_feedback")
+def create_feedback(request: Request, body: FeedbackIn) -> Response:
+    """
+    Lightweight UI feedback/log endpoint for closing the loop (clicks/likes/graph interactions).
+    Uses the per-user cookie uid to support per-user evaluation without requiring auth.
+    """
+    uid, headers = _ensure_uid(request)
+    settings = get_settings()
+    engine = make_engine(settings.pg_dsn)
+    init_db(engine)
+    data = dict(body.data or {})
+    # Best-effort request metadata (avoid storing raw headers).
+    data.setdefault("path", str(request.url.path))
+    data.setdefault("client", getattr(getattr(request, "client", None), "host", None))
+    data.setdefault("ua", str(request.headers.get("user-agent") or "")[:300])
+    insert_feedback(engine, uid=uid, kind=body.kind, data=data)
+    return JSONResponse({"ok": True}, headers={**headers, **NO_STORE_HEADERS})
+
+
 @app.get("/api/config", operation_id="get_user_llm_config")
 def api_get_config(request: Request) -> Response:
     uid, headers = _ensure_uid(request)
@@ -350,6 +376,168 @@ def dashboard_summary(
             "top_event_types": top_event_types,
             "top_tickers": top_tickers,
             "recent": recent,
+        },
+        headers=NO_STORE_HEADERS,
+    )
+
+
+@app.get("/kg/graph", operation_id="kg_graph")
+def kg_graph(
+    minutes: int = Query(default=180, ge=5, le=60 * 24),
+    limit_articles: int = Query(default=600, ge=50, le=5000),
+    max_events: int = Query(default=80, ge=10, le=500),
+    max_tickers: int = Query(default=160, ge=10, le=2000),
+) -> Response:
+    """
+    Public near-real-time KG graph snapshot used by the dashboard 3D visualization.
+    Current node types are fixed: event (event_id) and ticker (ts_code).
+    """
+    settings = get_settings()
+    engine = make_engine(settings.pg_dsn)
+    init_db(engine)
+
+    window_seconds = int(minutes) * 60
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "with recent as ("
+                "  select canonical_id, event_type, data->>'event_id' as event_id, data->'tickers' as tickers, created_at "
+                "  from analyses "
+                "  where created_at >= (now() - (:sec || ' seconds')::interval) "
+                "  and (data->>'event_id') is not null and (data->>'event_id') <> ''"
+                "), latest_v as ("
+                "  select distinct on (canonical_id) canonical_id, url, source_id, "
+                "    coalesce(published_at, fetched_at) as published_at "
+                "  from article_versions "
+                "  order by canonical_id, coalesce(published_at, fetched_at) desc"
+                ") "
+                "select r.canonical_id, r.event_id, r.event_type, r.tickers, r.created_at, "
+                "  a.title, lv.url, lv.published_at, lv.source_id "
+                "from recent r "
+                "left join articles a on a.canonical_id = r.canonical_id "
+                "left join latest_v lv on lv.canonical_id = r.canonical_id "
+                "order by r.created_at desc "
+                "limit :limit"
+            ),
+            {"sec": window_seconds, "limit": int(limit_articles)},
+        ).all()
+
+    # Build event/ticker bipartite graph from analyses.
+    event_by_id: dict[str, dict[str, Any]] = {}
+    ticker_count: dict[str, int] = {}
+    edge_count: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def _tickers(v: Any) -> list[dict[str, Any]]:
+        return _normalize_tickers(v)
+
+    for canonical_id, event_id, event_type, tickers, created_at, title, url, published_at, source_id in rows:
+        eid = str(event_id or "").strip()
+        if not eid:
+            continue
+        ev = event_by_id.setdefault(
+            eid,
+            {
+                "event_id": eid,
+                "event_type": str(event_type or "other"),
+                "articles": [],
+                "count": 0,
+                "last_created_at": None,
+            },
+        )
+        ev["count"] = int(ev.get("count") or 0) + 1
+        ts = created_at.isoformat() if created_at else None
+        if ts and (not ev["last_created_at"] or ts > ev["last_created_at"]):
+            ev["last_created_at"] = ts
+        if len(ev["articles"]) < 12:
+            ev["articles"].append(
+                {
+                    "canonical_id": str(canonical_id),
+                    "title": title,
+                    "url": url,
+                    "source_id": source_id,
+                    "published_at": published_at.isoformat() if published_at else None,
+                    "created_at": ts,
+                }
+            )
+
+        for t in _tickers(tickers):
+            ts_code = str((t or {}).get("ts_code") or "").strip()
+            if not ts_code:
+                continue
+            ticker_count[ts_code] = ticker_count.get(ts_code, 0) + 1
+            key = (eid, ts_code)
+            e = edge_count.setdefault(
+                key,
+                {"event_id": eid, "ts_code": ts_code, "count": 0, "evidence": []},
+            )
+            e["count"] = int(e.get("count") or 0) + 1
+            if len(e["evidence"]) < 12:
+                e["evidence"].append(str(canonical_id))
+
+    # Trim to keep the 3D visualization responsive.
+    top_event_ids = [k for k, _ in sorted(event_by_id.items(), key=lambda kv: int(kv[1].get("count") or 0), reverse=True)[: int(max_events)]]
+    top_events = {eid: event_by_id[eid] for eid in top_event_ids if eid in event_by_id}
+
+    top_ts_codes = [k for k, _ in sorted(ticker_count.items(), key=lambda kv: kv[1], reverse=True)[: int(max_tickers)]]
+    a_share_rows = get_a_shares(engine, top_ts_codes)
+    ticker_name = {r.ts_code: r.name for r in a_share_rows}
+
+    nodes: list[dict[str, Any]] = []
+    links: list[dict[str, Any]] = []
+
+    for eid, ev in top_events.items():
+        nodes.append(
+            {
+                "id": f"event:{eid}",
+                "kind": "event",
+                "label": str(ev.get("event_type") or eid),
+                "event_id": eid,
+                "event_type": ev.get("event_type"),
+                "count": int(ev.get("count") or 0),
+                "last_created_at": ev.get("last_created_at"),
+                "articles": ev.get("articles") or [],
+            }
+        )
+
+    allowed_events = set(top_events.keys())
+    allowed_tickers = set(top_ts_codes)
+
+    for ts_code in top_ts_codes:
+        nodes.append(
+            {
+                "id": f"ticker:{ts_code}",
+                "kind": "ticker",
+                "label": f"{ts_code} {ticker_name.get(ts_code) or ''}".strip(),
+                "ts_code": ts_code,
+                "name": ticker_name.get(ts_code),
+                "count": int(ticker_count.get(ts_code) or 0),
+            }
+        )
+
+    for (eid, ts_code), e in edge_count.items():
+        if eid not in allowed_events or ts_code not in allowed_tickers:
+            continue
+        links.append(
+            {
+                "source": f"event:{eid}",
+                "target": f"ticker:{ts_code}",
+                "relation": "mentions",
+                "weight": int(e.get("count") or 0),
+                "evidence": e.get("evidence") or [],
+            }
+        )
+
+    return JSONResponse(
+        {
+            "window_minutes": int(minutes),
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "nodes": nodes,
+            "links": links,
+            "stats": {
+                "events": len(top_events),
+                "tickers": len(top_ts_codes),
+                "links": len(links),
+            },
         },
         headers=NO_STORE_HEADERS,
     )

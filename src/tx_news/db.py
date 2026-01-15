@@ -125,3 +125,13 @@ class AShareBasic(Base):
     aliases: Mapped[dict] = mapped_column(JSONB, nullable=False)  # {"names": [...]} etc.
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class FeedbackLog(Base):
+    __tablename__ = "feedback_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    uid: Mapped[str] = mapped_column(String(128), nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)  # e.g. graph_node_click / thumbs_up
+    data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

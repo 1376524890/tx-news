@@ -626,7 +626,7 @@ Qdrant（知识库向量索引）写入形态（以 `src/tx_news/tasks/pipeline.
 - vLLM 日志（宿主机进程）：`tail -f var/log/vllm.log`（Windows：`Get-Content var\\log\\vllm.log -Wait -Tail 200`）
 
 ### 8.4 Cloudflare Tunnel / 反代仅暴露单端口
-- 若仅能访问 `8000`：使用配置页 `http://<host>:8000/config`（而不是 `8001`），并确保反代不要缓存 `/status`、`/signals`、`/dashboard/summary`（本项目已对这些接口默认设置 `Cache-Control: no-store`）。
+- 若仅能访问 `8000`：使用配置页 `http://<host>:8000/config`（而不是 `8001`），并确保反代不要缓存 `/status`、`/signals`、`/dashboard/summary`、`/kg/graph`（本项目已对这些接口默认设置 `Cache-Control: no-store`）。
 
 ---
 
@@ -634,7 +634,7 @@ Qdrant（知识库向量索引）写入形态（以 `src/tx_news/tasks/pipeline.
 
 ### 9.0 v1 已实现（迭代总结）
 - 前端：Vue 3 + TS SPA（public：对话 + 看板；admin：配置页），SSE 流式对话 + 工具进度可视化（完成后自动折叠），侧栏统计包含轮询接口平均耗时。
-- API：用户侧提供 `/search`（向量检索）、`/chat/stream`（SSE）、`/status`（最小依赖/计数）、`/dashboard/summary`（看板聚合）；并提供 `/api/config`（按用户设置在线 LLM；单端口反代可用），对 `tickers` 等字段做兼容处理以避免 500。
+- API：用户侧提供 `/search`（向量检索）、`/chat/stream`（SSE）、`/status`（最小依赖/计数）、`/dashboard/summary`（看板聚合）、`/kg/graph`（看板 3D 图谱数据）、`/feedback`（UI 反馈上报）；并提供 `/api/config`（按用户设置在线 LLM；单端口反代可用），对 `tickers` 等字段做兼容处理以避免 500。
 - 存储与稳定性：SQLAlchemy Engine 进程内复用，降低长跑场景 Postgres 连接数膨胀风险；Qdrant collection 支持按模型/维度策略自动兼容。
 - 集成：提供 `apps/mcp/server.py`（stdio JSON-RPC）用于外部 Agent/LLM 以 MCP 方式调用知识库/数据库检索能力。
 

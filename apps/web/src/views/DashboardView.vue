@@ -1,9 +1,10 @@
-<!-- Input: /status + /dashboard/summary（轮询） -->
-<!-- Output: 分析结果看板（KPI + 热点 + 最新输出） -->
+<!-- Input: /status + /dashboard/summary + /kg/graph（轮询） -->
+<!-- Output: 分析结果看板（KPI + 热点 + 最新输出 + 3D 知识图谱） -->
 <!-- Pos: 前端看板页（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import KG3DGraph from '../components/KG3DGraph.vue'
 
 type DashboardRecentItem = {
   canonical_id: string
@@ -176,6 +177,10 @@ watch(windowMinutes, () => refresh())
           </div>
         </div>
       </div>
+    </section>
+
+    <section class="panel" style="grid-column: 1 / -1">
+      <KG3DGraph :minutes="windowMinutes" :poll-ms="3000" />
     </section>
 
     <section class="panel" style="grid-column: 1 / span 1">

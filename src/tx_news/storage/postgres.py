@@ -14,7 +14,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from tx_news.db import AShareBasic, Analysis, Article, ArticleVersion, Base, RawDoc, Signal, Source
+from tx_news.db import AShareBasic, Analysis, Article, ArticleVersion, Base, FeedbackLog, RawDoc, Signal, Source
 
 
 def utcnow() -> datetime:
@@ -178,6 +178,11 @@ def insert_signal(engine: Engine, canonical_id: str, kind: str, data: dict) -> N
         s.add(Signal(canonical_id=canonical_id, kind=kind, data=data, created_at=utcnow()))
 
 
+def insert_feedback(engine: Engine, *, uid: str, kind: str, data: dict) -> None:
+    with session_scope(engine) as s:
+        s.add(FeedbackLog(uid=str(uid or ""), kind=str(kind or ""), data=data or {}, created_at=utcnow()))
+
+
 def get_article(engine: Engine, canonical_id: str) -> Article | None:
     with session_scope(engine) as s:
         return s.scalar(select(Article).where(Article.canonical_id == canonical_id))
@@ -226,6 +231,16 @@ def get_event_canonical_ids(engine: Engine, event_id: str, limit: int = 200) -> 
 def get_a_share(engine: Engine, ts_code: str):
     with session_scope(engine) as s:
         return s.scalar(select(AShareBasic).where(AShareBasic.ts_code == ts_code))
+
+
+def get_a_shares(engine: Engine, ts_codes: list[str]) -> list[AShareBasic]:
+    ts_codes = [str(x or "").strip() for x in (ts_codes or [])]
+    ts_codes = [x for x in ts_codes if x]
+    if not ts_codes:
+        return []
+    with session_scope(engine) as s:
+        rows = s.scalars(select(AShareBasic).where(AShareBasic.ts_code.in_(ts_codes))).all()
+        return list(rows)
 
 
 def upsert_a_share_basic(engine: Engine, rows: list[dict]) -> None:

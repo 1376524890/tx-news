@@ -15,7 +15,8 @@
 
 | 文件 | 地位 | 功能 |
 | --- | --- | --- |
-| `V2_NEWS_KG_DESIGN.md` | 版本设计 | v2：自连接自迭代新闻知识图谱（语义连续知识库）设计（含闭环流程图、GraphOps 演化 I/O 与 prompt、通俗实现讲解）。 |
-| `V2_NEWS_KG_ATTACHMENT_DEV_GUIDE.md` | 附件 | 面向开发者的叙事型重构说明与技术路线。 |
-| `V2_NEWS_KG_DELIVERY_PLAN.md` | 交付路径 | v2 技术路径与迭代说明（含程序流程框图与数据流图）。 |
+| `V2_NEWS_KG_IMPLEMENTATION.md` | 实施权威 | v2.2 一次性全量交付的可执行步骤文档（数据结构/任务/API/UI/验收/回滚）。 |
+| `V2_NEWS_KG_DESIGN.md` | 入口 | 指向 `V2_NEWS_KG_IMPLEMENTATION.md`（不再承载实现细节）。 |
+| `V2_NEWS_KG_ATTACHMENT_DEV_GUIDE.md` | 入口 | 指向 `V2_NEWS_KG_IMPLEMENTATION.md`（不再承载实现细节）。 |
+| `V2_NEWS_KG_DELIVERY_PLAN.md` | 入口 | 指向 `V2_NEWS_KG_IMPLEMENTATION.md`（不再承载实现细节）。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |
