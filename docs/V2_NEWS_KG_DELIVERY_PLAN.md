@@ -24,12 +24,13 @@
 ```mermaid
 flowchart TB
   %% External
-  S[News Sources] --> C[apps/collector<br/>fetch/normalize]
+  S["News Sources"] --> C["apps/collector<br/>fetch/normalize"]
   C --> N[(NATS)]
 
   %% Ingest / pipeline
-  N --> B[apps/worker / nats-bridge]
-  B --> P[Celery pipeline<br/>normalize_raw → dedup_store → analyze → deep_optimize(optional)]
+  N --> B["apps/worker / nats-bridge"]
+  %% Quote the label and avoid unicode arrows to keep Mermaid parsers happy across renderers.
+  B --> P["Celery pipeline<br/>normalize_raw -> dedup_store -> analyze -> deep_optimize (optional)"]
 
   %% v1 stores
   P --> PG[(Postgres<br/>articles / analyses / versions)]
@@ -37,22 +38,22 @@ flowchart TB
   P --> M[(MinIO<br/>raw/html/cache)]
 
   %% v2 KG update
-  P --> KG[kg_update_from_canonical<br/>incremental KG update]
+  P --> KG["kg_update_from_canonical<br/>incremental KG update"]
   KG --> Qe[(Qdrant<br/>txnews_entity_memory)]
   KG --> Qv[(Qdrant<br/>txnews_event_memory)]
   KG --> Qg[(Qdrant or Postgres<br/>txnews_edge_memory / kg_edges)]
   KG --> PG
 
   %% Query path
-  U[User / Chat] --> A[Agent]
-  A --> T[Tools<br/>list_recent/search_entities/search_events<br/>get_event_neighbors/explain_connection]
+  U["User / Chat"] --> A["Agent"]
+  A --> T["Tools<br/>list_recent/search_entities/search_events<br/>get_event_neighbors/explain_connection"]
   T --> PG
   T --> Q1
   T --> Qe
   T --> Qv
   T --> Qg
-  T --> R[Evidence Bundle<br/>urls + short summaries]
-  R --> L[LLM Answer<br/>citations + uncertainty]
+  T --> R["Evidence Bundle<br/>urls + short summaries"]
+  R --> L["LLM Answer<br/>citations + uncertainty"]
 
   %% LLM runtime strategy
   subgraph LLMRuntime[LLM Runtime]
@@ -71,27 +72,28 @@ flowchart TB
 
 ```mermaid
 flowchart TD
-  subgraph Ingest[Ingest / Update Path]
-    A[New Evidence: canonical_id] --> B[analyze/deep_optimize 完成]
-    B --> C[kg_update_from_canonical]
-    C --> D[Candidate Search<br/>event/entity/edge memory]
-    D --> E[Planner LLM<br/>输出 GraphOps JSON]
-    E --> F[GraphOps Validator<br/>schema+constraints+evidence]
-    F -->|pass| G[Apply Ops to Sandbox Graph]
-    F -->|fail| X[Reject + Log]
-    G --> H[Eval/Critic Agents<br/>edge/node validation]
-    H -->|pass| I[Commit to Prod Stores<br/>Postgres(meta/version)+Qdrant(vectors)]
-    H -->|fail| Y[Discard / Revise Ops]
-    I --> J[Snapshot + Metrics Update]
+  subgraph Ingest["Ingest / Update Path"]
+    A["New Evidence: canonical_id"] --> B["analyze/deep_optimize 完成"]
+    B --> C["kg_update_from_canonical"]
+    C --> D["Candidate Search<br/>event/entity/edge memory"]
+    D --> E["Planner LLM<br/>输出 GraphOps JSON"]
+    F["GraphOps Validator<br/>schema & constraints & evidence"]
+    E --> F
+    F -->|pass| G["Apply Ops to Sandbox Graph"]
+    F -->|fail| X["Reject & Log"]
+    G --> H["Eval/Critic Agents<br/>edge/node validation"]
+    H -->|pass| I["Commit to Prod Stores<br/>Postgres (meta/version) & Qdrant (vectors)"]
+    H -->|fail| Y["Discard / Revise Ops"]
+    I --> J["Snapshot & Metrics Update"]
   end
 
-  subgraph Query[Query / Retrieval Path]
-    Q[User Query] --> Q1[list_recent<br/>freshness calibration]
-    Q1 --> Q2[search_entities + search_events]
-    Q2 --> Q3[Expand 1~2 hops<br/>neighbors/explain_connection]
-    Q3 --> Q4[Assemble Evidence Bundle<br/>URLs + short summaries]
-    Q4 --> Q5[LLM Answer<br/>with citations + uncertainty]
-    Q5 --> Q6[Feedback/Eval Signal<br/>click/like/correctness]
+  subgraph Query["Query / Retrieval Path"]
+    Q["User Query"] --> Q1["list_recent<br/>freshness calibration"]
+    Q1 --> Q2["search_entities & search_events"]
+    Q2 --> Q3["Expand 1~2 hops<br/>neighbors / explain_connection"]
+    Q3 --> Q4["Assemble Evidence Bundle<br/>URLs + short summaries"]
+    Q4 --> Q5["LLM Answer<br/>with citations & uncertainty"]
+    Q5 --> Q6["Feedback/Eval Signal<br/>click/like/correctness"]
   end
 
   J --> Q2
