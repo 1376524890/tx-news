@@ -8,7 +8,7 @@
 
 架构（≤3行）：
 - 统一封装 NATS JetStream 的建流与发布操作。
-- Collector 使用它发布 raw 消息；Worker 侧用原生客户端消费。
+- Collector 使用它发布 raw 消息；Worker 侧用原生客户端消费；实现侧对 `nats-py` 做延迟导入以便单测环境可导入。
 - 目标是让业务代码不直接散落连接/序列化逻辑。
 
 ## 文件

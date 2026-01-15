@@ -7,7 +7,7 @@
 > 一旦我所属的文件夹有所变化，请更新我。
 
 架构（≤3行）：
-- 单机数据流（v1）：`apps/collector` → NATS → `apps/worker`(Celery) → Postgres/Qdrant/MinIO；v2 设计见 `docs/V2_NEWS_KG_DESIGN.md`。
+- 单机数据流（v1）：`apps/collector` → NATS → `apps/worker`(Celery) → Postgres/Qdrant/MinIO；v2 交付入口见 `docs/V2_NEWS_KG_DELIVERY_PLAN.md`（详细设计见 `docs/V2_NEWS_KG_DESIGN.md`）。
 - 运行入口在 `apps/`，可复用库在 `src/tx_news/`，配置在 `config/`。
 - 运维脚本在 `scripts/`；主程序推荐通过 Docker 运行（脚本会同步输出容器日志并落盘到 `var/log/compose.log`）；运行态目录（`var/`、`.run/`）均 gitignore。
 
@@ -23,6 +23,7 @@
 | `pyproject.toml` | 工具/打包配置 | `setuptools` + `ruff` 等配置入口。 |
 | `requirements.txt` | 运行依赖 | 服务运行所需 Python 依赖。 |
 | `requirements-dev.txt` | 开发依赖 | `pytest`/`ruff` 等开发工具依赖。 |
+| `pytest.ini` | 测试配置 | `pytest` 收集范围配置（避免扫描 `var/vendor` 等第三方目录）。 |
 | `.env.example` | 环境变量样例 | `.env` 模板（密钥/连接串建议通过 env 注入；含 `TXNEWS_CHAT_ALLOW_DEEP_FALLBACK` 等开关）。 |
 | `.gitignore` | 仓库维护 | 忽略本地运行态与缓存文件。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |
@@ -34,6 +35,7 @@
 | `docs/` | 设计文档 | 版本设计、架构提案与路线图。 |
 | `apps/` | 运行入口层 | Collector/API/Worker/MCP 等可执行模块。 |
 | `src/tx_news/` | 核心库 | 采集、清洗、去重、存储、任务、Agent。 |
+| `tests/` | 测试目录 | `pytest` 单元测试（尽量使用 fakes/mocks，避免真实外部依赖）。 |
 | `config/` | 配置层 | `config.yaml` 与抓取源列表。 |
 | `scripts/` | 运维脚本 | 一键启动/停止与本地开发辅助。 |
 | `docker/` | 镜像定义 | 多目标 Dockerfile（按功能拆分构建镜像）。 |

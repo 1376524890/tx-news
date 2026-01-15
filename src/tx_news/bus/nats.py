@@ -1,5 +1,5 @@
 # Input: NATS 连接串、stream/subject 与 payload(dict)
-# Output: JetStream stream 初始化与消息发布
+# Output: JetStream stream 初始化与消息发布（依赖在调用时导入）
 # Pos: NATS JetStream 访问封装（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -8,8 +8,6 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-import nats
-
 
 @dataclass(frozen=True)
 class NatsBus:
@@ -17,6 +15,12 @@ class NatsBus:
     stream: str
 
     async def _connect(self):
+        try:
+            import nats  # type: ignore[import-not-found]
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "Missing dependency 'nats-py' (import name 'nats'); install requirements.txt to use NatsBus."
+            ) from e
         return await nats.connect(self.url)
 
     async def ensure_stream(self) -> None:

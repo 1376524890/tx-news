@@ -8,7 +8,7 @@
 
 架构（≤3行）：
 - `fetcher.py` 负责 HTTP 拉取与 root 页面链接提取。
-- `collector.py` 负责 root→正文抓取、写入存储、发布 NATS raw 事件。
+- `collector.py` 负责 root→正文抓取、写入存储、发布 NATS raw 事件；单个来源/发布失败不应导致进程退出。
 - 该层不做分析，只产出可追溯的 raw 与元数据。
 
 ## 文件

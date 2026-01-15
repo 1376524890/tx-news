@@ -1,14 +1,11 @@
 # Input: MinIO/S3 endpoint/credentials + bytes
-# Output: 对象存储 key 与 bytes 读写能力
+# Output: 对象存储 key 与 bytes 读写能力（依赖在调用时导入）
 # Pos: S3 客户端封装（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-
-import boto3
-from botocore.config import Config
 
 
 @dataclass(frozen=True)
@@ -20,6 +17,13 @@ class S3Client:
     bucket: str
 
     def _client(self):
+        try:
+            import boto3  # type: ignore[import-not-found]
+            from botocore.config import Config  # type: ignore[import-not-found]
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "Missing dependency 'boto3' (and botocore); install requirements.txt to use S3Client."
+            ) from e
         return boto3.client(
             "s3",
             endpoint_url=self.endpoint_url,

@@ -1,5 +1,5 @@
 # Input: 来源 root_urls、Fetcher、S3Client、Postgres DSN、NATS URL
-# Output: raw 内容写入 MinIO、元数据写入 Postgres、并发布 NATS raw 消息
+# Output: raw 内容写入 MinIO、元数据写入 Postgres、并发布 NATS raw 消息（失败会降级为跳过/重试下一轮）
 # Pos: 采集编排器（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -32,25 +32,44 @@ class Collector:
     max_concurrency: int = 1
 
     def run_once(self, root_urls: list[str]) -> None:
-        engine = make_engine(self.engine_dsn)
-        init_db(engine)
-        ensure_sources(engine, root_urls)
+        try:
+            engine = make_engine(self.engine_dsn)
+            init_db(engine)
+            ensure_sources(engine, root_urls)
+        except Exception:
+            logger.exception("collector init failed (db/sources)")
+            return
 
         bus = NatsBus(url=self.nats_url, stream=self.nats_stream)
-        asyncio.run(bus.ensure_stream())
+        try:
+            asyncio.run(bus.ensure_stream())
+        except Exception:
+            logger.exception("collector nats ensure_stream failed url=%s stream=%s", self.nats_url, self.nats_stream)
+            return
 
         for root_url in root_urls:
-            self._process_root(engine, bus, root_url)
+            try:
+                self._process_root(engine, bus, root_url)
+            except Exception:
+                logger.exception("collector process_root failed url=%s", root_url)
 
     def _process_root(self, engine, bus: NatsBus, root_url: str) -> None:
         source_id = root_url.replace("https://", "").replace("http://", "").strip("/").lower()
         logger.info("fetch root source_id=%s url=%s", source_id, root_url)
-        root = self.fetcher.fetch(root_url)
+        try:
+            root = self.fetcher.fetch(root_url)
+        except Exception as e:
+            logger.warning("root fetch failed source_id=%s url=%s err=%s", source_id, root_url, e)
+            return
         if root.status_code >= 400:
             logger.warning("root fetch non-2xx status=%s url=%s", root.status_code, root_url)
             return
 
-        links = extract_links(root.url, root.body, max_links=100)
+        try:
+            links = extract_links(root.url, root.body, max_links=100)
+        except Exception:
+            logger.exception("extract_links failed source_id=%s url=%s", source_id, root.url)
+            return
         logger.info("root links source_id=%s count=%s", source_id, len(links))
 
         already = existing_raw_urls(engine, links)
@@ -81,20 +100,23 @@ class Collector:
                 )
                 if raw_id is None:
                     continue
-                asyncio.run(
-                    bus.publish(
-                        f"{self.nats_stream}.raw",
-                        {
-                            "source_id": source_id,
-                            "url": res.url,
-                            "fetched_at": res.fetched_at.isoformat(),
-                            "status_code": res.status_code,
-                            "headers": res.headers,
-                            "content_type": res.content_type,
-                            "raw_bytes_s3_key": s3_key,
-                            "checksum": res.checksum,
-                        },
+                try:
+                    asyncio.run(
+                        bus.publish(
+                            f"{self.nats_stream}.raw",
+                            {
+                                "source_id": source_id,
+                                "url": res.url,
+                                "fetched_at": res.fetched_at.isoformat(),
+                                "status_code": res.status_code,
+                                "headers": res.headers,
+                                "content_type": res.content_type,
+                                "raw_bytes_s3_key": s3_key,
+                                "checksum": res.checksum,
+                            },
+                        )
                     )
-                )
+                except Exception as e:
+                    logger.warning("publish raw failed url=%s err=%s", res.url, e)
             except Exception as e:
                 logger.warning("fetch article failed url=%s err=%s", url, e)
