@@ -17,4 +17,6 @@
 | --- | --- | --- |
 | `test_crawler_collector.py` | 单元测试 | 覆盖采集器在网络/中间件异常场景下的降级与不中断行为。 |
 | `test_kg_rules.py` | 单元测试 | 覆盖 v2 KG 规则模块（ID/快照文本/边打分）的确定性与截断约束。 |
+| `test_scripts_check_crawler_connectivity.py` | 回归测试 | 覆盖 `check_crawler_connectivity.sh` 的 dry-run 行为（不触网/不依赖 Docker）。 |
+| `test_scripts_start_stop_local.py` | 回归测试 | 覆盖 `start_local.sh`/`stop_local.sh` 的 --help 行为（不触网/不依赖 Docker）。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |

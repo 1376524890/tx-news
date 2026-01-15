@@ -16,6 +16,8 @@
 - 权限提示：若当前 shell 无法访问 Docker daemon（`/var/run/docker.sock`），`start.sh` 会报错中止，`stop.sh` 会提示并跳过停止容器（仍会停止宿主机 vLLM）。
 - 国内拉取加速：`setup_docker_mirror.sh` 可写入 Docker daemon `registry-mirrors` 配置（需要 root），用于加速基础镜像 `docker pull`。
 - 在线 LLM 排障：`check_online_llm.sh` 用 `.env` 的在线 LLM 配置做“宿主机 vs 容器”连通性对比（DNS/TLS/HTTP/SSE，并做 IPv4(-4)/IPv6(-6) 对比，打印 resolv.conf 与 proxy/no_proxy；用于定位 `_ssl.c:999 handshake timed out`）。
+- 爬虫排障：`check_crawler_connectivity.sh` 对 `config/sources.txt` 做“宿主机 vs collector 容器”的 DNS/TLS/HTTP 探测，并在容器侧额外检测 NATS JetStream 与基础设施端口连通性（用于定位 `_ssl.c:999 handshake timed out`、`nats: no response from stream`、容器内 DNS 异常等）。
+- 本地非 Docker 启动：`start_local.sh`/`stop_local.sh` 用 docker 只起基础设施（默认 `docker compose up -d`），然后在宿主机 venv 里启动 api/worker/collector/nats-bridge（可选 admin）；`start_local.sh` 会自动创建 venv 并默认 `pip install -r requirements.txt`，可选 `--web-dev` 在同一个对外端口启动 Vite 热更新（默认 8000，此时 API 自动挪到 8001）；`stop_local.sh` 默认会停止宿主机进程并关闭由 start_local 启动的 infra（可用 `--keep-infra` 保留容器）。
 - 演示/回归脚本：`demo_kb_api_test.py`（知识库 API：/status + /search）、`demo_db_api_test.py`（数据库 API：/status + /signals + /articles/{id}）。
 
 ## 文件
@@ -30,6 +32,9 @@
 | `stop.cmd` | 运维入口 | Windows 双击停止（调用 `stop.ps1`）。 |
 | `setup_docker_mirror.sh` | 运维辅助 | 配置 Docker daemon registry mirror（加速 `docker pull`；需要 root）。 |
 | `check_online_llm.sh` | 运维排障 | 在线 LLM 连通性检查（host vs api 容器）。 |
+| `check_crawler_connectivity.sh` | 运维排障 | 爬虫 sources 连通性检查（host vs collector 容器；含 NATS/infra TCP）。 |
+| `start_local.sh` | 运维入口 | docker 仅启动基础设施；宿主机 venv 启动主程序（api/worker/collector/nats-bridge；可选 admin）。 |
+| `stop_local.sh` | 运维入口 | 停止 `start_local.sh` 启动的宿主机进程；可选 `--down` 停止 infra 容器。 |
 | `demo_kb_api_test.py` | Demo/测试 | 在服务运行中调用 `/search` 并跟进 `/articles/{canonical_id}`，验证知识库检索链路可用（不写入任何测试数据）。 |
 | `demo_db_api_test.py` | Demo/测试 | 在服务运行中调用 `/status`、`/signals`、`/articles/{canonical_id}`（可选强制非空），验证数据库读路径可用。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |
