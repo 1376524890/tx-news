@@ -1,5 +1,5 @@
 # Input: Postgres DSN（进程内缓存 Engine）与 ORM 模型
-# Output: 建表与 CRUD/查询函数（articles/versions/analysis/signals/a_share 等）+（可选）从本地缓存引导主数据
+# Output: 建表与 CRUD/查询函数（articles/versions/analysis/signals/a_share/feedback/kg_ops 等）+（可选）从本地缓存引导主数据
 # Pos: Postgres 数据访问层（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -14,7 +14,20 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from tx_news.db import AShareBasic, Analysis, Article, ArticleVersion, Base, FeedbackLog, RawDoc, Signal, Source
+from tx_news.db import (
+    AShareBasic,
+    Analysis,
+    Article,
+    ArticleVersion,
+    Base,
+    FeedbackLog,
+    KGOpsLog,
+    KGRun,
+    KGSnapshot,
+    RawDoc,
+    Signal,
+    Source,
+)
 
 
 def utcnow() -> datetime:
@@ -181,6 +194,66 @@ def insert_signal(engine: Engine, canonical_id: str, kind: str, data: dict) -> N
 def insert_feedback(engine: Engine, *, uid: str, kind: str, data: dict) -> None:
     with session_scope(engine) as s:
         s.add(FeedbackLog(uid=str(uid or ""), kind=str(kind or ""), data=data or {}, created_at=utcnow()))
+
+
+def create_kg_run(engine: Engine, *, run_id: str, graph_env: str, trigger_canonical_id: str) -> None:
+    with session_scope(engine) as s:
+        s.add(
+            KGRun(
+                run_id=str(run_id),
+                graph_env=str(graph_env),
+                trigger_canonical_id=str(trigger_canonical_id),
+                status="running",
+                started_at=utcnow(),
+                finished_at=None,
+            )
+        )
+
+
+def finish_kg_run(engine: Engine, *, run_id: str, status: str) -> None:
+    with session_scope(engine) as s:
+        r = s.get(KGRun, str(run_id))
+        if not r:
+            return
+        r.status = str(status)
+        r.finished_at = utcnow()
+
+
+def insert_kg_ops_log(engine: Engine, *, run_id: str, phase: str, payload: dict) -> None:
+    with session_scope(engine) as s:
+        s.add(
+            KGOpsLog(
+                run_id=str(run_id),
+                phase=str(phase),
+                payload=payload or {},
+                created_at=utcnow(),
+            )
+        )
+
+
+def insert_kg_snapshot(
+    engine: Engine,
+    *,
+    snapshot_id: str,
+    run_id: str,
+    graph_env: str,
+    snapshot_payload: dict,
+) -> None:
+    with session_scope(engine) as s:
+        s.add(
+            KGSnapshot(
+                snapshot_id=str(snapshot_id),
+                run_id=str(run_id),
+                graph_env=str(graph_env),
+                snapshot_payload=snapshot_payload or {},
+                created_at=utcnow(),
+            )
+        )
+
+
+def get_kg_snapshot(engine: Engine, *, snapshot_id: str) -> KGSnapshot | None:
+    with session_scope(engine) as s:
+        return s.get(KGSnapshot, str(snapshot_id))
 
 
 def get_article(engine: Engine, canonical_id: str) -> Article | None:

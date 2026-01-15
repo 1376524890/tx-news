@@ -1,5 +1,5 @@
 # Input: Qdrant url、collection 与向量/payload
-# Output: collection 初始化、向量 upsert 与 search 结果
+# Output: collection 初始化 + upsert/search/retrieve/scroll/delete
 # Pos: Qdrant 访问封装（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -198,3 +198,64 @@ class QdrantStore:
                 with_payload=True,
             )
         raise RuntimeError("qdrant-client API mismatch: neither query_points nor search is available")
+
+    def retrieve(
+        self,
+        *,
+        point_ids: list[str],
+        with_payload: bool = True,
+        with_vectors: bool = False,
+    ) -> list[qm.Record]:
+        if not point_ids:
+            return []
+        c = self._client()
+        ids = [self.to_point_id(pid) for pid in point_ids]
+        resp = c.retrieve(
+            collection_name=self.collection,
+            ids=ids,
+            with_payload=with_payload,
+            with_vectors=with_vectors,
+        )
+        return list(resp or [])
+
+    def delete(self, *, point_ids: list[str]) -> None:
+        if not point_ids:
+            return
+        c = self._client()
+        ids = [self.to_point_id(pid) for pid in point_ids]
+        c.delete(
+            collection_name=self.collection,
+            points_selector=qm.PointIdsList(points=ids),
+        )
+
+    def scroll(
+        self,
+        *,
+        limit: int = 100,
+        filter_payload: dict[str, Any] | None = None,
+        with_payload: bool = True,
+        with_vectors: bool = False,
+        offset: Any | None = None,
+    ) -> tuple[list[qm.Record], Any | None]:
+        """
+        Filter-based retrieval for non-vector queries (e.g. edges by src/dst/relation).
+        Returns (records, next_offset).
+        """
+        qfilter = None
+        if filter_payload:
+            must = []
+            for k, v in filter_payload.items():
+                must.append(qm.FieldCondition(key=k, match=qm.MatchValue(value=v)))
+            qfilter = qm.Filter(must=must)
+        c = self._client()
+        if not hasattr(c, "scroll"):
+            raise RuntimeError("qdrant-client API mismatch: scroll is not available")
+        points, next_offset = c.scroll(  # type: ignore[misc]
+            collection_name=self.collection,
+            scroll_filter=qfilter,
+            limit=int(limit),
+            with_payload=with_payload,
+            with_vectors=with_vectors,
+            offset=offset,
+        )
+        return list(points or []), next_offset

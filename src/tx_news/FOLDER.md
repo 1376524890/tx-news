@@ -34,6 +34,7 @@
 | `dedup/` | 去重层 | MinHash LSH 近重复检索与索引持久化。 |
 | `embedding/` | 向量层 | embedding 模型加载与向量化。 |
 | `integrations/` | 外部集成 | Tushare/AkShare 同步与缓存。 |
+| `kg/` | v2 KG | 规则版知识图谱逻辑（ID、事件快照、边打分、GraphOps schema）。 |
 | `normalize/` | 清洗层 | Readability 抽取正文、发布时间解析。 |
 | `storage/` | 存储层 | Postgres/MinIO/Qdrant 访问封装。 |
 | `tasks/` | 任务编排 | Celery app 与 pipeline/deep/maintenance 任务。 |

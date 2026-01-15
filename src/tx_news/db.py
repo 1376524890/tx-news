@@ -135,3 +135,34 @@ class FeedbackLog(Base):
     kind: Mapped[str] = mapped_column(String(64), nullable=False)  # e.g. graph_node_click / thumbs_up
     data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class KGRun(Base):
+    __tablename__ = "kg_runs"
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)  # uuid string
+    graph_env: Mapped[str] = mapped_column(String(16), nullable=False)  # prod|sandbox
+    trigger_canonical_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)  # running|committed|failed|rolled_back
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class KGOpsLog(Base):
+    __tablename__ = "kg_ops_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("kg_runs.run_id"), nullable=False)
+    phase: Mapped[str] = mapped_column(String(32), nullable=False)  # planner|validator|critic|executor
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class KGSnapshot(Base):
+    __tablename__ = "kg_snapshots"
+
+    snapshot_id: Mapped[str] = mapped_column(String(64), primary_key=True)  # uuid string
+    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("kg_runs.run_id"), nullable=False)
+    graph_env: Mapped[str] = mapped_column(String(16), nullable=False)
+    snapshot_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -40,6 +40,7 @@ from tx_news.storage.postgres import (
 from tx_news.storage.qdrant import QdrantStore, scored_point_canonical_id
 from tx_news.tasks.celery_app import celery_app
 from tx_news.tasks.deep_analysis import deep_optimize
+from tx_news.tasks.kg import kg_update_from_canonical
 
 logger = logging.getLogger(__name__)
 
@@ -369,6 +370,12 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
 
         upsert_analysis(engine, canonical_id, event_type=str(result.get("event_type", event_type)), data=result, llm_used=llm_used)
         insert_signal(engine, canonical_id, "analysis_updated", {"event_type": result.get("event_type", event_type), "event_id": event_id})
+
+        # v2 KG update (best-effort): do not block v1 pipeline on KG failures.
+        try:
+            kg_update_from_canonical.delay(canonical_id)
+        except Exception as e:
+            logger.warning("failed to enqueue kg_update canonical_id=%s err=%s", canonical_id, e)
     finally:
         if got_lock and redis is not None:
             try:

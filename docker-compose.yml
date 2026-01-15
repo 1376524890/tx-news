@@ -160,6 +160,28 @@ services:
       - minio
     restart: unless-stopped
 
+  beat:
+    profiles: ["app"]
+    image: tx-news-worker:local
+    command: ["python", "-m", "celery", "-A", "tx_news.tasks.celery_app.celery_app", "beat", "-l", "INFO"]
+    env_file:
+      - .env
+    environment:
+      <<: *proxy_env
+      TXNEWS_PG_DSN: postgresql+psycopg://txnews:txnews@postgres:5432/txnews
+      TXNEWS_REDIS_URL: redis://redis:6379/0
+      TXNEWS_QDRANT_URL: http://qdrant:6333
+      HF_HOME: /app/var/hf
+    volumes:
+      - ./config:/app/config:ro
+      - ./var/cache:/app/var/cache
+      - hf_cache:/app/var/hf
+    depends_on:
+      - postgres
+      - redis
+      - qdrant
+    restart: unless-stopped
+
   nats-bridge:
     profiles: ["app"]
     image: tx-news-nats-bridge:local

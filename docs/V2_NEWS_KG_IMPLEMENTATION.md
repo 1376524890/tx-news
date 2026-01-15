@@ -39,6 +39,7 @@
   - Event 节点：`event:{event_id}`
   - Ticker 节点：`ticker:{ts_code}`
 - Edge ID：`edge:{src}|{relation}|{dst}`（用于生成确定性 uuid5 point id）
+- Qdrant point_id：`{graph_env}::{item_id}`（保证 sandbox/prod 可同时存在；payload 内保留 `node_id/edge_id` 作为域内稳定 ID）
 
 ---
 
@@ -47,10 +48,11 @@
 ### 1.1 Qdrant collections（固定 3 个）
 
 1) `txnews_event_memory`
-- point_id：`event:{event_id}`
+- point_id：`prod::event:{event_id}` / `sandbox::event:{event_id}`
 - vector：`embedding(snapshot_text)`
 - payload（最小且固定）：
   - `node_type`: `"event"`
+  - `node_id`: `"event:{event_id}"`
   - `event_id`: string
   - `event_type`: string
   - `snapshot_text`: string（<= 2000 chars，规则版生成）
@@ -60,10 +62,11 @@
   - `graph_env`: `"prod"|"sandbox"`
 
 2) `txnews_entity_memory`
-- point_id：`ticker:{ts_code}`
+- point_id：`prod::ticker:{ts_code}` / `sandbox::ticker:{ts_code}`
 - vector：`embedding(description_text)`
 - payload：
   - `node_type`: `"ticker"`
+  - `node_id`: `"ticker:{ts_code}"`
   - `ts_code`: string
   - `name`: string
   - `industry`: string|null
@@ -72,10 +75,11 @@
   - `graph_env`: `"prod"|"sandbox"`
 
 3) `txnews_edge_memory`
-- point_id：`edge:{src}|{relation}|{dst}`
+- point_id：`prod::edge:{src}|{relation}|{dst}` / `sandbox::edge:{src}|{relation}|{dst}`
 - vector：`embedding(reason_text)`
 - payload：
   - `edge_type`: `"edge"`
+  - `edge_id`: `"edge:{src}|{relation}|{dst}"`
   - `src`: string（Node ID，如 `event:...`）
   - `dst`: string（Node ID，如 `ticker:...` 或 `event:...`）
   - `relation`: string（固定集合：`mentions|related_to|evolves_to|retrieval_priority|ignore`）
@@ -106,8 +110,9 @@
 
 ### 2.1 Celery 接入点（强制）
 
-在现有链路 `normalize_raw -> dedup_store -> analyze -> deep_optimize` 之后，强制追加：
-- `kg_update_from_canonical(canonical_id)`
+触发规则（固定）：
+- `pipeline.analyze()` 成功写入 analyses 后：异步触发 `kg_update_from_canonical(canonical_id)`。
+- `deep_analysis.deep_optimize()` 成功写回 analyses 后：再次触发 `kg_update_from_canonical(canonical_id)`（保证 deep 优化后的结构化字段能进入 KG）。
 
 ### 2.2 任务：`kg_update_from_canonical`（规则版、幂等、分钟级）
 
@@ -142,18 +147,24 @@
 2) `kg_reconcile`（每日执行）
 - 对过去 24h 的 `event_id` 重新生成 `snapshot_text`，保证一致性与压缩质量（规则版）。
 
+3) `kg_rollback(snapshot_id)`（运维手段，必须可用）
+- 将 prod 环境的 Qdrant points 回滚到 `kg_snapshots.snapshot_payload.before` 记录的提交前状态（对提交时不存在的点执行删除，对存在的点执行还原 upsert）。
+
+调度方式（固定）：
+- Docker：`docker-compose.yml` 启动 `beat` 服务（`celery beat`），调度规则来自 `src/tx_news/tasks/celery_app.py` 的 `beat_schedule`。
+
 ---
 
 ## 3. GraphOps（v2.2 安全带：计划-执行分离）
 
 GraphOps 在本项目的固定实现：
-- LLM 只允许输出 `GraphOpsPlan JSON`（planner）。
-- Validator 进行 schema/约束/证据校验。
-- Critic 输出 `EvalReport JSON`（KEEP/WEAKEN/REMOVE）。
+- Planner（规则版）输出 `GraphOpsPlan JSON`（节点/边的 UPSERT/DELETE 计划）。
+- Validator 进行 schema/证据校验（拒绝无证据边、空 reason_text、非法 graph_env 等）。
+- Critic 输出 `EvalReport JSON`（当前实现固定 pass，但保留结构与审计记录）。
 - Executor 仅执行 Validator+Critic 通过的 ops；先写 sandbox，再 commit 到 prod。
 
 实现要求（不可省略）：
-- sandbox 与 prod 的隔离：使用 Qdrant payload 字段 `graph_env`（同 collection 分区），并在写入时强制带上。
+- sandbox 与 prod 的隔离：同 collection 内以 `graph_env` 字段过滤 + point_id 以 `{graph_env}::` 前缀隔离（两套点可同时存在）。
 - commit 策略：先写 Postgres 审计（`kg_runs/kg_ops_log/kg_snapshots`），再写 Qdrant；失败必须可重试且幂等。
 
 ---
@@ -170,6 +181,23 @@ GraphOps 在本项目的固定实现：
 ### 4.2 反馈闭环
 
 - `POST /feedback`：body `{kind, data}`（由 cookie uid 归属用户）
+
+### 4.3 Agent 工具（对话固定策略）
+
+对话工具集合（固定；实现于 `src/tx_news/agent/tools.py` 与 `src/tx_news/agent/txnews_agent.py`）：
+- `list_recent(minutes, limit)`：新鲜度校准（必须先调用）
+- `search_entities(q, limit)`：从 `txnews_entity_memory` 检索实体
+- `search_events(q, limit, recent_hours)`：从 `txnews_event_memory` 检索事件快照 + 证据 URL
+- `get_event_neighbors(event_id, limit)`：从 `txnews_edge_memory` 拉取 related_to 邻居事件
+- `explain_connection(event_a, event_b)`：解释事件间连接原因（reason_text + evidence_canonical_ids）
+- `search_news(q, limit)`：v1 文章向量检索（补充证据用）
+- `get_article_analysis(canonical_id)`：补取单条分析
+
+对话执行顺序（固定）：
+1) `list_recent`（minutes=recent_minutes, limit=20）
+2) `search_entities` + `search_events`
+3) 若需要关系/传导链：`get_event_neighbors` / `explain_connection`
+4) 若证据不足：`search_news` + `get_article_analysis`
 
 ---
 
