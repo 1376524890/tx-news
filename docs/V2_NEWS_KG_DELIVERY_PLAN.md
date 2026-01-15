@@ -56,11 +56,13 @@ flowchart TB
   R --> L["LLM Answer<br/>citations + uncertainty"]
 
   %% LLM runtime strategy
-  subgraph LLMRuntime[LLM Runtime]
-    V[Local vLLM (GPU)<br/>llm.deep]:::llm
-    O[Online LLM (CPU fallback)<br/>llm.chat]:::llm
+  subgraph LLMRuntime["LLM Runtime"]
+    %% Avoid the newer `:::class` shorthand for compatibility with older Mermaid renderers.
+    V["Local vLLM (GPU)<br/>llm.deep"]
+    O["Online LLM (CPU fallback)<br/>llm.chat"]
   end
   classDef llm fill:#eef,stroke:#99f,stroke-width:1px;
+  class V,O llm;
 
   A -.-> V
   A -.-> O
