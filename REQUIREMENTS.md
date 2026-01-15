@@ -21,7 +21,7 @@ If you are in Mainland China and Docker build/pulls are slow, you can enable mir
 - **pip/npm/apt (build-time)**: set in `.env` (see `.env.example`):
   - `TXNEWS_PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/`
   - `TXNEWS_PIP_TRUSTED_HOST=mirrors.aliyun.com`
-  - `TXNEWS_NPM_REGISTRY=https://registry.npmmirror.com`
+  - `TXNEWS_NPM_REGISTRY=https://registry.npmjs.org/` (default; override to `https://registry.npmmirror.com` if needed)
   - `TXNEWS_DEBIAN_MIRROR=http://mirrors.aliyun.com/debian`
   - `TXNEWS_DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security`
 

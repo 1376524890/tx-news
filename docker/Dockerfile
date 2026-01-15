@@ -17,7 +17,17 @@ FROM node:${NODE_VERSION}-alpine AS web-build
 ARG NPM_REGISTRY
 WORKDIR /app/apps/web
 COPY apps/web/package*.json ./
-RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi
+RUN if [ -n "$NPM_REGISTRY" ]; then \
+      npm config set registry "$NPM_REGISTRY"; \
+      # `npm ci` prefers `package-lock.json`'s `resolved` URLs; rewrite them so mirrors actually take effect.
+      reg="${NPM_REGISTRY%/}/"; \
+      sed -i "s#https://registry.npmjs.org/#${reg}#g" package-lock.json; \
+    fi \
+    # Reduce flakiness in CI/remote Docker builds.
+    && npm config set fetch-retries 5 \
+    && npm config set fetch-retry-factor 2 \
+    && npm config set fetch-retry-mintimeout 20000 \
+    && npm config set fetch-retry-maxtimeout 120000
 RUN npm ci --no-audit --no-fund
 COPY apps/web/ ./
 RUN npm run build:all

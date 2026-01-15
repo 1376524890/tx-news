@@ -10,6 +10,7 @@
 - Vue 3 + Vite + TypeScript 单页应用（SPA）。
 - 替代原 `apps/api/static`，提供更丰富的交互与动态更新。
 - 构建后产物位于 `dist_public/`（对话/看板/配置入口）与 `dist_admin/`（可选独立配置页），分别由 8000/8001 服务挂载。
+- 看板页包含三维知识图谱可视化组件（Three.js），用于实时渲染 KG 节点与连接关系。
 
 ## 文件
 
@@ -19,7 +20,8 @@
 | `src/main.ts` | 入口 | 挂载 Vue 应用与 Router。 |
 | `src/router/` | 路由 | 构建模式区分：public UI `/`（对话）+ `/dashboard`（看板）+ `/config`（配置）；admin UI `/`（配置）。 |
 | `src/views/` | 页面 | `ChatView.vue`（对话）、`DashboardView.vue`（看板）、`ConfigView.vue`（配置）；`AdminView.vue` 为 legacy。 |
-| `src/components/` | 组件 | 通用组件（如 `TimeSeriesChart.vue` 折线图）。 |
+| `src/components/` | 组件 | 通用组件（如 `TimeSeriesChart.vue` 折线图、`KG3DGraph.vue` 三维知识图谱）。 |
 | `src/style.css` | 样式 | 全局样式（移植自原 static/style.css）。 |
 | `package.json` | 依赖 | Vue, Vite, vue-router, marked 等。 |
+| `package-lock.json` | 锁文件 | 固化 npm 依赖解析；用于 Docker `npm ci` 的确定性构建。 |
 | `vite.config.ts` | 配置 | 开发代理与构建配置。 |
