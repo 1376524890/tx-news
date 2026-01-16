@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Input: .run/local/*.pid +（可选）docker compose（仅 infra）
-# Output: 停止 start_local.sh 启动的宿主机进程；可选停止 infra 容器
+# Output: 停止 start_local.sh 启动的宿主机进程（含 vLLM）；可选停止 infra 容器
 # Pos: 运维入口（本地非 Docker 主程序一键停止）（变更时同步更新以上注释与所属目录 FOLDER.md）
 set -euo pipefail
 
@@ -10,15 +10,25 @@ cd "${ROOT_DIR}"
 have() { command -v "$1" >/dev/null 2>&1; }
 
 compose() {
-  if have docker && docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    docker compose "$@"
-    return
+  if have docker; then
+    if docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+      docker compose "$@"
+      return
+    fi
+    if have sudo && sudo -n docker info >/dev/null 2>&1 && sudo -n docker compose version >/dev/null 2>&1; then
+      sudo docker compose "$@"
+      return
+    fi
   fi
   if have docker-compose; then
     docker-compose "$@"
     return
   fi
-  echo "docker compose not available in this shell." >&2
+  if have sudo && have docker-compose && sudo -n docker-compose version >/dev/null 2>&1; then
+    sudo docker-compose "$@"
+    return
+  fi
+  echo "docker compose not available (install Docker + Compose; or run with sudo / add user to docker group)" >&2
   return 2
 }
 
