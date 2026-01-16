@@ -9,7 +9,7 @@
 架构（≤3行）：
 - FastAPI 对外提供检索/对话等用户侧 HTTP 接口（8000）。
 - 静态挂载 `apps/web/dist_public` 作为用户侧 UI（对话 `/`、看板 `/dashboard`、配置 `/config`；不提供运维管理台 UI）。
-- LLM：默认读取 `llm.chat`；也支持从 cookie 用户标识在 Redis 中读取“个人在线 LLM 配置”；对话默认不回退本地 vLLM（如需启用，显式设置 `TXNEWS_CHAT_ALLOW_DEEP_FALLBACK=1`）。
+- LLM：默认读取 `llm.chat`；也支持从 cookie 用户标识在 Redis 中读取“个人在线 LLM 配置”；对话默认不回退本地 vLLM（如需启用，显式设置 `TXNEWS_CHAT_ALLOW_DEEP_FALLBACK=1`，在线 LLM 网络/鉴权/计费失败时可自动切换）。
  - 主数据：当 `a_share_basic` 为空且存在本地缓存时，可在查询时自动引导一次（避免“首次启动 DB 为空”导致画像缺失）。
 
 补充：
