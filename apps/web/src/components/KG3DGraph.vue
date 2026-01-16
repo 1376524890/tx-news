@@ -1,12 +1,9 @@
-<!-- Input: /kg/graph（轮询）+ 用户交互（点击/反馈） -->
-<!-- Output: Three.js 3D 知识图谱可视化（实时刷新） -->
-<!-- Pos: 3D 图谱组件（变更时同步更新以上注释与所属目录 FOLDER.md） -->
+<!-- Input: /kg/graph（轮询）+ 用户交互（点击/悬浮/反馈） -->
+<!-- Output: 2D 平面知识图谱可视化（实时刷新） -->
+<!-- Pos: 图谱组件（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import * as THREE from 'three'
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { CSS2DObject, CSS2DRenderer } from 'three/examples/jsm/renderers/CSS2DRenderer.js'
 
 type KgNodeBase = {
   id: string
@@ -54,6 +51,42 @@ type KgGraph = {
   stats?: { events?: number; tickers?: number; links?: number }
 }
 
+type LayoutNode = {
+  id: string
+  kind: KgNode['kind']
+  label: string
+  count: number
+  x: number
+  y: number
+  r: number
+  color: string
+}
+
+type LayoutEdge = {
+  key: string
+  link: KgLink
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+  width: number
+  color: string
+}
+
+type LayoutState = {
+  nodes: LayoutNode[]
+  edges: LayoutEdge[]
+}
+
+type HoverState = {
+  kind: 'node' | 'edge'
+  id: string
+  title: string
+  lines: string[]
+  x: number
+  y: number
+}
+
 const props = defineProps<{
   minutes: number
   pollMs?: number
@@ -65,6 +98,9 @@ const graph = ref<KgGraph | null>(null)
 const error = ref<string | null>(null)
 const selected = ref<KgNode | null>(null)
 const selectedEdge = ref<KgLink | null>(null)
+const hover = ref<HoverState | null>(null)
+const layout = ref<LayoutState>({ nodes: [], edges: [] })
+const size = ref({ width: 1, height: 1 })
 
 const nodeById = computed(() => {
   const m = new Map<string, KgNode>()
@@ -93,6 +129,11 @@ const selectedEdgeInfo = computed(() => {
   const evidence = (l.evidence || []).map((cid) => canonicalById.value.get(String(cid)) || { canonical_id: cid, title: null, url: null })
   return { link: l, source: src, target: tgt, evidence }
 })
+
+const selectedNodeId = computed(() => selected.value?.id || null)
+const selectedEdgeKey = computed(() => (selectedEdge.value ? edgeKey(selectedEdge.value) : null))
+const hoveredNodeId = computed(() => (hover.value?.kind === 'node' ? hover.value.id : null))
+const hoveredEdgeKey = computed(() => (hover.value?.kind === 'edge' ? hover.value.id : null))
 
 async function api<T>(path: string): Promise<T> {
   const res = await fetch(path, { cache: 'no-store' })
@@ -128,63 +169,19 @@ async function refresh() {
   }
 }
 
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v))
+}
+
 function hash01(s: string): number {
-  // Deterministic [0,1) hash for stable layout.
   let h = 2166136261
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619)
   return ((h >>> 0) % 1000000) / 1000000
 }
 
-function unitVecFromId(id: string): THREE.Vector3 {
-  const a = hash01(id + '|a') * Math.PI * 2
-  const z = hash01(id + '|z') * 2 - 1
-  const r = Math.sqrt(Math.max(0, 1 - z * z))
-  return new THREE.Vector3(r * Math.cos(a), r * Math.sin(a), z)
-}
-
-function sphereLayout(i: number, n: number): THREE.Vector3 {
-  // Golden spiral on a unit sphere.
-  const k = i + 0.5
-  const phi = Math.acos(1 - (2 * k) / n)
-  const theta = Math.PI * (1 + Math.sqrt(5)) * k
-  return new THREE.Vector3(
-    Math.cos(theta) * Math.sin(phi),
-    Math.sin(theta) * Math.sin(phi),
-    Math.cos(phi)
-  )
-}
-
-type RenderState = {
-  scene: THREE.Scene
-  camera: THREE.PerspectiveCamera
-  renderer: THREE.WebGLRenderer
-  labelRenderer: CSS2DRenderer
-  controls: OrbitControls
-  raycaster: THREE.Raycaster
-  eventsMesh: THREE.InstancedMesh
-  tickersMesh: THREE.InstancedMesh
-  edgesMesh: THREE.InstancedMesh
-  nodeIdsByInstance: { events: string[]; tickers: string[] }
-  nodeMetaById: Map<string, KgNode>
-  edgeMetaByInstance: KgLink[]
-  labelsById: Map<string, CSS2DObject>
-  pointerDownHandler: ((ev: PointerEvent) => void) | null
-  animId: number | null
-  resizeObs: ResizeObserver | null
-}
-
-let st: RenderState | null = null
-
-function disposeRenderer() {
-  if (!st) return
-  if (st.animId != null) cancelAnimationFrame(st.animId)
-  st.resizeObs?.disconnect()
-  st.controls.dispose()
-  if (st.pointerDownHandler) st.renderer.domElement.removeEventListener('pointerdown', st.pointerDownHandler)
-  st.renderer.dispose()
-  st.labelRenderer.domElement.remove()
-  st.scene.clear()
-  st = null
+function nodeLabel(n: KgNode): string {
+  if (n.kind === 'event') return String(n.event_type || n.label || n.event_id || n.id).trim() || n.id
+  return String(n.ts_code || n.label || n.id).trim() || n.id
 }
 
 function relationZh(relation: string): string {
@@ -193,223 +190,35 @@ function relationZh(relation: string): string {
   return relation || '-'
 }
 
-function buildScene(el: HTMLDivElement) {
-  const scene = new THREE.Scene()
-
-  const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 5000)
-  camera.position.set(0, 120, 240)
-
-  // Make sure we can overlay labels on top of the canvas.
-  el.style.position = 'relative'
-
-  const renderer = new THREE.WebGLRenderer({
-    antialias: true,
-    alpha: true,
-    powerPreference: 'high-performance'
-  })
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
-  renderer.setClearColor(0x000000, 0)
-  el.appendChild(renderer.domElement)
-
-  const labelRenderer = new CSS2DRenderer()
-  labelRenderer.domElement.style.position = 'absolute'
-  labelRenderer.domElement.style.top = '0'
-  labelRenderer.domElement.style.left = '0'
-  labelRenderer.domElement.style.pointerEvents = 'none'
-  el.appendChild(labelRenderer.domElement)
-
-  const controls = new OrbitControls(camera, renderer.domElement)
-  controls.enableDamping = true
-  controls.dampingFactor = 0.08
-  controls.minDistance = 80
-  controls.maxDistance = 900
-  controls.rotateSpeed = 0.65
-
-  // Subtle ambient + rim.
-  scene.add(new THREE.AmbientLight(0xffffff, 0.65))
-  const dir = new THREE.DirectionalLight(0xffffff, 0.9)
-  dir.position.set(2, 3, 4)
-  scene.add(dir)
-
-  // "Star field" backdrop.
-  const starsGeom = new THREE.BufferGeometry()
-  const starsN = 1200
-  const stars = new Float32Array(starsN * 3)
-  for (let i = 0; i < starsN; i++) {
-    const v = unitVecFromId(`star:${i}`)
-    v.multiplyScalar(900 + hash01(`star:r:${i}`) * 900)
-    stars[i * 3 + 0] = v.x
-    stars[i * 3 + 1] = v.y
-    stars[i * 3 + 2] = v.z
+function relationColor(relation: string): string {
+  const r = String(relation || '').trim().toLowerCase()
+  const mapped: Record<string, string> = {
+    mentions: '#60a5fa',
+    related: '#f59e0b',
+    co_occurs: '#f472b6',
+    causes: '#22c55e'
   }
-  starsGeom.setAttribute('position', new THREE.BufferAttribute(stars, 3))
-  const starsMat = new THREE.PointsMaterial({
-    size: 1.2,
-    color: 0x8aa4ff,
-    transparent: true,
-    opacity: 0.16,
-    depthWrite: false
-  })
-  scene.add(new THREE.Points(starsGeom, starsMat))
-
-  const sphere = new THREE.SphereGeometry(1, 16, 16)
-
-  const eventsMesh = new THREE.InstancedMesh(
-    sphere,
-    new THREE.MeshStandardMaterial({
-      vertexColors: true,
-      metalness: 0.12,
-      roughness: 0.35,
-      emissive: new THREE.Color(0x7c3aed),
-      emissiveIntensity: 0.28
-    }),
-    1
-  )
-  eventsMesh.frustumCulled = false
-  const tickersMesh = new THREE.InstancedMesh(
-    sphere,
-    new THREE.MeshStandardMaterial({
-      vertexColors: true,
-      metalness: 0.08,
-      roughness: 0.45,
-      emissive: new THREE.Color(0x22c55e),
-      emissiveIntensity: 0.22
-    }),
-    1
-  )
-  tickersMesh.frustumCulled = false
-
-  // Edges: use instanced cylinders (LineBasicMaterial lineWidth is ignored on most platforms).
-  const edgeGeom = new THREE.CylinderGeometry(1, 1, 1, 6, 1, true)
-  const edgesMesh = new THREE.InstancedMesh(
-    edgeGeom,
-    new THREE.MeshBasicMaterial({
-      vertexColors: true,
-      transparent: true,
-      opacity: 0.72,
-      depthWrite: false
-    }),
-    1
-  )
-  edgesMesh.frustumCulled = false
-  scene.add(edgesMesh)
-  scene.add(eventsMesh)
-  scene.add(tickersMesh)
-
-  const raycaster = new THREE.Raycaster()
-  raycaster.params.Points = { threshold: 4 }
-
-  const nodeIdsByInstance = { events: [] as string[], tickers: [] as string[] }
-  const nodeMetaById = new Map<string, KgNode>()
-  const edgeMetaByInstance: KgLink[] = []
-  const labelsById = new Map<string, CSS2DObject>()
-
-  const resize = () => {
-    const { width, height } = el.getBoundingClientRect()
-    const w = Math.max(1, Math.floor(width))
-    const h = Math.max(1, Math.floor(height))
-    camera.aspect = w / h
-    camera.updateProjectionMatrix()
-    renderer.setSize(w, h, false)
-    labelRenderer.setSize(w, h)
-  }
-  resize()
-  const resizeObs = new ResizeObserver(() => resize())
-  resizeObs.observe(el)
-
-  const onPointerDown = (ev: PointerEvent) => {
-    if (!st) return
-    const rect = el.getBoundingClientRect()
-    const x = ((ev.clientX - rect.left) / rect.width) * 2 - 1
-    const y = -(((ev.clientY - rect.top) / rect.height) * 2 - 1)
-    raycaster.setFromCamera(new THREE.Vector2(x, y), camera)
-
-    const edgeHits = raycaster.intersectObject(edgesMesh, true)
-    const nodeHits = [
-      ...raycaster.intersectObject(eventsMesh, true),
-      ...raycaster.intersectObject(tickersMesh, true)
-    ]
-
-    if (!edgeHits.length && !nodeHits.length) {
-      selected.value = null
-      selectedEdge.value = null
-      return
-    }
-
-    edgeHits.sort((a, b) => (a.distance || 0) - (b.distance || 0))
-    nodeHits.sort((a, b) => (a.distance || 0) - (b.distance || 0))
-
-    // UX: prefer selecting nodes when the click is near a node, even if a thick edge is also hit.
-    const nearestEdge = edgeHits[0]
-    const nearestNode = nodeHits[0]
-    const preferNode = Boolean(nearestNode && (!nearestEdge || nearestNode.distance <= nearestEdge.distance + 2))
-
-    const h0 = (preferNode ? nearestNode : nearestEdge)!
-    const instanceId = (h0 as any).instanceId as number | undefined
-    const obj = h0.object
-
-    if (typeof instanceId === 'number') {
-      if (!preferNode && obj === edgesMesh) {
-        const link = st.edgeMetaByInstance[instanceId] || null
-        if (!link) return
-        selectedEdge.value = link
-        selected.value = null
-        sendFeedback('kg_graph_edge_click', {
-          minutes: props.minutes,
-          relation: link.relation,
-          source: link.source,
-          target: link.target,
-          weight: link.weight
-        })
-        return
-      }
-
-      let nodeId: string | null = null
-      if (obj === eventsMesh) nodeId = nodeIdsByInstance.events[instanceId] || null
-      else if (obj === tickersMesh) nodeId = nodeIdsByInstance.tickers[instanceId] || null
-      if (!nodeId) return
-      const node = nodeMetaById.get(nodeId) || null
-      if (!node) return
-      selected.value = node
-      selectedEdge.value = null
-      sendFeedback('kg_graph_node_click', { minutes: props.minutes, node_id: node.id, kind: node.kind })
-    }
-  }
-  renderer.domElement.addEventListener('pointerdown', onPointerDown)
-
-  const tick = () => {
-    controls.update()
-    renderer.render(scene, camera)
-    labelRenderer.render(scene, camera)
-    if (st) st.animId = requestAnimationFrame(tick)
-  }
-  const animId = requestAnimationFrame(tick)
-
-  st = {
-    scene,
-    camera,
-    renderer,
-    labelRenderer,
-    controls,
-    raycaster,
-    eventsMesh,
-    tickersMesh,
-    edgesMesh,
-    nodeIdsByInstance,
-    nodeMetaById,
-    edgeMetaByInstance,
-    labelsById,
-    pointerDownHandler: onPointerDown,
-    animId,
-    resizeObs
-  }
+  if (mapped[r]) return mapped[r]
+  const palette = ['#94a3b8', '#c084fc', '#38bdf8', '#facc15', '#34d399', '#fb7185']
+  const idx = Math.floor(hash01(r) * palette.length) % palette.length
+  return palette[idx] || '#94a3b8'
 }
 
-function updateGraphRender(g: KgGraph | null) {
-  if (!st || !g) return
+function edgeKey(l: KgLink): string {
+  return `${l.source}|${l.target}|${l.relation}`
+}
+
+function layoutGraph(g: KgGraph | null, width: number, height: number): LayoutState {
+  if (!g || width < 10 || height < 10) return { nodes: [], edges: [] }
 
   const nodes = g.nodes || []
   const links = g.links || []
+  const w = Math.max(1, width)
+  const h = Math.max(1, height)
+  const cx = w / 2
+  const cy = h / 2
+  const padding = 70
+  const seedRadius = Math.min(w, h) * 0.33
 
   const events = nodes.filter((n) => n.kind === 'event') as KgEventNode[]
   const tickers = nodes.filter((n) => n.kind === 'ticker') as KgTickerNode[]
@@ -417,206 +226,380 @@ function updateGraphRender(g: KgGraph | null) {
   events.sort((a, b) => String(a.event_id).localeCompare(String(b.event_id)))
   tickers.sort((a, b) => String(a.ts_code).localeCompare(String(b.ts_code)))
 
-  st.nodeMetaById.clear()
-  for (const n of nodes) st.nodeMetaById.set(n.id, n)
+  const positions = new Map<string, { x: number; y: number }>()
+  const kindById = new Map<string, KgNode['kind']>()
+  for (const n of nodes) kindById.set(n.id, n.kind)
 
-  const eventPos = new Map<string, THREE.Vector3>()
-  const eventRadius = 120
+  const eventCount = Math.max(1, events.length)
   for (let i = 0; i < events.length; i++) {
-    const v = sphereLayout(i, Math.max(1, events.length)).multiplyScalar(eventRadius)
-    eventPos.set(events[i]!.id, v)
+    const e = events[i]!
+    const angle = (i / eventCount) * Math.PI * 2 + hash01(`event:${e.id}`) * 0.3
+    const r = seedRadius * (0.92 + hash01(`event:r:${e.id}`) * 0.12)
+    const x = cx + Math.cos(angle) * r
+    const y = cy + Math.sin(angle) * r
+    positions.set(e.id, { x, y })
   }
 
-  // Build adjacency for tickers -> related event positions.
   const tickerEvents = new Map<string, string[]>()
-  for (const e of links) {
-    if (typeof e.source !== 'string' || typeof e.target !== 'string') continue
-    if (!e.source.startsWith('event:')) continue
-    if (!e.target.startsWith('ticker:')) continue
-    const xs = tickerEvents.get(e.target) || []
-    xs.push(e.source)
-    tickerEvents.set(e.target, xs)
+  for (const l of links) {
+    const s = String(l.source)
+    const t = String(l.target)
+    const sKind = kindById.get(s)
+    const tKind = kindById.get(t)
+    if (sKind === 'event' && tKind === 'ticker') {
+      const arr = tickerEvents.get(t) || []
+      arr.push(s)
+      tickerEvents.set(t, arr)
+      continue
+    }
+    if (tKind === 'event' && sKind === 'ticker') {
+      const arr = tickerEvents.get(s) || []
+      arr.push(t)
+      tickerEvents.set(s, arr)
+    }
   }
 
-  const tickerPos = new Map<string, THREE.Vector3>()
   for (const t of tickers) {
-    const evs = tickerEvents.get(t.id) || []
-    const base = new THREE.Vector3(0, 0, 0)
-    let n = 0
-    for (const eid of evs) {
-      const p = eventPos.get(eid)
-      if (!p) continue
-      base.add(p)
-      n++
+    const related = tickerEvents.get(t.id) || []
+    let x = cx
+    let y = cy
+    if (related.length) {
+      let n = 0
+      for (const eid of related) {
+        const pos = positions.get(eid)
+        if (!pos) continue
+        x += pos.x
+        y += pos.y
+        n += 1
+      }
+      if (n > 0) {
+        x /= n
+        y /= n
+      }
+    } else {
+      const angle = hash01(`ticker:angle:${t.id}`) * Math.PI * 2
+      const r = seedRadius * 0.62
+      x = cx + Math.cos(angle) * r
+      y = cy + Math.sin(angle) * r
     }
-    if (n > 0) base.multiplyScalar(1 / n)
-    else base.copy(unitVecFromId(t.id).multiplyScalar(eventRadius * 0.65))
-    base.add(unitVecFromId(t.id).multiplyScalar(18 + hash01(t.id) * 22))
-    tickerPos.set(t.id, base)
+
+    const jitterAngle = hash01(`ticker:j:${t.id}`) * Math.PI * 2
+    const jitterRadius = 16 + hash01(`ticker:r:${t.id}`) * 28
+    x += Math.cos(jitterAngle) * jitterRadius
+    y += Math.sin(jitterAngle) * jitterRadius
+
+    positions.set(t.id, {
+      x: clamp(x, padding, w - padding),
+      y: clamp(y, padding, h - padding)
+    })
   }
 
-  // Resize instanced meshes.
-  st.eventsMesh.count = events.length
-  st.tickersMesh.count = tickers.length
-  st.eventsMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-  st.tickersMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-
-  st.nodeIdsByInstance.events = events.map((e) => e.id)
-  st.nodeIdsByInstance.tickers = tickers.map((t) => t.id)
-
-  const tmpMat = new THREE.Matrix4()
-  const tmpPos = new THREE.Vector3()
-  const tmpScale = new THREE.Vector3()
-  const tmpQuat = new THREE.Quaternion()
-
-  for (let i = 0; i < events.length; i++) {
-    const e = events[i]!
-    const p = eventPos.get(e.id) || new THREE.Vector3()
-    const c = Math.min(40, Math.max(1, Number(e.count || 1)))
-    const s = 2.4 + Math.sqrt(c) * 0.35
-    tmpPos.copy(p)
-    tmpScale.set(s, s, s)
-    tmpMat.compose(tmpPos, tmpQuat, tmpScale)
-    st.eventsMesh.setMatrixAt(i, tmpMat)
+  const fallbackRadius = Math.min(w, h) * 0.18
+  for (const n of nodes) {
+    if (positions.has(n.id)) continue
+    const angle = hash01(`fallback:${n.id}`) * Math.PI * 2
+    const r = fallbackRadius + hash01(`fallback:r:${n.id}`) * 18
+    positions.set(n.id, {
+      x: clamp(cx + Math.cos(angle) * r, padding, w - padding),
+      y: clamp(cy + Math.sin(angle) * r, padding, h - padding)
+    })
   }
-  st.eventsMesh.instanceMatrix.needsUpdate = true
 
-  for (let i = 0; i < tickers.length; i++) {
-    const t = tickers[i]!
-    const p = tickerPos.get(t.id) || new THREE.Vector3()
-    const c = Math.min(80, Math.max(1, Number(t.count || 1)))
-    const s = 1.25 + Math.sqrt(c) * 0.12
-    tmpPos.copy(p)
-    tmpScale.set(s, s, s)
-    tmpMat.compose(tmpPos, tmpQuat, tmpScale)
-    st.tickersMesh.setMatrixAt(i, tmpMat)
+  const eventColor = '#a78bfa'
+  const tickerColor = '#34d399'
+  const otherColor = '#94a3b8'
+
+  const simNodes = nodes.map((n) => {
+    const pos = positions.get(n.id) || { x: cx, y: cy }
+    const count = Math.max(1, Number(n.count || 1))
+    const base = n.kind === 'event' ? 7.5 : 5.5
+    const gain = n.kind === 'event' ? 1.8 : 1.2
+    const r = clamp(base + Math.sqrt(count) * gain, n.kind === 'event' ? 7 : 4.5, n.kind === 'event' ? 20 : 14)
+    return {
+      id: n.id,
+      kind: n.kind,
+      label: nodeLabel(n),
+      count,
+      r,
+      color: n.kind === 'event' ? eventColor : n.kind === 'ticker' ? tickerColor : otherColor,
+      x: pos.x,
+      y: pos.y,
+      vx: 0,
+      vy: 0
+    }
+  })
+
+  const simById = new Map<string, (typeof simNodes)[number]>()
+  for (const n of simNodes) simById.set(n.id, n)
+
+  const iterations = Math.min(280, 140 + nodes.length * 4)
+  let alpha = 1
+  const alphaDecay = 0.02
+  const damping = 0.86
+  const chargeStrength = 2200
+  const centerStrength = 0.08
+  const clusterStrength = 0.12
+  const linkStrength = 0.08
+  const collisionPadding = 8
+
+  const linkDistance = (l: KgLink, a: (typeof simNodes)[number], b: (typeof simNodes)[number]) => {
+    const same = a.kind === b.kind
+    const base = same ? 120 : 240
+    const weight = Math.max(1, Number(l.weight || 1))
+    const scaled = base / (1 + Math.log1p(weight) * 0.28)
+    return clamp(scaled, same ? 80 : 140, same ? 170 : 280)
   }
-  st.tickersMesh.instanceMatrix.needsUpdate = true
 
-  // Links (instanced cylinders).
-  const allowed = new Map<string, THREE.Vector3>([...eventPos.entries(), ...tickerPos.entries()])
+  for (let step = 0; step < iterations; step++) {
+    alpha *= 1 - alphaDecay
+    const centers = new Map<string, { x: number; y: number; n: number }>()
+    for (const n of simNodes) {
+      const key = n.kind
+      const c = centers.get(key) || { x: 0, y: 0, n: 0 }
+      c.x += n.x
+      c.y += n.y
+      c.n += 1
+      centers.set(key, c)
+    }
+    for (const c of centers.values()) {
+      c.x /= Math.max(1, c.n)
+      c.y /= Math.max(1, c.n)
+    }
 
-  const selectedNodeId = selected.value?.id || null
-  const selectedEdgeKey = selectedEdge.value
-    ? `${selectedEdge.value.source}|${selectedEdge.value.target}|${selectedEdge.value.relation}`
-    : null
+    for (let i = 0; i < simNodes.length; i++) {
+      const a = simNodes[i]!
+      for (let j = i + 1; j < simNodes.length; j++) {
+        const b = simNodes[j]!
+        const dx = b.x - a.x
+        const dy = b.y - a.y
+        const dist2 = dx * dx + dy * dy + 0.01
+        const dist = Math.sqrt(dist2)
+        const force = (chargeStrength * alpha) / dist2
+        const fx = (dx / dist) * force
+        const fy = (dy / dist) * force
+        a.vx -= fx
+        a.vy -= fy
+        b.vx += fx
+        b.vy += fy
 
-  st.edgesMesh.count = links.length
-  st.edgesMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-  st.edgeMetaByInstance.length = 0
-  st.edgeMetaByInstance.push(...links)
+        const minDist = a.r + b.r + collisionPadding
+        if (dist < minDist) {
+          const push = (minDist - dist) * 0.55
+          const px = (dx / dist) * push
+          const py = (dy / dist) * push
+          a.vx -= px
+          a.vy -= py
+          b.vx += px
+          b.vy += py
+        }
+      }
+    }
 
-  const up = new THREE.Vector3(0, 1, 0)
-  const dir = new THREE.Vector3()
-  const mid = new THREE.Vector3()
-  const tmpCol = new THREE.Color()
-  const baseEdge = new THREE.Color(0x60a5fa)
-  const dimEdge = new THREE.Color(0x334155)
+    for (const l of links) {
+      const s = simById.get(String(l.source))
+      const t = simById.get(String(l.target))
+      if (!s || !t) continue
+      const dx = t.x - s.x
+      const dy = t.y - s.y
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1
+      const desired = linkDistance(l, s, t)
+      const diff = dist - desired
+      const strength = linkStrength * alpha
+      const fx = (dx / dist) * diff * strength
+      const fy = (dy / dist) * diff * strength
+      s.vx += fx
+      s.vy += fy
+      t.vx -= fx
+      t.vy -= fy
+    }
 
-  for (let i = 0; i < links.length; i++) {
-    const l = links[i]!
-    const a = allowed.get(String(l.source))
-    const b = allowed.get(String(l.target))
-    if (!a || !b) continue
-
-    dir.copy(b).sub(a)
-    const len = Math.max(0.001, dir.length())
-    mid.copy(a).add(b).multiplyScalar(0.5)
-
-    // Thickness: make edges visually prominent; weight increases thickness slightly.
-    const w = Math.max(1, Number(l.weight || 1))
-    let r = 0.32 + Math.min(0.65, Math.sqrt(w) * 0.08)
-
-    const edgeKey = `${l.source}|${l.target}|${l.relation}`
-    const isSelected = selectedEdgeKey && edgeKey === selectedEdgeKey
-    const isIncident = selectedNodeId
-      ? String(l.source) === selectedNodeId || String(l.target) === selectedNodeId
-      : false
-
-    if (isSelected) r *= 1.7
-    else if (selectedNodeId && !isIncident) r *= 0.65
-
-    tmpScale.set(r, len, r)
-    tmpPos.copy(mid)
-    tmpQuat.setFromUnitVectors(up, dir.normalize())
-    tmpMat.compose(tmpPos, tmpQuat, tmpScale)
-    st.edgesMesh.setMatrixAt(i, tmpMat)
-
-    if (isSelected) tmpCol.set(0xfbbf24)
-    else if (selectedNodeId && !isIncident) tmpCol.copy(dimEdge)
-    else tmpCol.copy(baseEdge).offsetHSL(0, 0, Math.min(0.22, Math.log1p(w) * 0.06))
-    st.edgesMesh.setColorAt(i, tmpCol)
-  }
-  st.edgesMesh.instanceMatrix.needsUpdate = true
-  if (st.edgesMesh.instanceColor) st.edgesMesh.instanceColor.needsUpdate = true
-
-  // Node colors + labels.
-  const active = new Set(nodes.map((n) => n.id))
-  for (const [id, obj] of st.labelsById.entries()) {
-    if (!active.has(id)) {
-      st.scene.remove(obj)
-      obj.element.remove()
-      st.labelsById.delete(id)
+    for (const n of simNodes) {
+      const c = centers.get(n.kind)
+      if (c) {
+        n.vx += (c.x - n.x) * clusterStrength * alpha
+        n.vy += (c.y - n.y) * clusterStrength * alpha
+      }
+      n.vx += (cx - n.x) * centerStrength * alpha
+      n.vy += (cy - n.y) * centerStrength * alpha
+      n.vx *= damping
+      n.vy *= damping
+      n.x += n.vx
+      n.y += n.vy
+      n.x = clamp(n.x, padding, w - padding)
+      n.y = clamp(n.y, padding, h - padding)
     }
   }
 
-  const eventCol = new THREE.Color(0xa78bfa)
-  const tickerCol = new THREE.Color(0x34d399)
-  const dimNode = new THREE.Color(0x475569)
-
-  for (let i = 0; i < events.length; i++) {
-    const e = events[i]!
-    const isSel = selected.value?.id === e.id
-    const c = Math.min(40, Math.max(1, Number(e.count || 1)))
-    const s = (2.6 + Math.sqrt(c) * 0.4) * (isSel ? 1.22 : 1.0)
-    st.eventsMesh.getMatrixAt(i, tmpMat)
-    tmpMat.decompose(tmpPos, tmpQuat, tmpScale)
-    tmpScale.set(s, s, s)
-    tmpMat.compose(tmpPos, tmpQuat, tmpScale)
-    st.eventsMesh.setMatrixAt(i, tmpMat)
-    st.eventsMesh.setColorAt(i, selectedNodeId && !isSel ? dimNode : eventCol)
-
-    const labelText = String(e.event_type || e.label || e.event_id || '').trim() || e.id
-    const obj = st.labelsById.get(e.id) || null
-    const div = obj ? (obj.element as HTMLDivElement) : document.createElement('div')
-    if (!obj) {
-      div.className = 'kg3d-label kg3d-label--event'
-      const o = new CSS2DObject(div)
-      st.labelsById.set(e.id, o)
-      st.scene.add(o)
-    }
-    div.textContent = labelText
-    st.labelsById.get(e.id)!.position.copy(tmpPos).add(new THREE.Vector3(0, s * 1.15, 0))
+  let minX = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  let maxY = Number.NEGATIVE_INFINITY
+  for (const n of simNodes) {
+    minX = Math.min(minX, n.x)
+    maxX = Math.max(maxX, n.x)
+    minY = Math.min(minY, n.y)
+    maxY = Math.max(maxY, n.y)
   }
-  st.eventsMesh.instanceMatrix.needsUpdate = true
-  if (st.eventsMesh.instanceColor) st.eventsMesh.instanceColor.needsUpdate = true
+  const spanX = Math.max(1, maxX - minX)
+  const spanY = Math.max(1, maxY - minY)
+  let scale = Math.min((w - 2 * padding) / spanX, (h - 2 * padding) / spanY)
+  if (!Number.isFinite(scale) || scale <= 0) scale = 1
 
-  for (let i = 0; i < tickers.length; i++) {
-    const t = tickers[i]!
-    const isSel = selected.value?.id === t.id
-    const c = Math.min(80, Math.max(1, Number(t.count || 1)))
-    const s = (1.35 + Math.sqrt(c) * 0.14) * (isSel ? 1.25 : 1.0)
-    st.tickersMesh.getMatrixAt(i, tmpMat)
-    tmpMat.decompose(tmpPos, tmpQuat, tmpScale)
-    tmpScale.set(s, s, s)
-    tmpMat.compose(tmpPos, tmpQuat, tmpScale)
-    st.tickersMesh.setMatrixAt(i, tmpMat)
-    st.tickersMesh.setColorAt(i, selectedNodeId && !isSel ? dimNode : tickerCol)
-
-    const labelText = String(t.ts_code || t.label || '').trim() || t.id
-    const obj = st.labelsById.get(t.id) || null
-    const div = obj ? (obj.element as HTMLDivElement) : document.createElement('div')
-    if (!obj) {
-      div.className = 'kg3d-label kg3d-label--ticker'
-      const o = new CSS2DObject(div)
-      st.labelsById.set(t.id, o)
-      st.scene.add(o)
-    }
-    div.textContent = labelText
-    st.labelsById.get(t.id)!.position.copy(tmpPos).add(new THREE.Vector3(0, s * 1.2, 0))
+  for (const n of simNodes) {
+    n.x = padding + (n.x - minX) * scale
+    n.y = padding + (n.y - minY) * scale
   }
-  st.tickersMesh.instanceMatrix.needsUpdate = true
-  if (st.tickersMesh.instanceColor) st.tickersMesh.instanceColor.needsUpdate = true
+
+  const nodeLayouts: LayoutNode[] = simNodes.map((n) => ({
+    id: n.id,
+    kind: n.kind,
+    label: n.label,
+    count: n.count,
+    x: n.x,
+    y: n.y,
+    r: n.r,
+    color: n.color
+  }))
+
+  const edgeLayouts: LayoutEdge[] = []
+  for (const l of links) {
+    const s = simById.get(String(l.source))
+    const t = simById.get(String(l.target))
+    if (!s || !t) continue
+    const weight = Math.max(1, Number(l.weight || 1))
+    const width = clamp(1 + Math.sqrt(weight) * 1.2, 0.8, 6)
+    edgeLayouts.push({
+      key: edgeKey(l),
+      link: l,
+      x1: s.x,
+      y1: s.y,
+      x2: t.x,
+      y2: t.y,
+      width,
+      color: relationColor(l.relation)
+    })
+  }
+
+  return { nodes: nodeLayouts, edges: edgeLayouts }
+}
+
+function rebuildLayout() {
+  layout.value = layoutGraph(graph.value, size.value.width, size.value.height)
+}
+
+function edgeOpacity(edge: LayoutEdge): number {
+  if (selectedEdgeKey.value && edge.key === selectedEdgeKey.value) return 1
+  if (selectedNodeId.value) {
+    const isIncident = edge.link.source === selectedNodeId.value || edge.link.target === selectedNodeId.value
+    return isIncident ? 0.85 : 0.2
+  }
+  if (hoveredEdgeKey.value && edge.key === hoveredEdgeKey.value) return 1
+  return 0.7
+}
+
+function edgeWidth(edge: LayoutEdge): number {
+  let w = edge.width
+  if (selectedEdgeKey.value && edge.key === selectedEdgeKey.value) w *= 1.6
+  else if (selectedNodeId.value) {
+    const isIncident = edge.link.source === selectedNodeId.value || edge.link.target === selectedNodeId.value
+    if (!isIncident) w *= 0.6
+  }
+  if (hoveredEdgeKey.value && edge.key === hoveredEdgeKey.value) w *= 1.25
+  return w
+}
+
+function nodeOpacity(node: LayoutNode): number {
+  if (selectedNodeId.value && node.id !== selectedNodeId.value) return 0.35
+  if (selectedEdgeKey.value) {
+    const match = layout.value.edges.some(
+      (e) => e.key === selectedEdgeKey.value && (e.link.source === node.id || e.link.target === node.id)
+    )
+    return match ? 1 : 0.4
+  }
+  return 1
+}
+
+function nodeRadius(node: LayoutNode): number {
+  let r = node.r
+  if (selectedNodeId.value && node.id === selectedNodeId.value) r *= 1.25
+  if (hoveredNodeId.value && node.id === hoveredNodeId.value) r *= 1.12
+  return r
+}
+
+function updateSize() {
+  if (!container.value) return
+  const rect = container.value.getBoundingClientRect()
+  size.value = { width: Math.max(1, Math.floor(rect.width)), height: Math.max(1, Math.floor(rect.height)) }
+}
+
+function eventPos(ev: MouseEvent): { x: number; y: number } {
+  const rect = container.value?.getBoundingClientRect()
+  if (!rect) return { x: 0, y: 0 }
+  return { x: ev.clientX - rect.left, y: ev.clientY - rect.top }
+}
+
+function hoverNode(node: LayoutNode, ev: MouseEvent) {
+  const info = nodeById.value.get(node.id) || null
+  const lines: string[] = []
+  lines.push(info?.kind === 'event' ? '类型：事件' : '类型：个股')
+  if (info?.kind === 'event' && info.event_type && info.event_type !== node.label) {
+    lines.push(`事件：${info.event_type}`)
+  }
+  if (info?.kind === 'ticker') {
+    const name = (info as KgTickerNode).name
+    const code = (info as KgTickerNode).ts_code
+    if (code) lines.push(`代码：${code}`)
+    if (name) lines.push(`名称：${name}`)
+  }
+  if (info?.count != null) lines.push(`频次：${info.count}`)
+  const pos = eventPos(ev)
+  hover.value = { kind: 'node', id: node.id, title: node.label || node.id, lines, x: pos.x, y: pos.y }
+}
+
+function hoverEdge(edge: LayoutEdge, ev: MouseEvent) {
+  const link = edge.link
+  const src = nodeById.value.get(String(link.source))
+  const tgt = nodeById.value.get(String(link.target))
+  const title = `关系：${relationZh(link.relation)}`
+  const lines: string[] = []
+  const srcLabel = src ? nodeLabel(src) : String(link.source)
+  const tgtLabel = tgt ? nodeLabel(tgt) : String(link.target)
+  lines.push(`${srcLabel} → ${tgtLabel}`)
+  if (link.weight != null) lines.push(`权重：${link.weight}`)
+  if ((link.evidence || []).length) lines.push(`证据：${(link.evidence || []).length}`)
+  const pos = eventPos(ev)
+  hover.value = { kind: 'edge', id: edge.key, title, lines, x: pos.x, y: pos.y }
+}
+
+function moveHover(ev: MouseEvent) {
+  if (!hover.value) return
+  const pos = eventPos(ev)
+  hover.value = { ...hover.value, x: pos.x, y: pos.y }
+}
+
+function clearHover() {
+  hover.value = null
+}
+
+function selectNode(node: LayoutNode) {
+  const full = nodeById.value.get(node.id) || null
+  if (!full) return
+  selected.value = full
+  selectedEdge.value = null
+  sendFeedback('kg_graph_node_click', { minutes: props.minutes, node_id: full.id, kind: full.kind })
+}
+
+function selectEdge(edge: LayoutEdge) {
+  const link = edge.link
+  selectedEdge.value = link
+  selected.value = null
+  sendFeedback('kg_graph_edge_click', {
+    minutes: props.minutes,
+    relation: link.relation,
+    source: link.source,
+    target: link.target,
+    weight: link.weight
+  })
 }
 
 function onThumb(verdict: 'up' | 'down') {
@@ -629,15 +612,46 @@ function onThumb(verdict: 'up' | 'down') {
   })
 }
 
+function onArticleThumb(
+  verdict: 'up' | 'down',
+  ctx: {
+    source: 'event' | 'edge'
+    canonical_id: string
+    url?: string | null
+    node_id?: string
+    relation?: string
+    edge_source?: string
+    edge_target?: string
+  }
+) {
+  sendFeedback(verdict === 'up' ? 'kg_graph_article_thumb_up' : 'kg_graph_article_thumb_down', {
+    minutes: props.minutes,
+    ...ctx
+  })
+}
+
+let timer: number | null = null
+let resizeObs: ResizeObserver | null = null
+
 onMounted(() => {
-  if (!container.value) return
-  buildScene(container.value)
+  updateSize()
+  if (container.value) {
+    resizeObs = new ResizeObserver(() => updateSize())
+    resizeObs.observe(container.value)
+  }
   refresh()
-  const t = setInterval(refresh, pollMs.value)
-  onUnmounted(() => clearInterval(t))
+  timer = window.setInterval(refresh, pollMs.value)
 })
 
-onUnmounted(() => disposeRenderer())
+onUnmounted(() => {
+  if (timer != null) window.clearInterval(timer)
+  resizeObs?.disconnect()
+})
+
+watch(
+  () => [graph.value, size.value.width, size.value.height],
+  () => rebuildLayout()
+)
 
 watch(
   () => props.minutes,
@@ -645,25 +659,18 @@ watch(
 )
 
 watch(
-  () => graph.value,
-  (g) => updateGraphRender(g)
-)
-
-watch(
-  () => selected.value,
-  () => updateGraphRender(graph.value)
-)
-
-watch(
-  () => selectedEdge.value,
-  () => updateGraphRender(graph.value)
+  () => pollMs.value,
+  (ms) => {
+    if (timer != null) window.clearInterval(timer)
+    timer = window.setInterval(refresh, ms)
+  }
 )
 </script>
 
 <template>
-  <div class="kg3d">
-    <div class="kg3d-head">
-      <div class="title">知识图谱（3D）</div>
+  <div class="kg2d">
+    <div class="kg2d-head">
+      <div class="title">知识图谱（2D）</div>
       <div class="meta mono">
         <span>{{ graph?.stats?.events ?? '-' }} 事件</span>
         <span>·</span>
@@ -678,13 +685,70 @@ watch(
       </div>
     </div>
 
-    <div v-if="error" class="kg3d-error">{{ error }}</div>
+    <div v-if="error" class="kg2d-error">{{ error }}</div>
 
-    <div class="kg3d-body">
-      <div class="kg3d-canvas" ref="container"></div>
+    <div class="kg2d-body">
+      <div class="kg2d-canvas" ref="container">
+        <svg
+          class="kg2d-svg"
+          :width="size.width"
+          :height="size.height"
+          :viewBox="`0 0 ${size.width} ${size.height}`"
+          preserveAspectRatio="xMidYMid meet"
+          @mousemove="moveHover"
+        >
+          <g class="kg2d-edges">
+            <line
+              v-for="edge in layout.edges"
+              :key="edge.key"
+              class="kg2d-edge"
+              :x1="edge.x1"
+              :y1="edge.y1"
+              :x2="edge.x2"
+              :y2="edge.y2"
+              :stroke="edge.color"
+              :stroke-width="edgeWidth(edge)"
+              :opacity="edgeOpacity(edge)"
+              stroke-linecap="round"
+              @mouseenter="(e) => hoverEdge(edge, e)"
+              @mouseleave="clearHover"
+              @click="selectEdge(edge)"
+            />
+          </g>
 
-      <div class="kg3d-side">
-        <div v-if="!selected && !selectedEdge" class="card muted">点击节点或连线查看详情（支持拖拽旋转/滚轮缩放）</div>
+          <g class="kg2d-nodes">
+            <circle
+              v-for="node in layout.nodes"
+              :key="node.id"
+              class="kg2d-node"
+              :cx="node.x"
+              :cy="node.y"
+              :r="nodeRadius(node)"
+              :fill="node.color"
+              :opacity="nodeOpacity(node)"
+              :stroke="node.id === selectedNodeId ? '#facc15' : 'rgba(15, 23, 42, 0.6)'"
+              :stroke-width="node.id === selectedNodeId ? 2.4 : 1.2"
+              @mouseenter="(e) => hoverNode(node, e)"
+              @mouseleave="clearHover"
+              @click="selectNode(node)"
+            />
+          </g>
+        </svg>
+
+        <div
+          v-if="hover"
+          class="kg2d-tooltip"
+          :style="{ left: `${hover.x + 12}px`, top: `${hover.y + 12}px` }"
+        >
+          <div class="kg2d-tooltip-title">{{ hover.title }}</div>
+          <div v-for="(line, i) in hover.lines" :key="i" class="kg2d-tooltip-line">{{ line }}</div>
+        </div>
+      </div>
+
+      <div class="kg2d-side">
+        <div v-if="!selected && !selectedEdge" class="card muted">
+          点击节点或连线查看详情（支持悬浮查看标签）
+        </div>
 
         <div v-else-if="selected" class="card">
           <div class="title">{{ selected.label }}</div>
@@ -706,11 +770,7 @@ watch(
           <div v-if="selected.kind === 'event'">
             <div class="subtitle">最近证据</div>
             <div class="list">
-              <div
-                v-for="a in (selected as any).articles || []"
-                :key="a.canonical_id"
-                class="row"
-              >
+              <div v-for="a in (selected as any).articles || []" :key="a.canonical_id" class="row">
                 <a
                   v-if="a.url"
                   :href="a.url"
@@ -729,6 +789,36 @@ watch(
                 >
                 <span v-else class="small muted">{{ a.title || a.canonical_id }}</span>
                 <div class="small muted mono">{{ a.published_at || a.created_at || '-' }}</div>
+                <div class="row-actions">
+                  <button
+                    class="btn btn-ghost btn-xs"
+                    title="赞"
+                    @click="
+                      onArticleThumb('up', {
+                        source: 'event',
+                        node_id: selected.id,
+                        canonical_id: a.canonical_id,
+                        url: a.url
+                      })
+                    "
+                  >
+                    赞
+                  </button>
+                  <button
+                    class="btn btn-ghost btn-xs"
+                    title="踩"
+                    @click="
+                      onArticleThumb('down', {
+                        source: 'event',
+                        node_id: selected.id,
+                        canonical_id: a.canonical_id,
+                        url: a.url
+                      })
+                    "
+                  >
+                    踩
+                  </button>
+                </div>
               </div>
               <div v-if="(((selected as any).articles || []) as any[]).length === 0" class="small muted">暂无</div>
             </div>
@@ -765,6 +855,40 @@ watch(
               <a v-if="a.url" class="link" :href="a.url" target="_blank" rel="noreferrer">{{ a.title || a.url }}</a>
               <span v-else class="small muted">{{ a.title || a.canonical_id }}</span>
               <div class="small muted mono">{{ a.canonical_id }}</div>
+              <div class="row-actions">
+                <button
+                  class="btn btn-ghost btn-xs"
+                  title="赞"
+                  @click="
+                    onArticleThumb('up', {
+                      source: 'edge',
+                      relation: (selectedEdgeInfo as any).link.relation,
+                      edge_source: (selectedEdgeInfo as any).link.source,
+                      edge_target: (selectedEdgeInfo as any).link.target,
+                      canonical_id: a.canonical_id,
+                      url: a.url
+                    })
+                  "
+                >
+                  赞
+                </button>
+                <button
+                  class="btn btn-ghost btn-xs"
+                  title="踩"
+                  @click="
+                    onArticleThumb('down', {
+                      source: 'edge',
+                      relation: (selectedEdgeInfo as any).link.relation,
+                      edge_source: (selectedEdgeInfo as any).link.source,
+                      edge_target: (selectedEdgeInfo as any).link.target,
+                      canonical_id: a.canonical_id,
+                      url: a.url
+                    })
+                  "
+                >
+                  踩
+                </button>
+              </div>
             </div>
             <div v-if="(((selectedEdgeInfo as any).evidence || []) as any[]).length === 0" class="small muted">暂无</div>
           </div>
@@ -772,7 +896,7 @@ watch(
 
         <div class="card muted">
           <div class="small">
-            提示：默认显示节点标签；边的粗细反映连接强度（weight）。
+            提示：颜色区分节点/边类型；节点大小与边粗细反映重要程度，悬浮可查看标签。
           </div>
         </div>
       </div>
@@ -781,13 +905,13 @@ watch(
 </template>
 
 <style scoped>
-.kg3d {
+.kg2d {
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 
-.kg3d-head {
+.kg2d-head {
   display: grid;
   grid-template-columns: 1fr auto auto;
   gap: 10px;
@@ -797,24 +921,24 @@ watch(
   background: linear-gradient(90deg, rgba(124, 58, 237, 0.12), rgba(59, 130, 246, 0.06));
 }
 
-.kg3d-head .title {
+.kg2d-head .title {
   font-weight: 700;
   letter-spacing: 0.3px;
 }
 
-.kg3d-head .meta {
+.kg2d-head .meta {
   color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
 }
 
-.kg3d-head .actions {
+.kg2d-head .actions {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
 }
 
-.kg3d-error {
+.kg2d-error {
   padding: 10px 12px;
   border: 1px solid rgba(239, 68, 68, 0.35);
   background: rgba(239, 68, 68, 0.08);
@@ -823,18 +947,19 @@ watch(
   font-size: 13px;
 }
 
-.kg3d-body {
+.kg2d-body {
   display: grid;
   grid-template-columns: 1fr 360px;
   gap: 12px;
 }
 @media (max-width: 980px) {
-  .kg3d-body {
+  .kg2d-body {
     grid-template-columns: 1fr;
   }
 }
 
-.kg3d-canvas {
+.kg2d-canvas {
+  position: relative;
   height: 560px;
   border-radius: 16px;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -845,34 +970,47 @@ watch(
   overflow: hidden;
 }
 
-.kg3d-label {
-  color: rgba(255, 255, 255, 0.94);
-  background: rgba(4, 6, 10, 0.72);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 13px;
-  line-height: 1.25;
-  white-space: nowrap;
+.kg2d-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.kg2d-edge {
+  cursor: pointer;
+  transition: opacity 0.15s ease, stroke-width 0.15s ease;
+}
+
+.kg2d-node {
+  cursor: pointer;
+  transition: opacity 0.15s ease, r 0.15s ease;
+}
+
+.kg2d-tooltip {
+  position: absolute;
+  z-index: 10;
   max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(4, 6, 10, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: none;
   backdrop-filter: blur(6px);
-  transform: translate(-50%, -50%);
 }
 
-.kg3d-label--event {
-  border-color: rgba(167, 139, 250, 0.65);
-  background: rgba(26, 14, 44, 0.62);
+.kg2d-tooltip-title {
+  font-weight: 600;
+  margin-bottom: 4px;
 }
 
-.kg3d-label--ticker {
-  border-color: rgba(52, 211, 153, 0.55);
-  background: rgba(6, 34, 22, 0.58);
+.kg2d-tooltip-line {
+  color: rgba(226, 232, 240, 0.9);
 }
 
-.kg3d-side {
+.kg2d-side {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -911,5 +1049,17 @@ watch(
 
 .row .link:hover {
   text-decoration: underline;
+}
+
+.row-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.btn-xs {
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 1.1;
 }
 </style>

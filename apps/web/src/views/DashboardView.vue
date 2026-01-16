@@ -1,9 +1,9 @@
-<!-- Input: /status + /dashboard/summary + /kg/graph（轮询） -->
-<!-- Output: 分析结果看板（KPI + 热点 + 最新输出 + 3D 知识图谱） -->
+<!-- Input: /dashboard/summary + /kg/graph（轮询） -->
+<!-- Output: 分析结果看板（热点 + 最新输出 + 2D 知识图谱） -->
 <!-- Pos: 前端看板页（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import KG3DGraph from '../components/KG3DGraph.vue'
 
 type DashboardRecentItem = {
@@ -28,14 +28,11 @@ type DashboardSummary = {
   recent: DashboardRecentItem[]
 }
 
-const windowMinutes = ref(180)
+const windowMinutes = ref(720)
 const summary = ref<DashboardSummary | null>(null)
-const status = ref<any>(null)
 const error = ref<string | null>(null)
-const pollStats = ref({ n: 0, totalMs: 0 })
 
 async function api(path: string) {
-  const started = performance.now()
   const res = await fetch(path, { cache: 'no-store' })
   const text = await res.text()
   let data: any = null
@@ -45,48 +42,17 @@ async function api(path: string) {
     data = { raw: text }
   }
   if (!res.ok) throw new Error((data && (data.error || data.detail)) || `HTTP ${res.status}`)
-  const elapsed = performance.now() - started
-  pollStats.value = { n: pollStats.value.n + 1, totalMs: pollStats.value.totalMs + elapsed }
   return data
 }
 
 async function refresh() {
   try {
     error.value = null
-    const [st, s] = await Promise.all([
-      api('/status'),
-      api(`/dashboard/summary?minutes=${windowMinutes.value}&limit=40`)
-    ])
-    status.value = st
-    summary.value = s
+    summary.value = await api(`/dashboard/summary?minutes=${windowMinutes.value}&limit=40`)
   } catch (e: any) {
     error.value = String(e?.message || e)
   }
 }
-
-const healthOk = computed(() => {
-  const deps = status.value?.dependencies || {}
-  return Object.values(deps).every((x: any) => x && x.ok)
-})
-
-const avgPollMs = computed(() => {
-  const n = pollStats.value.n
-  if (!n) return null
-  return pollStats.value.totalMs / n
-})
-
-const totalCounts = computed(() => status.value?.counts || {})
-
-const windowSignals = computed(() => {
-  const by = summary.value?.signals_by_kind || {}
-  return {
-    analysis: by.analysis_updated ?? 0,
-    deep: by.deep_analysis_updated ?? 0,
-    other: Object.entries(by)
-      .filter(([k]) => k !== 'analysis_updated' && k !== 'deep_analysis_updated')
-      .reduce((acc, [, v]) => acc + (Number(v) || 0), 0)
-  }
-})
 
 function fmtTs(iso?: string | null): string {
   if (!iso) return '-'
@@ -123,8 +89,12 @@ watch(windowMinutes, () => refresh())
 <template>
   <div class="dashboard-grid span-all">
     <section class="panel" style="grid-column: 1 / -1">
+      <KG3DGraph :minutes="windowMinutes" :poll-ms="3000" />
+    </section>
+
+    <section class="panel" style="grid-column: 1 / span 1">
       <div class="panel-header">
-        <div class="panel-title">分析看板</div>
+        <div class="panel-title">最新输出</div>
         <div class="panel-actions">
           <select
             v-model="windowMinutes"
@@ -135,7 +105,7 @@ watch(windowMinutes, () => refresh())
             <option :value="180">3h</option>
             <option :value="720">12h</option>
           </select>
-          <span class="badge" :class="healthOk ? 'badge-ok' : 'badge-warn'">{{ healthOk ? '正常' : '依赖异常' }}</span>
+          <button class="btn btn-ghost" @click="refresh">刷新</button>
         </div>
       </div>
       <div class="side-body">
@@ -143,54 +113,6 @@ watch(windowMinutes, () => refresh())
           <div class="title" style="color: #fca5a5">Error</div>
           <div class="small">{{ error }}</div>
         </div>
-
-        <div class="grid-metrics grid-metrics-6">
-          <div class="metric">
-            <div class="metric-k">窗口内分析</div>
-            <div class="metric-v">{{ windowSignals.analysis }}</div>
-            <div class="metric-h">{{ windowMinutes }}m 内 analysis_updated</div>
-          </div>
-          <div class="metric">
-            <div class="metric-k">窗口内深度分析</div>
-            <div class="metric-v">{{ windowSignals.deep }}</div>
-            <div class="metric-h">{{ windowMinutes }}m 内 deep_analysis_updated</div>
-          </div>
-          <div class="metric">
-            <div class="metric-k">轮询平均耗时</div>
-            <div class="metric-v">{{ avgPollMs ? `${avgPollMs.toFixed(0)}ms` : '-' }}</div>
-            <div class="metric-h">/status + /dashboard/summary</div>
-          </div>
-          <div class="metric">
-            <div class="metric-k">articles（总）</div>
-            <div class="metric-v">{{ totalCounts.articles ?? '-' }}</div>
-            <div class="metric-h">当前 DB 总量</div>
-          </div>
-          <div class="metric">
-            <div class="metric-k">analyses（总）</div>
-            <div class="metric-v">{{ totalCounts.analyses ?? '-' }}</div>
-            <div class="metric-h">当前 DB 总量</div>
-          </div>
-          <div class="metric">
-            <div class="metric-k">signals（总）</div>
-            <div class="metric-v">{{ totalCounts.signals ?? '-' }}</div>
-            <div class="metric-h">当前 DB 总量</div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel" style="grid-column: 1 / -1">
-      <KG3DGraph :minutes="windowMinutes" :poll-ms="3000" />
-    </section>
-
-    <section class="panel" style="grid-column: 1 / span 1">
-      <div class="panel-header">
-        <div class="panel-title">最新输出</div>
-        <div class="panel-actions">
-          <button class="btn btn-ghost" @click="refresh">刷新</button>
-        </div>
-      </div>
-      <div class="side-body">
         <div class="table-wrap">
           <table class="table recent-table">
             <thead>

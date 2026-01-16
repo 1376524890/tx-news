@@ -1,5 +1,5 @@
 # Input: HTTP 请求 + Postgres/Qdrant/Redis 等依赖 + 用户 Cookie（可选）+（可选）在线 LLM 配置
-# Output: 公网/用户侧 API + 对话 UI（8000；默认使用在线 LLM，不自动回退本地 vLLM）
+# Output: 公网/用户侧 API + 对话 UI（8000；默认使用在线 LLM，不自动回退本地 vLLM）+ 看板 KG 反馈加权
 # Pos: Public API 进程入口（变更时同步更新以上注释与所属目录 FOLDER.md；并在主数据缺失时尝试从本地缓存引导）
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from tx_news.storage.postgres import (
     get_analysis,
     get_article,
     get_event_canonical_ids,
+    get_feedback_counts,
     get_latest_version,
     init_db,
     insert_feedback,
@@ -389,7 +390,7 @@ def kg_graph(
     max_tickers: int = Query(default=160, ge=10, le=2000),
 ) -> Response:
     """
-    Public near-real-time KG graph snapshot used by the dashboard 3D visualization.
+    Public near-real-time KG graph snapshot used by the dashboard visualization.
     Current node types are fixed: event (event_id) and ticker (ts_code).
     """
     settings = get_settings()
@@ -422,6 +423,25 @@ def kg_graph(
             {"sec": window_seconds, "limit": int(limit_articles)},
         ).all()
 
+    canonical_ids = {str(r[0]) for r in rows if r[0]}
+    feedback_by_canonical = get_feedback_counts(
+        engine,
+        canonical_ids=sorted(canonical_ids),
+        kinds=["kg_graph_article_thumb_up", "kg_graph_article_thumb_down"],
+        window_seconds=window_seconds,
+    )
+
+    def _feedback_for(canonical_id: str) -> tuple[int, int]:
+        entry = feedback_by_canonical.get(str(canonical_id), {})
+        up = int(entry.get("kg_graph_article_thumb_up") or 0)
+        down = int(entry.get("kg_graph_article_thumb_down") or 0)
+        return up, down
+
+    def _feedback_payload(up: int | None, down: int | None) -> dict[str, int]:
+        up = int(up or 0)
+        down = int(down or 0)
+        return {"up": up, "down": down, "score": up - down}
+
     # Build event/ticker bipartite graph from analyses.
     event_by_id: dict[str, dict[str, Any]] = {}
     ticker_count: dict[str, int] = {}
@@ -431,9 +451,13 @@ def kg_graph(
         return _normalize_tickers(v)
 
     for canonical_id, event_id, event_type, tickers, created_at, title, url, published_at, source_id in rows:
+        cid = str(canonical_id or "").strip()
+        if not cid:
+            continue
         eid = str(event_id or "").strip()
         if not eid:
             continue
+        fb_up, fb_down = _feedback_for(cid)
         ev = event_by_id.setdefault(
             eid,
             {
@@ -441,22 +465,28 @@ def kg_graph(
                 "event_type": str(event_type or "other"),
                 "articles": [],
                 "count": 0,
+                "feedback_up": 0,
+                "feedback_down": 0,
                 "last_created_at": None,
             },
         )
         ev["count"] = int(ev.get("count") or 0) + 1
+        ev["feedback_up"] = int(ev.get("feedback_up") or 0) + fb_up
+        ev["feedback_down"] = int(ev.get("feedback_down") or 0) + fb_down
         ts = created_at.isoformat() if created_at else None
         if ts and (not ev["last_created_at"] or ts > ev["last_created_at"]):
             ev["last_created_at"] = ts
         if len(ev["articles"]) < 12:
             ev["articles"].append(
                 {
-                    "canonical_id": str(canonical_id),
+                    "canonical_id": cid,
                     "title": title,
                     "url": url,
                     "source_id": source_id,
                     "published_at": published_at.isoformat() if published_at else None,
                     "created_at": ts,
+                    "thumbs_up": fb_up,
+                    "thumbs_down": fb_down,
                 }
             )
 
@@ -468,14 +498,35 @@ def kg_graph(
             key = (eid, ts_code)
             e = edge_count.setdefault(
                 key,
-                {"event_id": eid, "ts_code": ts_code, "count": 0, "evidence": []},
+                {
+                    "event_id": eid,
+                    "ts_code": ts_code,
+                    "count": 0,
+                    "evidence": [],
+                    "feedback_up": 0,
+                    "feedback_down": 0,
+                },
             )
             e["count"] = int(e.get("count") or 0) + 1
+            e["feedback_up"] = int(e.get("feedback_up") or 0) + fb_up
+            e["feedback_down"] = int(e.get("feedback_down") or 0) + fb_down
             if len(e["evidence"]) < 12:
-                e["evidence"].append(str(canonical_id))
+                e["evidence"].append(cid)
 
-    # Trim to keep the 3D visualization responsive.
-    top_event_ids = [k for k, _ in sorted(event_by_id.items(), key=lambda kv: int(kv[1].get("count") or 0), reverse=True)[: int(max_events)]]
+    # Trim to keep the dashboard visualization responsive.
+    def _event_rank(item: dict[str, Any]) -> int:
+        base = int(item.get("count") or 0)
+        score = int(item.get("feedback_up") or 0) - int(item.get("feedback_down") or 0)
+        return base + score
+
+    top_event_ids = [
+        k
+        for k, _ in sorted(
+            event_by_id.items(),
+            key=lambda kv: _event_rank(kv[1]),
+            reverse=True,
+        )[: int(max_events)]
+    ]
     top_events = {eid: event_by_id[eid] for eid in top_event_ids if eid in event_by_id}
 
     top_ts_codes = [k for k, _ in sorted(ticker_count.items(), key=lambda kv: kv[1], reverse=True)[: int(max_tickers)]]
@@ -486,6 +537,9 @@ def kg_graph(
     links: list[dict[str, Any]] = []
 
     for eid, ev in top_events.items():
+        feedback = _feedback_payload(ev.get("feedback_up"), ev.get("feedback_down"))
+        count_raw = int(ev.get("count") or 0)
+        count = max(1, count_raw + feedback["score"])
         nodes.append(
             {
                 "id": f"event:{eid}",
@@ -493,7 +547,9 @@ def kg_graph(
                 "label": str(ev.get("event_type") or eid),
                 "event_id": eid,
                 "event_type": ev.get("event_type"),
-                "count": int(ev.get("count") or 0),
+                "count": count,
+                "count_raw": count_raw,
+                "feedback": feedback,
                 "last_created_at": ev.get("last_created_at"),
                 "articles": ev.get("articles") or [],
             }
@@ -517,12 +573,17 @@ def kg_graph(
     for (eid, ts_code), e in edge_count.items():
         if eid not in allowed_events or ts_code not in allowed_tickers:
             continue
+        feedback = _feedback_payload(e.get("feedback_up"), e.get("feedback_down"))
+        weight_raw = int(e.get("count") or 0)
+        weight = max(1, weight_raw + feedback["score"])
         links.append(
             {
                 "source": f"event:{eid}",
                 "target": f"ticker:{ts_code}",
                 "relation": "mentions",
-                "weight": int(e.get("count") or 0),
+                "weight": weight,
+                "weight_raw": weight_raw,
+                "feedback": feedback,
                 "evidence": e.get("evidence") or [],
             }
         )

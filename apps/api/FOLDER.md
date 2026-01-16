@@ -18,6 +18,7 @@
 - embedding 配置通过 `Settings.resolve_embedding_cfg()` 统一解析：默认强制使用 CPU（除非显式设置 `TXNEWS_EMBEDDING_DEVICE`），避免在 API/工具侧出现“配置不一致导致 500”。
 - 知识库全文（内部）：提供 `/kb/search` 与 `/kb/articles/{canonical_id}` 返回抽取后的全文（默认关闭，需设置 `TXNEWS_ALLOW_FULL_TEXT=1`）。
 - `/status`、`/signals`、`/dashboard/summary`、`/kg/graph`、`/api/config` 默认返回 `Cache-Control: no-store`，避免被 Cloudflare Tunnel/反代缓存导致“长时间不更新”。
+- `/kg/graph` 会汇总 `feedback_logs` 中 `kg_graph_article_thumb_*` 的窗口内反馈，用于调整节点/边权重（提供 `feedback`/`*_raw` 字段）。
 - 在线 LLM 排障：访问 `/status?llm=1` 会在容器内对 `llm.chat.base_url` 做一次轻量连通性检查（优先 `/models`；不返回明文 key）。
 
 ## 文件

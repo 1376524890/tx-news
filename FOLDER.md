@@ -25,7 +25,7 @@
 | `requirements-dev.txt` | 开发依赖 | `pytest`/`ruff` 等开发工具依赖。 |
 | `pytest.ini` | 测试配置 | `pytest` 收集范围配置（避免扫描 `var/vendor` 等第三方目录）。 |
 | `.env.example` | 环境变量样例 | `.env` 模板（密钥/连接串建议通过 env 注入；含 build-time 镜像/代理与 `TXNEWS_CHAT_ALLOW_DEEP_FALLBACK` 等开关）。 |
-| `.gitignore` | 仓库维护 | 忽略本地运行态与缓存文件。 |
+| `.gitignore` | 仓库维护 | 忽略本地运行态与缓存文件（含 `celerybeat-schedule.*`）。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |
 
 ## 子目录

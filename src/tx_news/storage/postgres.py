@@ -1,5 +1,5 @@
 # Input: Postgres DSN（进程内缓存 Engine）与 ORM 模型
-# Output: 建表与 CRUD/查询函数（articles/versions/analysis/signals/a_share/feedback/kg_ops 等）+（可选）从本地缓存引导主数据
+# Output: 建表与 CRUD/查询函数（articles/versions/analysis/signals/a_share/feedback/kg_ops 等）+ 反馈汇总 +（可选）从本地缓存引导主数据
 # Pos: Postgres 数据访问层（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from threading import Lock
 
-from sqlalchemy import create_engine, desc, select
+from sqlalchemy import create_engine, desc, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -194,6 +194,45 @@ def insert_signal(engine: Engine, canonical_id: str, kind: str, data: dict) -> N
 def insert_feedback(engine: Engine, *, uid: str, kind: str, data: dict) -> None:
     with session_scope(engine) as s:
         s.add(FeedbackLog(uid=str(uid or ""), kind=str(kind or ""), data=data or {}, created_at=utcnow()))
+
+
+def get_feedback_counts(
+    engine: Engine,
+    *,
+    canonical_ids: list[str],
+    kinds: list[str],
+    window_seconds: int | None = None,
+) -> dict[str, dict[str, int]]:
+    if not canonical_ids or not kinds:
+        return {}
+    if engine.url.get_backend_name() != "postgresql":
+        return {}
+    clauses = [
+        "kind = any(:kinds)",
+        "(data->>'canonical_id') = any(:canonical_ids)",
+    ]
+    params: dict[str, object] = {
+        "kinds": list(kinds),
+        "canonical_ids": list(canonical_ids),
+    }
+    if window_seconds and window_seconds > 0:
+        clauses.append("created_at >= (now() - (:window_sec || ' seconds')::interval)")
+        params["window_sec"] = int(window_seconds)
+    query = text(
+        "select data->>'canonical_id' as canonical_id, kind, count(*) as n "
+        "from feedback_logs "
+        f"where {' and '.join(clauses)} "
+        "group by canonical_id, kind"
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(query, params).all()
+    out: dict[str, dict[str, int]] = {}
+    for canonical_id, kind, n in rows:
+        if not canonical_id:
+            continue
+        entry = out.setdefault(str(canonical_id), {})
+        entry[str(kind)] = int(n or 0)
+    return out
 
 
 def create_kg_run(engine: Engine, *, run_id: str, graph_env: str, trigger_canonical_id: str) -> None:

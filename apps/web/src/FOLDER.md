@@ -19,4 +19,4 @@
 | `router/` | 路由 | 路由定义。 |
 | `views/` | 视图 | 页面级组件（对话/配置；对话页支持工具调用实时进度展示）。 |
 | `assets/` | 资源 | 静态图片/样式资源。 |
-| `components/` | 组件 | 通用 UI 组件（如 `TimeSeriesChart.vue` 折线图、`KG3DGraph.vue` 三维知识图谱）。 |
+| `components/` | 组件 | 通用 UI 组件（如 `TimeSeriesChart.vue` 折线图、`KG3DGraph.vue` 2D 知识图谱）。 |

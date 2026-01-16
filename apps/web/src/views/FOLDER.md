@@ -14,6 +14,6 @@
 | 文件 | 地位 | 功能 |
 | --- | --- | --- |
 | `ChatView.vue` | 对话页 | 集成 SSE 客户端、Markdown 渲染与信号侧边栏（信号仅展示最新 N 条并优先最新；支持回车发送与更稳的自适应高度滚动）。 |
-| `DashboardView.vue` | 看板页 | 展示窗口内信号统计、热点事件类型、最新输出与轮询平均耗时；并集成实时 3D 知识图谱（/kg/graph）。 |
+| `DashboardView.vue` | 看板页 | 展示热点事件类型、最新输出与实时 2D 知识图谱（/kg/graph）。 |
 | `ConfigView.vue` | 配置页 | 在线 LLM（base_url/model/api_key）配置（public: `/config`；也可在 admin build 8001 入口使用）。 |
 | `AdminView.vue` | Legacy | 旧管理台页面（已不在默认路由中使用）。 |
