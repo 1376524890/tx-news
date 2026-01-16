@@ -1,5 +1,5 @@
-<!-- Input: /dashboard/summary + /kg/graph（轮询） -->
-<!-- Output: 分析结果看板（热点 + 最新输出 + 2D 知识图谱） -->
+<!-- Input: /dashboard/summary + /kg/graph（轮询去重） -->
+<!-- Output: 分析结果看板（热点 + 最新输出 + 2D 知识图谱；防止轮询乱序） -->
 <!-- Pos: 前端看板页（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
 <script setup lang="ts">
@@ -31,6 +31,8 @@ type DashboardSummary = {
 const windowMinutes = ref(720)
 const summary = ref<DashboardSummary | null>(null)
 const error = ref<string | null>(null)
+let refreshInFlight = false
+let refreshQueued = false
 
 async function api(path: string) {
   const res = await fetch(path, { cache: 'no-store' })
@@ -46,11 +48,22 @@ async function api(path: string) {
 }
 
 async function refresh() {
+  if (refreshInFlight) {
+    refreshQueued = true
+    return
+  }
+  refreshInFlight = true
   try {
     error.value = null
     summary.value = await api(`/dashboard/summary?minutes=${windowMinutes.value}&limit=40`)
   } catch (e: any) {
     error.value = String(e?.message || e)
+  } finally {
+    refreshInFlight = false
+    if (refreshQueued) {
+      refreshQueued = false
+      void refresh()
+    }
   }
 }
 

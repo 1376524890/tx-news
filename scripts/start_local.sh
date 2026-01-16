@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Input: 本地 Python(v>=3.10) + venv + Docker(仅 infra) + .env/config/* +（可选）宿主机 vLLM + Node/npm
-# Output: infra 使用 docker compose；主程序使用 venv 在宿主机启动（api/worker/collector/nats-bridge/beat/admin + db-init/bootstrap）并做就绪检查
+# Output: infra 使用 docker compose；主程序使用 venv 在宿主机启动（api/worker/collector/nats-bridge/beat/admin + db-init/bootstrap），并等待 infra 端口就绪
 # Pos: 运维入口（本地非 Docker 主程序一键启动）（变更时同步更新以上注释与所属目录 FOLDER.md）
 set -euo pipefail
 
@@ -92,6 +92,105 @@ wait_http() {
   return 1
 }
 
+tcp_ready() {
+  local host="$1"
+  local port="$2"
+  if have nc; then
+    nc -z "${host}" "${port}" >/dev/null 2>&1
+    return $?
+  fi
+  if have python3; then
+    python3 - <<PY >/dev/null 2>&1
+import socket
+host = "${host}"
+port = int("${port}")
+sock = socket.socket()
+sock.settimeout(1.0)
+try:
+    sock.connect((host, port))
+except Exception:
+    raise SystemExit(1)
+finally:
+    sock.close()
+PY
+    return $?
+  fi
+  if have python; then
+    python - <<PY >/dev/null 2>&1
+import socket
+host = "${host}"
+port = int("${port}")
+sock = socket.socket()
+sock.settimeout(1.0)
+try:
+    sock.connect((host, port))
+except Exception:
+    raise SystemExit(1)
+finally:
+    sock.close()
+PY
+    return $?
+  fi
+  (exec 3<>"/dev/tcp/${host}/${port}") >/dev/null 2>&1
+}
+
+parse_host_port() {
+  local raw="$1"
+  local default_port="$2"
+  local hostport host port
+
+  hostport="${raw#*://}"
+  hostport="${hostport%%/*}"
+  hostport="${hostport##*@}"
+  host="${hostport%%:*}"
+  port="${hostport##*:}"
+
+  if [[ -z "${host}" || "${host}" == "${hostport}" ]]; then
+    host="${hostport}"
+  fi
+  if [[ "${hostport}" == "${host}" || -z "${port}" ]]; then
+    port="${default_port}"
+  fi
+  if [[ "${host}" == "["*"]" ]]; then
+    host="${host#[}"
+    host="${host%]}"
+  fi
+  printf '%s %s\n' "${host}" "${port}"
+}
+
+wait_infra_ready() {
+  local timeout="${1:-90}"
+  local deadline
+  deadline="$(( $(date +%s) + timeout ))"
+
+  local pg_host pg_port redis_host redis_port nats_host nats_port s3_host s3_port qdrant_host qdrant_port
+  read -r pg_host pg_port < <(parse_host_port "${TXNEWS_PG_DSN:-}" "5432")
+  read -r redis_host redis_port < <(parse_host_port "${TXNEWS_REDIS_URL:-}" "6379")
+  read -r nats_host nats_port < <(parse_host_port "${TXNEWS_NATS_URL:-}" "4222")
+  read -r s3_host s3_port < <(parse_host_port "${TXNEWS_S3_ENDPOINT:-}" "9000")
+  read -r qdrant_host qdrant_port < <(parse_host_port "${TXNEWS_QDRANT_URL:-}" "6333")
+  local missing=()
+
+  log "Waiting for infra ports (timeout ${timeout}s)..."
+  while [[ "$(date +%s)" -lt "${deadline}" ]]; do
+    missing=()
+    tcp_ready "${pg_host}" "${pg_port}" || missing+=("postgres:${pg_host}:${pg_port}")
+    tcp_ready "${redis_host}" "${redis_port}" || missing+=("redis:${redis_host}:${redis_port}")
+    tcp_ready "${nats_host}" "${nats_port}" || missing+=("nats:${nats_host}:${nats_port}")
+    tcp_ready "${s3_host}" "${s3_port}" || missing+=("minio:${s3_host}:${s3_port}")
+    tcp_ready "${qdrant_host}" "${qdrant_port}" || missing+=("qdrant:${qdrant_host}:${qdrant_port}")
+
+    if [[ "${#missing[@]}" -eq 0 ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  log "ERROR: infra not ready. Missing: ${missing[*]}"
+  log "Hint: ensure docker compose infra is up, or export TXNEWS_SKIP_INFRA_CHECK=1 to bypass."
+  return 1
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -121,6 +220,8 @@ Env knobs:
   - TXNEWS_WEB_DEV_PORT (default: 8000)
   - TXNEWS_LOCAL_API_PORT (default: 18000; only used when WEB dev is enabled)
   - TXNEWS_SKIP_WEB_INSTALL (default: 0; set to 1 to skip npm install)
+  - TXNEWS_SKIP_INFRA_CHECK (default: 0; set to 1 to skip infra readiness checks)
+  - TXNEWS_INFRA_WAIT_SECONDS (default: 90; overall timeout for infra readiness)
 EOF
 }
 
@@ -277,6 +378,10 @@ if [[ "${SKIP_INFRA}" != "1" ]]; then
   fi
   compose up -d
   echo "compose_up=1" > "${RUN_DIR}/infra.started"
+fi
+
+if [[ "${TXNEWS_SKIP_INFRA_CHECK:-0}" != "1" ]]; then
+  wait_infra_ready "${TXNEWS_INFRA_WAIT_SECONDS:-90}" || exit 2
 fi
 
 if [[ ! -d "${VENV_DIR}" ]]; then

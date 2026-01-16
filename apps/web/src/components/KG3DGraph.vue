@@ -1,5 +1,5 @@
-<!-- Input: /kg/graph（轮询）+ 用户交互（点击/悬浮/反馈） -->
-<!-- Output: 2D 平面知识图谱可视化（实时刷新） -->
+<!-- Input: /kg/graph（轮询去重）+ 用户交互（点击/悬浮/反馈） -->
+<!-- Output: 2D 平面知识图谱可视化（实时刷新；避免乱序覆盖） -->
 <!-- Pos: 图谱组件（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
 <script setup lang="ts">
@@ -101,6 +101,8 @@ const selectedEdge = ref<KgLink | null>(null)
 const hover = ref<HoverState | null>(null)
 const layout = ref<LayoutState>({ nodes: [], edges: [] })
 const size = ref({ width: 1, height: 1 })
+let refreshInFlight = false
+let refreshQueued = false
 
 const nodeById = computed(() => {
   const m = new Map<string, KgNode>()
@@ -161,11 +163,22 @@ async function sendFeedback(kind: string, data: Record<string, any>) {
 }
 
 async function refresh() {
+  if (refreshInFlight) {
+    refreshQueued = true
+    return
+  }
+  refreshInFlight = true
   try {
     error.value = null
     graph.value = await api<KgGraph>(`/kg/graph?minutes=${encodeURIComponent(props.minutes)}`)
   } catch (e: any) {
     error.value = String(e?.message || e)
+  } finally {
+    refreshInFlight = false
+    if (refreshQueued) {
+      refreshQueued = false
+      void refresh()
+    }
   }
 }
 
