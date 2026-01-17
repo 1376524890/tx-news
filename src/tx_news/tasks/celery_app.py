@@ -46,6 +46,10 @@ def make_celery() -> Celery:
             "task": "tx_news.tasks.kg.kg_reconcile",
             "schedule": crontab(minute=15, hour=3),  # daily at 03:15 (UTC)
         },
+        "analyze_recent_articles_hourly": {
+            "task": "tx_news.tasks.maintenance.analyze_recent_articles",
+            "schedule": crontab(minute=0),  # every hour
+        },
     }
     return app
 

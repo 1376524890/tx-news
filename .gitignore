@@ -16,4 +16,6 @@ data/
 celerybeat-schedule
 celerybeat-schedule.*
 *.bak
+*.dat
+*.dir
 # MinIO/Qdrant/Postgres docker volumes are outside repo

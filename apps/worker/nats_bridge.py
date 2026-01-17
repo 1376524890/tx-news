@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 async def main_async() -> None:
+    import uuid
     settings = get_settings()
     nc = await nats.connect(settings.nats_url)
     js = nc.jetstream()
@@ -28,14 +29,16 @@ async def main_async() -> None:
     except Exception:
         await js.add_stream(name=settings.nats_stream, subjects=[f"{settings.nats_stream}.>"])
 
+    # Use unique consumer name to avoid conflicts
+    consumer_name = f"txnews_raw_bridge_{uuid.uuid4().hex[:8]}"
     sub = await js.subscribe(
         subject=f"{settings.nats_stream}.raw",
-        durable="txnews_raw_bridge",
+        durable=consumer_name,
         stream=settings.nats_stream,
         manual_ack=True,
     )
 
-    logger.info("listening nats subject=%s", f"{settings.nats_stream}.raw")
+    logger.info("listening nats subject=%s consumer=%s", f"{settings.nats_stream}.raw", consumer_name)
     async for msg in sub.messages:
         try:
             payload = json.loads(msg.data.decode("utf-8"))

@@ -13,7 +13,7 @@
 ## 文件
 | 文件 | 地位 | 功能 |
 | --- | --- | --- |
-| `main.ts` | 入口 | 初始化 Vue 应用、挂载 Router 与全局样式。 |
+| `main.ts` | 入口 | 初始化 Vue 应用、挂载 Router 与全局样式（ESM 顶部使用 JS 注释）。 |
 | `App.vue` | 根组件 | 提供全局布局（Header）与 RouterView 容器。 |
 | `style.css` | 全局样式 | 定义 CSS 变量与通用 UI 组件样式（Button, Card）。 |
 | `router/` | 路由 | 路由定义。 |

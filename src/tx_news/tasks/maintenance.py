@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from sqlalchemy import delete, select
 
@@ -13,7 +14,7 @@ from tx_news.db import RawDoc
 from tx_news.integrations.tushare_sync import TushareSync
 from tx_news.settings import get_settings
 from tx_news.storage.minio import S3Client
-from tx_news.storage.postgres import init_db, make_engine, session_scope, upsert_a_share_basic
+from tx_news.storage.postgres import init_db, make_engine, session_scope, upsert_a_share_basic, get_articles
 from tx_news.tasks.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -96,3 +97,62 @@ def cleanup_raw() -> dict:
         s.execute(delete(RawDoc).where(RawDoc.created_at < cutoff))
 
     return {"deleted_raw_docs": deleted, "cutoff": cutoff.isoformat()}
+
+
+@celery_app.task(name="tx_news.tasks.maintenance.analyze_recent_articles")
+def analyze_recent_articles() -> dict[str, Any]:
+    """
+    Periodically analyze recent articles that may have been missed by the NATS pipeline.
+    This ensures articles get analyzed even if NATS bridge is not working.
+    """
+    settings = get_settings()
+    file_cfg = settings.load_file_settings()
+    engine = make_engine(settings.pg_dsn)
+    init_db(engine)
+
+    cutoff_hours = int((file_cfg.maintenance or {}).get("analyze_cutoff_hours", 24))
+    cutoff = utcnow() - timedelta(hours=cutoff_hours)
+
+    with session_scope(engine) as s:
+        from sqlalchemy import select
+        from tx_news.db import Article
+
+        articles = s.scalars(
+            select(Article)
+            .where(Article.created_at >= cutoff)
+            .order_by(Article.created_at)
+            .limit(100)
+        ).all()
+
+    analyzed = 0
+    skipped = 0
+    for article in articles:
+        canonical = {
+            "canonical_id": article.canonical_id,
+            "source_id": article.source_id,
+            "url": None,
+            "fetched_at": article.created_at.isoformat(),
+            "published_at": article.created_at.isoformat(),
+            "checksum": article.checksum,
+            "is_new_canonical": False,
+        }
+        try:
+            celery_app.send_task("tx_news.tasks.pipeline.analyze", args=[canonical])
+            analyzed += 1
+        except Exception as e:
+            logger.warning("failed to enqueue analysis for canonical_id=%s err=%s", article.canonical_id, e)
+            skipped += 1
+
+    logger.info(
+        "analyze_recent_articles completed: articles=%d analyzed=%d skipped=%d cutoff_hours=%d",
+        len(articles),
+        analyzed,
+        skipped,
+        cutoff_hours,
+    )
+    return {
+        "total_articles": len(articles),
+        "analyzed": analyzed,
+        "skipped": skipped,
+        "cutoff_hours": cutoff_hours,
+    }

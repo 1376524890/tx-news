@@ -24,4 +24,4 @@
 | `src/style.css` | 样式 | 全局样式（移植自原 static/style.css）。 |
 | `package.json` | 依赖 | Vue, Vite, vue-router, marked 等。 |
 | `package-lock.json` | 锁文件 | 固化 npm 依赖解析；用于 Docker `npm ci` 的确定性构建。 |
-| `vite.config.ts` | 配置 | 开发代理/构建配置与 dev `allowedHosts`（可用 `TXNEWS_VITE_ALLOWED_HOSTS` 追加）。 |
+| `vite.config.ts` | 配置 | 开发代理/构建配置与 dev `allowedHosts`，包含 `/dashboard` 等 API 代理（可用 `TXNEWS_VITE_ALLOWED_HOSTS` 追加）。 |
