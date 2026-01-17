@@ -1,5 +1,5 @@
 <!-- Input: 用户对话 + /chat/stream SSE（delta/tool/tool_result/done）+ /signals -->
-<!-- Output: 对话 UI（回车发送/Shift+Enter 换行；含工具进度与最新信号侧栏） -->
+<!-- Output: 对话 UI（回车发送/Shift+Enter 换行；含工具进度中文摘要与最新信号侧栏） -->
 <!-- Pos: 前端对话页（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
 <script setup lang="ts">
@@ -336,47 +336,88 @@ function recordLatency(kind: 'status' | 'signals', ms: number) {
     else lat.value.signals_ms = `${avg}ms`
 }
 
-function toolLabel(t: ToolProgressItem): string {
-    const name = String(t.name || '')
-    const args = (t.arguments || {}) as any
-    if (name === 'list_recent') {
-        const minutes = fmtMinutes(args.minutes)
-        const limit = args.limit != null ? Number(args.limit) : null
+function toolTitle(name: string, args: any): string {
+    const safeName = String(name || '')
+    const safeArgs = (args || {}) as any
+    if (safeName === 'list_recent') {
+        const minutes = fmtMinutes(safeArgs.minutes)
+        const limit = safeArgs.limit != null ? Number(safeArgs.limit) : null
         const parts = []
         if (minutes) parts.push(`近 ${minutes}`)
         if (limit != null && Number.isFinite(limit)) parts.push(`最多 ${limit} 条`)
         return parts.length ? `检索近期新闻（${parts.join('，')}）` : '检索近期新闻'
     }
-    if (name === 'search_news') {
-        const q = typeof args.q === 'string' ? args.q.trim() : ''
-        const limit = args.limit != null ? Number(args.limit) : null
+    if (safeName === 'search_news') {
+        const q = typeof safeArgs.q === 'string' ? safeArgs.q.trim() : ''
+        const limit = safeArgs.limit != null ? Number(safeArgs.limit) : null
         const parts = []
         if (q) parts.push(`关键词：${q}`)
         if (limit != null && Number.isFinite(limit)) parts.push(`最多 ${limit} 条`)
         return parts.length ? `搜索知识库（${parts.join('，')}）` : '搜索知识库'
     }
-    if (name === 'get_article_analysis') {
-        const cid = typeof args.canonical_id === 'string' ? args.canonical_id.trim() : ''
+    if (safeName === 'search_entities') {
+        const q = typeof safeArgs.q === 'string' ? safeArgs.q.trim() : ''
+        const limit = safeArgs.limit != null ? Number(safeArgs.limit) : null
+        const parts = []
+        if (q) parts.push(`关键词：${q}`)
+        if (limit != null && Number.isFinite(limit)) parts.push(`最多 ${limit} 条`)
+        return parts.length ? `检索实体（${parts.join('，')}）` : '检索实体'
+    }
+    if (safeName === 'search_events') {
+        const q = typeof safeArgs.q === 'string' ? safeArgs.q.trim() : ''
+        const recentHours = safeArgs.recent_hours != null ? Number(safeArgs.recent_hours) : null
+        const limit = safeArgs.limit != null ? Number(safeArgs.limit) : null
+        const parts = []
+        if (q) parts.push(`关键词：${q}`)
+        if (recentHours != null && Number.isFinite(recentHours) && recentHours > 0) {
+            const recent = fmtMinutes(recentHours * 60)
+            if (recent) parts.push(`近 ${recent}`)
+        }
+        if (limit != null && Number.isFinite(limit)) parts.push(`最多 ${limit} 条`)
+        return parts.length ? `检索事件（${parts.join('，')}）` : '检索事件'
+    }
+    if (safeName === 'get_article_analysis') {
+        const cid = typeof safeArgs.canonical_id === 'string' ? safeArgs.canonical_id.trim() : ''
         return cid ? `读取文章分析（${cid}）` : '读取文章分析'
     }
-    if (name === 'list_signals') {
-        const limit = args.limit != null ? Number(args.limit) : null
+    if (safeName === 'list_signals') {
+        const limit = safeArgs.limit != null ? Number(safeArgs.limit) : null
         return Number.isFinite(limit) ? `读取最新信号（最多 ${limit} 条）` : '读取最新信号'
     }
-    if (name === 'get_event_timeline') {
-        const eventId = typeof args.event_id === 'string' ? args.event_id.trim() : ''
-        const limit = args.limit != null ? Number(args.limit) : null
+    if (safeName === 'get_event_timeline') {
+        const eventId = typeof safeArgs.event_id === 'string' ? safeArgs.event_id.trim() : ''
+        const limit = safeArgs.limit != null ? Number(safeArgs.limit) : null
         const parts = []
         if (eventId) parts.push(eventId)
         if (limit != null && Number.isFinite(limit)) parts.push(`最多 ${limit} 条`)
         return parts.length ? `获取事件时间线（${parts.join('，')}）` : '获取事件时间线'
     }
-    if (name === 'get_entity_profile') {
-        const ts = typeof args.ts_code === 'string' ? args.ts_code.trim() : ''
+    if (safeName === 'get_event_neighbors') {
+        const eventId = typeof safeArgs.event_id === 'string' ? safeArgs.event_id.trim() : ''
+        const limit = safeArgs.limit != null ? Number(safeArgs.limit) : null
+        const parts = []
+        if (eventId) parts.push(`事件ID：${eventId}`)
+        if (limit != null && Number.isFinite(limit)) parts.push(`最多 ${limit} 条`)
+        return parts.length ? `查找关联事件（${parts.join('，')}）` : '查找关联事件'
+    }
+    if (safeName === 'explain_connection') {
+        const eventA = typeof safeArgs.event_a === 'string' ? safeArgs.event_a.trim() : ''
+        const eventB = typeof safeArgs.event_b === 'string' ? safeArgs.event_b.trim() : ''
+        const parts = []
+        if (eventA) parts.push(`事件A：${eventA}`)
+        if (eventB) parts.push(`事件B：${eventB}`)
+        return parts.length ? `解释事件关联（${parts.join('，')}）` : '解释事件关联'
+    }
+    if (safeName === 'get_entity_profile') {
+        const ts = typeof safeArgs.ts_code === 'string' ? safeArgs.ts_code.trim() : ''
         return ts ? `查询个股资料（${ts}）` : '查询个股资料'
     }
-    const raw = fmtToolArgs(args)
-    return raw ? `${name}（${raw}）` : name
+    const raw = fmtToolArgs(safeArgs)
+    return raw ? `${safeName}（${raw}）` : safeName
+}
+
+function toolLabel(t: ToolProgressItem): string {
+    return toolTitle(t.name, t.arguments)
 }
 
 function toolResultText(t: ToolProgressItem): string {
@@ -458,19 +499,6 @@ function toggleToolProgress(msg: Message) {
                         </div>
                         <div v-if="toolResultText(t)" class="tool-sub muted">{{ toolResultText(t) }}</div>
                     </div>
-                </div>
-             </div>
-             <div v-if="msg.meta.tools && msg.meta.tools.length">
-                <div class="pill">工具调用</div>
-                <div v-for="t in msg.meta.tools" :key="t.name">
-                    <span class="mono">{{ t.name }}</span>
-                    <span class="muted">：{{ fmtToolArgs(t.arguments || {}) || "（无参数）" }}</span>
-                </div>
-             </div>
-             <div v-if="msg.meta.evidence && msg.meta.evidence.length" style="margin-top:8px">
-                <div class="pill">证据</div>
-                <div v-for="e in msg.meta.evidence" :key="e.source_id">
-                    <div>{{ e.source_id }} · {{ e.published_at }} · <a :href="e.url" target="_blank">{{ e.url }}</a></div>
                 </div>
              </div>
           </div>
