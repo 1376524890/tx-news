@@ -15,7 +15,7 @@
 
 | 文件 | 地位 | 功能 |
 | --- | --- | --- |
-| `README.md` | 主文档 | 快速开始、API/UI 使用、架构与技术细节、取舍、路线图与 v2 技术路线速览。 |
+| `README.md` | 主文档 | 快速开始、API/UI 使用、架构与技术细节、取舍、路线图与 v2 技术路线速览（含图谱程序框图说明）。 |
 | `AGENTS.md` | 贡献指南 | 本仓库的开发与协作约定。 |
 | `REQUIREMENTS.md` | 运维文档 | 环境/依赖/网络与密钥要求。 |
 | `docker-compose.yml` | 单机编排 | 默认启动基础设施；`profile=app` 时构建并启动主程序容器（含 `db-init` 建表、`bootstrap` 一次性引导主数据、`beat` 定时任务；并支持注入 HTTP(S) 代理用于构建/运行期外网访问；build 阶段 npm registry 默认 `https://registry.npmjs.org/` 可覆写）。 |

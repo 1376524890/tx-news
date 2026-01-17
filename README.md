@@ -58,12 +58,12 @@ flowchart TD
   end
 
   subgraph Graph[图谱构建与更新]
-    KG[kg_update_from_canonical]
-    EM[Qdrant event_memory]
-    EN[Qdrant entity_memory]
-    ED[Qdrant edge_memory]
-    FB[Postgres feedback_logs]
-    GOV[kg_gc / kg_reconcile]
+    KG[图谱更新任务（kg_update_from_canonical）]
+    EM[事件记忆（Qdrant）]
+    EN[实体记忆（Qdrant）]
+    ED[关系边记忆（Qdrant）]
+    FB[反馈日志（Postgres）]
+    GOV[图谱治理任务（kg_gc / kg_reconcile）]
   end
 
   subgraph Chat[对话与 Graph RAG]
