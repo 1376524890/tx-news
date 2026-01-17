@@ -28,7 +28,7 @@ type DashboardSummary = {
   recent: DashboardRecentItem[]
 }
 
-const windowMinutes = ref(720)
+const windowMinutes = ref(180)
 const summary = ref<DashboardSummary | null>(null)
 const error = ref<string | null>(null)
 let refreshInFlight = false
@@ -116,6 +116,7 @@ watch(windowMinutes, () => refresh())
           >
             <option :value="60">60m</option>
             <option :value="180">3h</option>
+            <option :value="360">6h</option>
             <option :value="720">12h</option>
           </select>
           <button class="btn btn-ghost" @click="refresh">刷新</button>

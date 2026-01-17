@@ -1,227 +1,184 @@
-<!-- Input: v1 现状（collector→worker→Postgres/Qdrant）+ 你的决策（v2.2 一次性全量交付；实体仅 ticker；边存 Qdrant；UI 反馈闭环；单一权威实施文档） -->
-<!-- Output: 可直接按步骤实施的 v2.2 开发清单（包含数据结构、任务、API、UI、验收与回滚），适合 AI 逐条执行 -->
-<!-- Pos: v2 实施权威文档（变更时同步更新以上注释与 docs/FOLDER.md；并同步更新涉及目录的 FOLDER.md） -->
+<!-- Input: v1 现状（采集/分析/检索）+ v2 目标与约束 -->
+<!-- Output: v2 技术路线总结（架构、数据流、调用链、完整程序框图、图谱自我更新） -->
+<!-- Pos: v2 技术路线说明（变更时同步更新以上注释与 docs/FOLDER.md；并同步更新涉及目录的 FOLDER.md） -->
 
-# TX-News v2.2 一次性交付实施文档（可执行步骤）
+# TX-News v2 技术路线总结
 
-本文件是 v2 的唯一权威实施指南。目标：在 v1 采集/去重/分析/向量检索基础上，一次性完成 **v2.2（自连接 + 自迭代治理 + 反馈闭环）** 的全部开发，并在现有 `/dashboard` 页面新增 **实时 3D 知识图谱** 可视化。
+一句话概览：在 v1 的采集/分析基础上，补上“事件-实体-关系”图谱，并通过反馈与周期任务让图谱持续更新。
 
-固定决策（不可变更）：
-- 实体类型：仅 `ticker/company`（A 股 `ts_code`）。
-- 边存储：Qdrant `txnews_edge_memory`（边作为可检索对象 + 可解释 reason_text）。
-- 存储策略：Qdrant 为主检索（event/entity/edge memory）；Postgres 仅做审计/回滚/反馈日志。
-- UI 反馈闭环：前端上报点击/赞踩；后端落 Postgres `feedback_logs`。
-- 交付一次完成：不保留“可选/建议/二选一/必要时”分支。
+## 1. 这条路线要解决什么
 
----
+- 从“新闻列表”走向“关系网络”，更容易看到事件之间的联系。
+- 每条关系都能解释清楚：它从哪些新闻得来，为什么成立。
+- 图谱能随新数据和用户反馈不断修正，而不是一写就固定。
+- 出问题能回退，有审计、有快照，改错不怕。
 
-## 0. 基线与统一约束（先读）
+## 2. 核心思路
 
-代码落点（固定；按此创建/修改文件）：
-- Postgres ORM：`src/tx_news/db.py`
-- Postgres DAO：`src/tx_news/storage/postgres.py`
-- Qdrant 封装：`src/tx_news/storage/qdrant.py`
-- KG 逻辑：`src/tx_news/kg/`（新建，包含规则生成/相似度/GraphOps schema）
-- KG 任务：`src/tx_news/tasks/kg.py`（新建）
-- Celery 注册：`src/tx_news/tasks/celery_app.py`（加入 include 与 route）
-- API：`apps/api/main.py`（新增 /kg/graph 与 /feedback；新增 v2 工具接口时也放这里）
-- 前端 3D 组件：`apps/web/src/components/KG3DGraph.vue`（已规划）
-- 看板页：`apps/web/src/views/DashboardView.vue`（集成 3D 组件）
+- 事件是节点，A 股公司/股票是实体节点。
+- 关系是边，每条边都带证据（canonical_id 列表）。
+- Qdrant 保存图谱记忆（event/entity/edge），Postgres 保存审计/反馈。
+- 新数据驱动图谱增长，反馈与治理任务让图谱变“更准”。
+- 所有写入幂等；prod/sandbox 分离，必要时可回滚。
 
-统一约束（写代码时必须满足）：
-- 不输出新闻原文；UI/接口仅返回 URL + 短摘要/结构化字段。
-- 任意“关系/边”必须可追溯：`evidence_canonical_ids` 非空。
-- 所有写入任务幂等：同一 `canonical_id` 重复触发不会产生重复节点/边。
-- 所有 v2 写入都以 `graph_env=prod` 为默认环境；同时实现 `sandbox` 隔离并可回滚。
+## 3. 模块与分工
 
-统一命名（全仓库一致）：
-- Node ID：
-  - Event 节点：`event:{event_id}`
-  - Ticker 节点：`ticker:{ts_code}`
-- Edge ID：`edge:{src}|{relation}|{dst}`（用于生成确定性 uuid5 point id）
-- Qdrant point_id：`{graph_env}::{item_id}`（保证 sandbox/prod 可同时存在；payload 内保留 `node_id/edge_id` 作为域内稳定 ID）
+- Collector：拉取新闻源，写入原始数据（MinIO）并发消息（NATS）。
+- Worker 流水线：清洗、去重、分析，产出 event/ticker 等结构化信息。
+- KG 任务：把结构化信息变成节点/边，写入图谱记忆。
+- API：对外提供图谱数据与反馈入口。
+- Web：展示图谱，收集点击/赞踩反馈。
 
----
+## 4. 数据流
 
-## 1. 数据结构（必须先落地）
+```mermaid
+flowchart TD
+  A[新闻源] --> B[Collector 抓取]
+  B --> C[MinIO 原文 + NATS 消息]
+  C --> D[Worker 流水线]
+  D --> E[结构化分析: event/ticker]
+  E --> F[kg_update_from_canonical]
+  F --> G[Qdrant 图谱记忆]
+  G --> H["/kg/graph API"]
+  H --> I[Dashboard 图谱展示]
+  I --> J[用户反馈: 点击/赞踩]
+  J --> K[Postgres feedback_logs]
+  K --> L[kg_gc / kg_reconcile]
+  L --> F
+```
 
-### 1.1 Qdrant collections（固定 3 个）
+## 5. 调用链：从一条新闻到图谱
 
-1) `txnews_event_memory`
-- point_id：`prod::event:{event_id}` / `sandbox::event:{event_id}`
-- vector：`embedding(snapshot_text)`
-- payload（最小且固定）：
-  - `node_type`: `"event"`
-  - `node_id`: `"event:{event_id}"`
-  - `event_id`: string
-  - `event_type`: string
-  - `snapshot_text`: string（<= 2000 chars，规则版生成）
-  - `canonical_ids`: string[]（证据 canonical_id 列表，最多 64）
-  - `last_published_at_ts`: int（unix seconds）
-  - `updated_at_ts`: int（unix seconds）
-  - `graph_env`: `"prod"|"sandbox"`
+```mermaid
+flowchart TD
+  Ingest[ingest_raw] --> Normalize[normalize_raw]
+  Normalize --> Dedup[dedup_store]
+  Dedup --> Analyze[analyze]
+  Analyze --> Deep[deep_analysis 可选]
+  Analyze --> KG[kg_update_from_canonical]
+  Deep --> KG
+  KG --> Event[写 event_memory]
+  KG --> Entity[写 entity_memory]
+  KG --> Edge[写 edge_memory]
+```
 
-2) `txnews_entity_memory`
-- point_id：`prod::ticker:{ts_code}` / `sandbox::ticker:{ts_code}`
-- vector：`embedding(description_text)`
-- payload：
-  - `node_type`: `"ticker"`
-  - `node_id`: `"ticker:{ts_code}"`
-  - `ts_code`: string
-  - `name`: string
-  - `industry`: string|null
-  - `description_text`: string（<= 1200 chars）
-  - `updated_at_ts`: int
-  - `graph_env`: `"prod"|"sandbox"`
+## 6. 图谱自我迭代/自我更新
 
-3) `txnews_edge_memory`
-- point_id：`prod::edge:{src}|{relation}|{dst}` / `sandbox::edge:{src}|{relation}|{dst}`
-- vector：`embedding(reason_text)`
-- payload：
-  - `edge_type`: `"edge"`
-  - `edge_id`: `"edge:{src}|{relation}|{dst}"`
-  - `src`: string（Node ID，如 `event:...`）
-  - `dst`: string（Node ID，如 `ticker:...` 或 `event:...`）
-  - `relation`: string（固定集合：`mentions|related_to|evolves_to|retrieval_priority|ignore`）
-  - `weight`: float（0~1）
-  - `confidence`: float（0~1）
-  - `reason_text`: string（<= 800 chars）
-  - `evidence_canonical_ids`: string[]（最多 64）
-  - `updated_at_ts`: int
-  - `graph_env`: `"prod"|"sandbox"`
+### 6.1 新数据驱动
 
-### 1.2 Postgres 表（固定 4 个）
+- 每条新闻分析后都会触发 `kg_update_from_canonical`。
+- 事件节点使用统一模板生成 `snapshot_text`，便于稳定对比。
+- 关系边会写 `reason_text` 和证据列表，保证可解释。
 
-1) `feedback_logs`（已实现，若不存在则由 `init_db()` 自动建表）
-- `uid`、`kind`、`data`、`created_at`
+### 6.2 反馈驱动
 
-2) `kg_runs`
-- `run_id`（uuid）、`graph_env`、`trigger_canonical_id`、`status`、`started_at`、`finished_at`
+- 前端点击/赞踩会上报 `/feedback`。
+- 反馈进入 `feedback_logs`，成为调权与清理的依据。
+- 有用的边权重上升，没用的边被降权或移除。
 
-3) `kg_ops_log`
-- `id`、`run_id`、`phase`（`planner|validator|critic|executor`）、`payload`（jsonb）、`created_at`
+### 6.3 周期治理
 
-4) `kg_snapshots`
-- `snapshot_id`、`run_id`、`graph_env`、`snapshot_payload`（jsonb：包含本次涉及的 Qdrant point ids 列表）、`created_at`
+- `kg_gc` 每小时处理控制边与旧边，避免图谱膨胀。
+- `kg_reconcile` 每天重算事件快照，避免摘要“跑偏”。
 
----
+### 6.4 完整程序框图
 
-## 2. 任务与流水线（必须可跑通）
+```mermaid
+flowchart TD
+  subgraph Ingest[数据抓取与分析]
+    S[新闻源] --> C[Collector 抓取]
+    C --> N[NATS 消息]
+    C --> M[MinIO 原文]
+    N --> W[Worker 流水线]
+    W --> P[Postgres 结构化数据]
+    W --> V[Qdrant 新闻向量]
+  end
 
-### 2.1 Celery 接入点（强制）
+  subgraph Graph[图谱构建与更新]
+    KG[kg_update_from_canonical]
+    EM[Qdrant event_memory]
+    EN[Qdrant entity_memory]
+    ED[Qdrant edge_memory]
+    FB[Postgres feedback_logs]
+    GOV[kg_gc / kg_reconcile]
+  end
 
-触发规则（固定）：
-- `pipeline.analyze()` 成功写入 analyses 后：异步触发 `kg_update_from_canonical(canonical_id)`。
-- `deep_analysis.deep_optimize()` 成功写回 analyses 后：再次触发 `kg_update_from_canonical(canonical_id)`（保证 deep 优化后的结构化字段能进入 KG）。
+  subgraph Chat[对话与 Graph RAG]
+    U[用户] --> UI[Web 对话页]
+    UI --> API["/chat/stream API"]
+    API --> Agent[TxNewsAgent]
+    Agent --> Tools[Graph RAG 工具集]
+    Agent --> LLM[LLM 推理]
+    LLM --> API
+    API --> UI
+  end
 
-### 2.2 任务：`kg_update_from_canonical`（规则版、幂等、分钟级）
+  P --> KG
+  KG --> EM
+  KG --> EN
+  KG --> ED
+  FB --> GOV
+  GOV --> KG
 
-输入：`canonical_id`
+  Tools --> EM
+  Tools --> EN
+  Tools --> ED
+  Tools --> P
 
-处理步骤（顺序固定）：
-1) 从 Postgres 读取：
-   - `articles`（title/text）
-   - `analyses`（event_id/event_type/tickers/impact）
-   - `article_versions`（最新 url/published_at）
-2) 写 `txnews_entity_memory`（prod）：
-   - 对每个 ticker：拼 `description_text = "{ts_code} {name}\\nindustry=...\\nrecent_event_id={event_id}\\nrecent_url={url}"`（截断）
-   - embedding 后 upsert
-3) 写 `txnews_event_memory`（prod）：
-   - 取该 `event_id` 最近 12 篇 `canonical_id`（按分析时间倒序）
-   - 规则生成 `snapshot_text`（固定模板：事件类型/关键 ticker 列表/最新 3 条标题/影响方向占位/证据 URL 列表）
-   - embedding 后 upsert
-4) 写 `txnews_edge_memory`（prod）：
-   - `mentions`：`event:{event_id} -> ticker:{ts_code}`（weight=归一化频次；confidence=0.7）
-   - `related_to`：对同窗口内其他 event 做 TopK（K=6）相似连接（基于 ticker overlap + 同 event_type bonus；confidence=0.55）
-   - 每条边必须写 `reason_text` 与 `evidence_canonical_ids`
-5) 记录审计：
-   - 写 `kg_runs` / `kg_ops_log`（phase=executor）/ `kg_snapshots`
+  UI --> FAPI["/feedback API"]
+  FAPI --> FB
 
-### 2.3 周期治理任务（必须实现）
+  UI --> Dash[Dashboard 图谱页]
+  Dash --> GAPI["/kg/graph API"]
+  GAPI --> EM
+  GAPI --> EN
+  GAPI --> ED
+```
 
-1) `kg_gc`（每小时执行）
-- 删除/降权规则（固定）：
-  - `updated_at_ts < now - 7d` 的 `ignore` / `retrieval_priority` 控制边：从 Qdrant 删除
-  - `updated_at_ts < now - 30d` 的 `related_to` 边：`weight *= 0.5`（重新 upsert）
+### 6.5 图谱更新流程
 
-2) `kg_reconcile`（每日执行）
-- 对过去 24h 的 `event_id` 重新生成 `snapshot_text`，保证一致性与压缩质量（规则版）。
+```mermaid
+flowchart TD
+  Start([触发: 新数据/定时]) --> Plan[Planner 生成变更清单]
+  Plan --> Validate{校验证据/字段/环境}
+  Validate -- 通过 --> Critic[Critic 记录评估]
+  Critic --> Sandbox[写入 sandbox]
+  Sandbox --> Snapshot[记录快照与审计]
+  Snapshot --> Commit[提交到 prod]
+  Commit --> End([完成])
+  Validate -- 不通过 --> Reject[记录失败]
+  Commit -. 异常 .-> Rollback[按快照回滚]
+```
 
-3) `kg_rollback(snapshot_id)`（运维手段，必须可用）
-- 将 prod 环境的 Qdrant points 回滚到 `kg_snapshots.snapshot_payload.before` 记录的提交前状态（对提交时不存在的点执行删除，对存在的点执行还原 upsert）。
+## 7. 关键数据落点
 
-调度方式（固定）：
-- Docker：`docker-compose.yml` 启动 `beat` 服务（`celery beat`），调度规则来自 `src/tx_news/tasks/celery_app.py` 的 `beat_schedule`。
+### 7.1 Qdrant：图谱记忆
 
----
+| Collection | 作用 | 关键内容 |
+| --- | --- | --- |
+| `txnews_event_memory` | 事件节点 | `event_id`、`snapshot_text`、`canonical_ids`、`graph_env` |
+| `txnews_entity_memory` | 实体节点 | `ts_code`、`name`、`description_text`、`graph_env` |
+| `txnews_edge_memory` | 关系边 | `src/dst`、`relation`、`reason_text`、`evidence_canonical_ids` |
 
-## 3. GraphOps（v2.2 安全带：计划-执行分离）
+### 7.2 Postgres：审计与反馈
 
-GraphOps 在本项目的固定实现：
-- Planner（规则版）输出 `GraphOpsPlan JSON`（节点/边的 UPSERT/DELETE 计划）。
-- Validator 进行 schema/证据校验（拒绝无证据边、空 reason_text、非法 graph_env 等）。
-- Critic 输出 `EvalReport JSON`（当前实现固定 pass，但保留结构与审计记录）。
-- Executor 仅执行 Validator+Critic 通过的 ops；先写 sandbox，再 commit 到 prod。
+| 表 | 作用 |
+| --- | --- |
+| `feedback_logs` | 用户点击/赞踩反馈 |
+| `kg_runs` | 每次图谱更新的运行记录 |
+| `kg_ops_log` | Planner/Validator/Critic 的审计轨迹 |
+| `kg_snapshots` | 回滚所需的快照数据 |
 
-实现要求（不可省略）：
-- sandbox 与 prod 的隔离：同 collection 内以 `graph_env` 字段过滤 + point_id 以 `{graph_env}::` 前缀隔离（两套点可同时存在）。
-- commit 策略：先写 Postgres 审计（`kg_runs/kg_ops_log/kg_snapshots`），再写 Qdrant；失败必须可重试且幂等。
+## 8. 对外接口与前端呈现
 
----
+- `GET /kg/graph?minutes=180`：返回图谱节点/关系，用于 3D 图展示。
+- `POST /feedback`：接收点击/赞踩，形成更新依据。
+- `/dashboard` 图谱页：轮询 `/kg/graph`，显示节点关系与证据链接。
 
-## 4. API（对 UI/Agent 的固定契约）
+## 9. 关键规则与约束
 
-### 4.1 Dashboard 3D 图谱
-
-- `GET /kg/graph?minutes=180`
-  - 返回 `{nodes, links, stats, generated_at}`
-  - nodes 仅包含 `event` 与 `ticker`
-  - links 至少包含 `mentions`
-
-### 4.2 反馈闭环
-
-- `POST /feedback`：body `{kind, data}`（由 cookie uid 归属用户）
-
-### 4.3 Agent 工具（对话固定策略）
-
-对话工具集合（固定；实现于 `src/tx_news/agent/tools.py` 与 `src/tx_news/agent/txnews_agent.py`）：
-- `list_recent(minutes, limit)`：新鲜度校准（必须先调用）
-- `search_entities(q, limit)`：从 `txnews_entity_memory` 检索实体
-- `search_events(q, limit, recent_hours)`：从 `txnews_event_memory` 检索事件快照 + 证据 URL
-- `get_event_neighbors(event_id, limit)`：从 `txnews_edge_memory` 拉取 related_to 邻居事件
-- `explain_connection(event_a, event_b)`：解释事件间连接原因（reason_text + evidence_canonical_ids）
-- `search_news(q, limit)`：v1 文章向量检索（补充证据用）
-- `get_article_analysis(canonical_id)`：补取单条分析
-
-对话执行顺序（固定）：
-1) `list_recent`（minutes=recent_minutes, limit=20）
-2) `search_entities` + `search_events`
-3) 若需要关系/传导链：`get_event_neighbors` / `explain_connection`
-4) 若证据不足：`search_news` + `get_article_analysis`
-
----
-
-## 5. 前端：Dashboard 实时 3D 知识图谱（必须交付）
-
-固定实现：
-- 页面：`/dashboard`（现有看板页面）
-- 组件：`apps/web/src/components/KG3DGraph.vue`
-- 渲染：Three.js（WebGL），深色现代风格（渐变背景 + 星点 + 低透明连线）
-- 更新：每 3 秒轮询 `/kg/graph` 刷新图
-- 交互：
-  - 点击节点显示侧栏详情（事件：最近证据链接；实体：名称/ts_code）
-  - 点击证据链接上报 `/feedback`（kind=`kg_graph_evidence_click`）
-  - 节点赞/踩上报 `/feedback`（kind=`kg_graph_thumb_up|kg_graph_thumb_down`）
-
----
-
-## 6. 验收（DoD：必须全部通过）
-
-1) 数据：
-- 新增一条新闻进入 pipeline 后，`txnews_event_memory` / `txnews_entity_memory` / `txnews_edge_memory` 均在分钟级出现更新（prod）。
-2) 可解释：
-- 任意一条 edge payload 的 `evidence_canonical_ids` 非空；`reason_text` 非空。
-3) UI：
-- `/dashboard` 可稳定渲染 3D 图谱；窗口切换（60m/180m/720m）可实时更新；点击节点可看到证据链接。
-4) 反馈：
-- 任意点击/赞踩会写入 `feedback_logs`（可用 SQL 验证最新记录存在）。
+- UI/API 不返回新闻全文，只给结构化结果和链接。
+- 关系必须有证据：`evidence_canonical_ids` 不能为空。
+- Node/Edge ID 保持稳定：`event:{event_id}` / `ticker:{ts_code}` / `edge:{src}|{relation}|{dst}`。
+- 默认写入 `graph_env=prod`，但保留 `sandbox` 用于隔离与回滚。
+- 先审计、后写入；失败可重试、可回滚。

@@ -15,8 +15,8 @@
 
 | 文件 | 地位 | 功能 |
 | --- | --- | --- |
-| `V2_NEWS_KG_IMPLEMENTATION.md` | 实施权威 | v2.2 一次性全量交付的可执行步骤文档（数据结构/任务/API/UI/验收/回滚）。 |
-| `V2_NEWS_KG_DESIGN.md` | 入口 | 指向 `V2_NEWS_KG_IMPLEMENTATION.md`（不再承载实现细节）。 |
-| `V2_NEWS_KG_ATTACHMENT_DEV_GUIDE.md` | 入口 | 指向 `V2_NEWS_KG_IMPLEMENTATION.md`（不再承载实现细节）。 |
-| `V2_NEWS_KG_DELIVERY_PLAN.md` | 入口 | 指向 `V2_NEWS_KG_IMPLEMENTATION.md`（不再承载实现细节）。 |
+| `V2_NEWS_KG_IMPLEMENTATION.md` | 技术路线 | v2 技术路线总结（架构、数据流、调用链、完整程序框图、图谱自我更新、数据落点与约束）。 |
+| `V2_NEWS_KG_DESIGN.md` | 入口 | 指向 `V2_NEWS_KG_IMPLEMENTATION.md`（入口指向，不展开细节）。 |
+| `V2_NEWS_KG_ATTACHMENT_DEV_GUIDE.md` | 入口 | 指向 `V2_NEWS_KG_IMPLEMENTATION.md`（入口指向，不展开细节）。 |
+| `V2_NEWS_KG_DELIVERY_PLAN.md` | 入口 | 指向 `V2_NEWS_KG_IMPLEMENTATION.md`（入口指向，不展开细节）。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |
