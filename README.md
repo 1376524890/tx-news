@@ -662,7 +662,7 @@ Postgres 核心表（以 `src/tx_news/db.py` 为准）：
 - `kg_runs`/`kg_ops_log`/`kg_snapshots`：图谱更新审计与回滚
 
 Qdrant 写入形态：
-- **新闻向量**（以 `src/tx_news/tasks/pipeline.py:dedup_store()` 为准）：每条 canonical 1 个 point（`vector = embedding(articles.text)`）；`point_id` 使用 `canonical_id` 派生的确定性 UUID；payload 存 `canonical_id/title/source_id/url/published_at`。
+- **新闻向量**（以 `src/tx_news/tasks/pipeline.py:dedup_store()` 为准）：每条 canonical 1 个 point（`vector = embedding(articles.text)`）；`point_id` 使用 `canonical_id` 派生的确定性 UUID；payload 存 `canonical_id/title/source_id/url/published_at/published_at_ts/fetched_at_ts`。
 - **图谱记忆**（以 `src/tx_news/tasks/kg.py` 为准）：event/entity/edge 三类 collection，边带 `reason_text` 与 `evidence_canonical_ids`。
 
 ### 6.10 配置参考（常用项）
@@ -670,6 +670,7 @@ Qdrant 写入形态：
 
 `.env`（常用）：
 - `TXNEWS_PG_DSN`/`TXNEWS_REDIS_URL`/`TXNEWS_NATS_URL`/`TXNEWS_S3_*`/`TXNEWS_QDRANT_*`：基础设施连接
+- `TXNEWS_DEDUP_WINDOW_HOURS`：去重窗口（小时；LSH/Qdrant 仅对比窗口内文章）
 - `TXNEWS_LLM_BASE_URL`/`TXNEWS_LLM_MODEL_NAME`/`TXNEWS_LLM_API_KEY`：LLM（OpenAI 兼容）
 - `TXNEWS_CHAT_ALLOW_DEEP_FALLBACK`：对话在网络不稳定时是否允许回退 `llm.deep`（默认 0；建议保持 0）
 - `TXNEWS_ALLOW_FULL_TEXT`：是否允许内部 KB 接口返回抽取后的全文（默认 0）

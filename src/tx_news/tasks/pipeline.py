@@ -1,5 +1,5 @@
-# Input: NATS raw payload + Postgres/MinIO/Qdrant/embedding/LLM（可选）
-# Output: canonical 入库、向量 upsert、analysis upsert/幂等跳过、signals 写入
+# Input: NATS raw payload + Postgres/MinIO/Qdrant/embedding/LLM（可选）+ 去重窗口配置
+# Output: canonical 入库、向量 upsert（含时间戳 payload）、analysis upsert/幂等跳过、signals 写入
 # Pos: 主流水线任务定义（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -8,13 +8,14 @@ import hashlib
 import ipaddress
 import logging
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from celery import chain
 from redis import Redis
+from qdrant_client.http import models as qm
 
 from tx_news.analysis.dashscope import DashScopeClient
 from tx_news.analysis.rules import EventWindowPlanner, classify_event_type, pick_key_entity, stable_event_id
@@ -49,6 +50,21 @@ ANALYZE_LOCK_TTL_SECONDS = 10 * 60
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _parse_iso_ts(value: str | None) -> float | None:
+    if not value:
+        return None
+    s = value.strip()
+    if s.endswith("Z"):
+        s = f"{s[:-1]}+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
 def _is_local_llm_base_url(base_url: str) -> bool:
@@ -152,11 +168,23 @@ def dedup_store(normalized: dict[str, Any]) -> dict[str, Any]:
     init_db(engine)
 
     canonical_candidate = sha256_hex(normalized["text"])
+    now = utcnow()
+    dedup_window_hours = int(settings.dedup_window_hours or 12)
+    cutoff_ts = None
+    if dedup_window_hours > 0:
+        cutoff_ts = (now - timedelta(hours=dedup_window_hours)).timestamp()
+
+    published_at = normalized.get("published_at")
+    fetched_at = normalized.get("fetched_at")
+    published_at_ts = _parse_iso_ts(published_at)
+    fetched_at_ts = _parse_iso_ts(fetched_at)
+    dedup_ts_candidates = [ts for ts in (published_at_ts, fetched_at_ts) if ts is not None]
+    dedup_ts = max(dedup_ts_candidates) if dedup_ts_candidates else now.timestamp()
 
     # LSH near-duplicate
     lsh_path = Path("var/lsh_index.pkl")
     lsh = LshDeduper(index=LshIndex(path=lsh_path))
-    dup = lsh.find_duplicate(text=normalized["text"])
+    dup = lsh.find_duplicate(text=normalized["text"], cutoff_ts=cutoff_ts)
     if dup and get_article(engine, dup):
         canonical_id = dup
     else:
@@ -172,7 +200,15 @@ def dedup_store(normalized: dict[str, Any]) -> dict[str, Any]:
         model_name_or_path=model_name,
         strategy=qdrant_strategy,
     )
-    hits = qdrant.search(vector=vector, limit=1)
+    qdrant_filter = None
+    if cutoff_ts is not None:
+        qdrant_filter = qm.Filter(
+            should=[
+                qm.FieldCondition(key="published_at_ts", range=qm.Range(gte=cutoff_ts)),
+                qm.FieldCondition(key="fetched_at_ts", range=qm.Range(gte=cutoff_ts)),
+            ]
+        )
+    hits = qdrant.search(vector=vector, limit=1, filter_qdrant=qdrant_filter)
     if hits and hits[0].score and hits[0].score >= 0.92:
         canonical_id = scored_point_canonical_id(hits[0]) or str(hits[0].id)
 
@@ -193,10 +229,9 @@ def dedup_store(normalized: dict[str, Any]) -> dict[str, Any]:
         )
         upsert_article(engine, article)
         # add to LSH index only for newly created canonical articles
-        lsh.insert(canonical_id, normalized["text"])
+        lsh.insert(canonical_id, normalized["text"], timestamp=dedup_ts, cutoff_ts=cutoff_ts)
         insert_signal(engine, canonical_id, "breaking", {"reason": "new_canonical"})
 
-    published_at = normalized.get("published_at")
     insert_version(
         engine,
         canonical_id=canonical_id,
@@ -216,6 +251,10 @@ def dedup_store(normalized: dict[str, Any]) -> dict[str, Any]:
         "url": normalized["url"],
         "published_at": published_at,
     }
+    if published_at_ts is not None:
+        payload["published_at_ts"] = published_at_ts
+    if fetched_at_ts is not None:
+        payload["fetched_at_ts"] = fetched_at_ts
     qdrant.upsert(point_id=canonical_id, vector=vector, payload=payload)
 
     canonical = {"canonical_id": canonical_id, "is_new_canonical": is_new_canonical, **normalized}

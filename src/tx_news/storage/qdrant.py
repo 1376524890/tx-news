@@ -1,5 +1,5 @@
 # Input: Qdrant url、collection 与向量/payload
-# Output: collection 初始化 + upsert/search/retrieve/scroll/delete
+# Output: collection 初始化 + upsert/search/retrieve/scroll/delete（支持 range filter）
 # Pos: Qdrant 访问封装（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -169,10 +169,11 @@ class QdrantStore:
         vector: list[float],
         limit: int = 10,
         filter_payload: dict[str, Any] | None = None,
+        filter_qdrant: qm.Filter | None = None,
     ) -> list[qm.ScoredPoint]:
         self.ensure_collection(len(vector))
-        qfilter = None
-        if filter_payload:
+        qfilter = filter_qdrant
+        if qfilter is None and filter_payload:
             must = []
             for k, v in filter_payload.items():
                 must.append(qm.FieldCondition(key=k, match=qm.MatchValue(value=v)))

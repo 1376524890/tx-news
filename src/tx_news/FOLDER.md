@@ -18,7 +18,7 @@
 | `__init__.py` | 包入口 | 包版本与导出符号。 |
 | `db.py` | ORM 模型 | SQLAlchemy 表结构与关系定义。 |
 | `models.py` | DTO 模型 | Pydantic 数据结构（Raw/Normalized/Canonical/Analysis）。 |
-| `settings.py` | 配置入口 | 环境变量（含 `llm.chat`/`llm.deep` 分流）+ `config/` 文件加载与默认值；并提供 `TXNEWS_CHAT_ALLOW_DEEP_FALLBACK`（对话在网络/鉴权/计费失败时可回退到 `llm.deep`）与 `TXNEWS_ALLOW_FULL_TEXT`（内部 KB 全文开关）。 |
+| `settings.py` | 配置入口 | 环境变量（含 `llm.chat`/`llm.deep` 分流与 `TXNEWS_DEDUP_WINDOW_HOURS` 去重窗口）+ `config/` 文件加载与默认值；并提供 `TXNEWS_CHAT_ALLOW_DEEP_FALLBACK`（对话在网络/鉴权/计费失败时可回退到 `llm.deep`）与 `TXNEWS_ALLOW_FULL_TEXT`（内部 KB 全文开关）。 |
 | `logging.py` | 基础设施 | 统一日志格式与等级配置。 |
 | `user_llm_config.py` | 用户配置 | 单用户在线 LLM 配置读写（用于按用户分摊 chat 成本）。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |
