@@ -35,6 +35,7 @@
 | `check_crawler_connectivity.sh` | 运维排障 | 爬虫 sources 连通性检查（host vs collector 容器；含 NATS/infra TCP）。 |
 | `start_local.sh` | 运维入口 | docker 仅启动基础设施；宿主机 venv 启动主程序（api/worker/beat/collector/nats-bridge/admin）、db-init/bootstrap，启动前等待 infra 端口就绪（可跳过）；GPU 模式可选启动宿主机 vLLM；默认 8000 Vite dev。 |
 | `stop_local.sh` | 运维入口 | 停止 `start_local.sh` 启动的宿主机进程（含 vLLM）；可选 `--keep-infra` 保留 infra 容器。 |
+| `start_local.sh.backup` | 备份 | `start_local.sh` 的本地备份。 |
 | `demo_kb_api_test.py` | Demo/测试 | 在服务运行中调用 `/search` 并跟进 `/articles/{canonical_id}`，验证知识库检索链路可用（不写入任何测试数据）。 |
 | `demo_db_api_test.py` | Demo/测试 | 在服务运行中调用 `/status`、`/signals`、`/articles/{canonical_id}`（可选强制非空），验证数据库读路径可用。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |

@@ -28,6 +28,16 @@
 | `.gitignore` | 仓库维护 | 忽略本地运行态与缓存文件（含 `celerybeat-schedule.*`）。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |
 
+## 本地运行态文件（gitignored）
+
+| 文件 | 地位 | 功能 |
+| --- | --- | --- |
+| `.env` | 本地配置 | 本机环境变量（建议从 `.env.example` 复制）。 |
+| `.env.backup` | 备份 | 本地 `.env` 备份。 |
+| `celerybeat-schedule.dat` | 运行态 | celery beat 持久化调度状态（本地生成）。 |
+| `celerybeat-schedule.bak` | 运行态 | celery beat 调度状态备份。 |
+| `celerybeat-schedule.dir` | 运行态 | celery beat 调度状态索引。 |
+
 ## 子目录
 
 | 子目录 | 地位 | 功能 |

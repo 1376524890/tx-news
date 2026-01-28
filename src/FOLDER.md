@@ -15,3 +15,4 @@
 | --- | --- | --- |
 | `tx_news/` | 核心包 | 包含所有核心业务逻辑（Crawler, ETL, Storage, Agent）。 |
 | `tx_news.egg-info/` | 元数据 | pip install -e . 生成的包信息（gitignored）。 |
+| `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |
