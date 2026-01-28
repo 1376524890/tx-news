@@ -29,6 +29,41 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _is_article_expired(published_at: str | None, fetched_at: str | None, hours: int = 72) -> bool:
+    """Check if article is expired based on published_at or fetched_at (UTC+8)."""
+    from datetime import timedelta
+
+    try:
+        utc8_tz = timezone(timedelta(hours=8))
+        now = datetime.now(utc8_tz)
+        cutoff_ts = (now - timedelta(hours=hours)).timestamp()
+        
+        if published_at:
+            try:
+                dt = datetime.fromisoformat(published_at)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                ts = dt.timestamp()
+                if ts < cutoff_ts:
+                    return True
+            except Exception:
+                pass
+        
+        if fetched_at:
+            try:
+                dt = datetime.fromisoformat(fetched_at)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                ts = dt.timestamp()
+                if ts < cutoff_ts:
+                    return True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return False
+
+
 def _release_redis_lock(redis: Redis, key: str, token: str) -> None:
     redis.eval(
         "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
@@ -61,6 +96,13 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
     canonical_id = str(canonical.get("canonical_id") or "").strip()
     if not canonical_id:
         return {"skipped": True, "reason": "missing_canonical_id"}
+
+    # Skip deep analysis for expired articles (>72 hours)
+    published_at = canonical.get("published_at")
+    fetched_at = canonical.get("fetched_at")
+    if _is_article_expired(published_at, fetched_at, hours=72):
+        logger.info("deep_analysis skipped canonical_id=%s reason=article_expired", canonical_id)
+        return {"skipped": True, "reason": "article_expired"}
 
     current_checksum = str(canonical.get("checksum") or "").strip()
     current_analysis = get_analysis(engine, canonical_id)

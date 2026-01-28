@@ -23,6 +23,7 @@ def make_celery() -> Celery:
             "tx_news.tasks.deep_analysis",
             "tx_news.tasks.maintenance",
             "tx_news.tasks.kg",
+            "tx_news.tasks.news_queue",
         ],
     )
     app.conf.task_default_queue = "default"
@@ -31,6 +32,7 @@ def make_celery() -> Celery:
         "tx_news.tasks.deep_analysis.*": {"queue": "default"},
         "tx_news.tasks.maintenance.*": {"queue": "default"},
         "tx_news.tasks.kg.*": {"queue": "default"},
+        "tx_news.tasks.news_queue.*": {"queue": "default"},
     }
     app.conf.worker_prefetch_multiplier = 1
     app.conf.task_acks_late = True
@@ -50,6 +52,11 @@ def make_celery() -> Celery:
             "task": "tx_news.tasks.maintenance.analyze_recent_articles",
             "schedule": crontab(minute=0),  # every hour
         },
+        "news_queue_worker_every_minute": {
+            "task": "tx_news.tasks.news_queue.queue_worker_task",
+            "schedule": crontab(minute="*"),  # every minute
+            "options": {"expires": 300},  # task expires after 5 minutes to prevent backlog
+        },
     }
     return app
 
@@ -62,4 +69,5 @@ celery_app = make_celery()
 from tx_news.tasks import deep_analysis as _deep_analysis  # noqa: E402,F401
 from tx_news.tasks import kg as _kg  # noqa: E402,F401
 from tx_news.tasks import maintenance as _maintenance  # noqa: E402,F401
+from tx_news.tasks import news_queue as _news_queue  # noqa: E402,F401
 from tx_news.tasks import pipeline as _pipeline  # noqa: E402,F401

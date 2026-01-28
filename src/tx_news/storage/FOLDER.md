@@ -9,7 +9,7 @@
 架构（≤3行）：
 - `postgres.py`：SQLAlchemy 访问封装（Engine 进程内缓存，避免长跑时连接数膨胀；建表、CRUD、查询；反馈汇总；并提供主数据缺失时的本地缓存引导；Session 默认 `expire_on_commit=False` 便于 API/工具层安全读取）。
 - `minio.py`：S3 API 封装（raw 内容存取/删除；实现侧对 `boto3` 做延迟导入以便单测环境可导入）。
-- `qdrant.py`：向量存储封装（upsert/search/retrieve/scroll/delete + collection 初始化；支持 range filter）；兼容 `qdrant-client` 的 `query_points/search/scroll` API；point id 使用确定性 UUID（避免服务端不接受字符串 id）。
+- `qdrant.py`：向量存储封装（upsert/search/retrieve/scroll/delete + collection 初始化；支持 range filter）；使用 `qdrant-client` 的 `query_points/scroll` API；point id 使用确定性 UUID（避免服务端不接受字符串 id）。
 
 ## 文件
 

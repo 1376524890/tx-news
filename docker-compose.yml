@@ -168,15 +168,16 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-      target: worker
+      target: beat
       args: *build_args
     command: ["python", "-m", "celery", "-A", "tx_news.tasks.celery_app.celery_app", "beat", "-l", "INFO"]
     env_file:
       - .env
     environment:
-      <<: *proxy_env
-      TXNEWS_PG_DSN: postgresql+psycopg://txnews:txnews@postgres:5432/txnews
-      TXNEWS_REDIS_URL: redis://redis:6379/0
+      TXNEWS_REDIS_URL: redis://host.docker.internal:6379/0
+      TXNEWS_PG_DSN: postgresql+psycopg://txnews@postgres:5432/txnews
+      TXNEWS_NATS_URL: nats://nats:4222
+      TXNEWS_S3_ENDPOINT: http://minio:9000
       TXNEWS_QDRANT_URL: http://qdrant:6333
       HF_HOME: /app/var/hf
     volumes:

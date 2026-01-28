@@ -68,3 +68,8 @@ event_windows_minutes:
   geopolitics: 4320
   industry_supply_demand: 4320
   liquidity: 1440
+
+# 维护任务配置
+maintenance:
+  # analyze_recent_articles任务的截止时间（小时）
+  analyze_cutoff_hours: 24

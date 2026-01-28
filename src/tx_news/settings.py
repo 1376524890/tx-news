@@ -19,6 +19,7 @@ class FileSettings(BaseModel):
     llm: dict[str, Any] = Field(default_factory=dict)
     tushare: dict[str, Any] = Field(default_factory=dict)
     event_windows_minutes: dict[str, int] = Field(default_factory=dict)
+    maintenance: dict[str, Any] = Field(default_factory=dict)
 
 
 class Settings(BaseSettings):

@@ -19,7 +19,7 @@
 | `README.md` | 说明文档 | 前端构建/开发说明。 |
 | `src/main.ts` | 入口 | 挂载 Vue 应用与 Router。 |
 | `src/router/` | 路由 | 构建模式区分：public UI `/`（对话）+ `/dashboard`（看板）+ `/config`（配置）；admin UI `/`（配置）。 |
-| `src/views/` | 页面 | `ChatView.vue`（对话）、`DashboardView.vue`（看板）、`ConfigView.vue`（配置）；`AdminView.vue` 为 legacy。 |
+| `src/views/` | 页面 | `ChatView.vue`（对话）、`DashboardView.vue`（看板）、`ConfigView.vue`（配置）。 |
 | `src/components/` | 组件 | 通用组件（如 `TimeSeriesChart.vue` 折线图、`KG3DGraph.vue` 2D 知识图谱）。 |
 | `src/style.css` | 样式 | 全局样式（移植自原 static/style.css）。 |
 | `package.json` | 依赖 | Vue, Vite, vue-router, marked 等。 |

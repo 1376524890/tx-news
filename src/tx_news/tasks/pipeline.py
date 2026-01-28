@@ -258,14 +258,28 @@ def dedup_store(normalized: dict[str, Any]) -> dict[str, Any]:
     qdrant.upsert(point_id=canonical_id, vector=vector, payload=payload)
 
     canonical = {"canonical_id": canonical_id, "is_new_canonical": is_new_canonical, **normalized}
-
-    # NOTE: We enqueue analyze explicitly instead of relying on Celery chain callbacks.
-    # In some environments, broker/DNS instability can break callbacks, making analysis never run.
-    try:
-        analyze.delay(canonical)
-    except Exception as e:
-        logger.warning("failed to enqueue analyze canonical_id=%s err=%s", canonical_id, e)
-
+    
+    # Add to analysis priority queue if:
+    # 1. Article is newly created (not a duplicate)
+    # 2. Article has a valid published_at (not filtered by 24h rule)
+    # Articles will be processed in order of publication time (newest first)
+    # Queue worker will check for >72h expiration before processing
+    if is_new_canonical and published_at is not None:
+        try:
+            from tx_news.tasks.news_queue import add_to_queue
+            add_to_queue(
+                canonical_id=canonical_id,
+                published_at=datetime.fromisoformat(published_at) if published_at else None,
+                fetched_at=datetime.fromisoformat(fetched_at) if fetched_at else None,
+            )
+            logger.info("added to analysis queue canonical_id=%s published_at=%s", canonical_id, published_at)
+        except Exception as e:
+            logger.warning("failed to add to queue canonical_id=%s err=%s", canonical_id, e)
+    elif not is_new_canonical:
+        logger.debug("skipped queue (duplicate) canonical_id=%s", canonical_id)
+    else:
+        logger.info("skipped queue (no published_at, likely >24h old) canonical_id=%s", canonical_id)
+    
     return canonical
 
 

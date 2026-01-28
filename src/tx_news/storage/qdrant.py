@@ -179,26 +179,16 @@ class QdrantStore:
                 must.append(qm.FieldCondition(key=k, match=qm.MatchValue(value=v)))
             qfilter = qm.Filter(must=must)
         c = self._client()
-        # qdrant-client >= 1.13 removed `search` in favor of `query_points`.
-        if hasattr(c, "query_points"):
-            resp = c.query_points(
-                collection_name=self.collection,
-                query=vector,
-                query_filter=qfilter,
-                limit=limit,
-                with_payload=True,
-            )
-            return list(resp.points or [])
-        # Legacy fallback for older clients.
-        if hasattr(c, "search"):
-            return c.search(  # type: ignore[no-any-return]
-                collection_name=self.collection,
-                query_vector=vector,
-                query_filter=qfilter,
-                limit=limit,
-                with_payload=True,
-            )
-        raise RuntimeError("qdrant-client API mismatch: neither query_points nor search is available")
+        if not hasattr(c, "query_points"):
+            raise RuntimeError("qdrant-client API mismatch: query_points is required")
+        resp = c.query_points(
+            collection_name=self.collection,
+            query=vector,
+            query_filter=qfilter,
+            limit=limit,
+            with_payload=True,
+        )
+        return list(resp.points or [])
 
     def retrieve(
         self,
