@@ -70,7 +70,16 @@ kill_vllm_by_port() {
   for pid in ${pids}; do
     [[ -n "${pid}" ]] || continue
     cmd="$(ps -p "${pid}" -o args= 2>/dev/null || true)"
-    if echo "${cmd}" | rg -q "vllm\\.entrypoints\\.openai\\.api_server|vllm\\s|api_server"; then
+    if have rg; then
+      if echo "${cmd}" | rg -q "vllm\\.entrypoints\\.openai\\.api_server|vllm\\s|api_server"; then
+        echo "Killing vLLM on port ${port} pid=${pid} cmd=${cmd}"
+        kill_tree "${pid}"
+      else
+        echo "Port ${port} is used by pid=${pid} (not vLLM); skip. cmd=${cmd}"
+      fi
+      continue
+    fi
+    if echo "${cmd}" | grep -Eq "vllm\.entrypoints\.openai\.api_server|vllm[[:space:]]|api_server"; then
       echo "Killing vLLM on port ${port} pid=${pid} cmd=${cmd}"
       kill_tree "${pid}"
     else

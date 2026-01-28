@@ -28,6 +28,7 @@ from tx_news.storage.postgres import (
 )
 from tx_news.storage.qdrant import QdrantStore
 from tx_news.storage.qdrant import scored_point_canonical_id
+from tx_news.kg.ids import node_id_event, node_id_ticker, point_id
 
 
 def utcnow() -> datetime:
@@ -58,10 +59,28 @@ def _get_qdrant() -> QdrantStore:
     return QdrantStore(url=settings.qdrant_url, collection=settings.qdrant_collection)
 
 
+def _get_event_memory_qdrant() -> QdrantStore:
+    settings = get_settings()
+    return QdrantStore(url=settings.qdrant_url, collection="txnews_event_memory")
+
+
+def _get_entity_memory_qdrant() -> QdrantStore:
+    settings = get_settings()
+    return QdrantStore(url=settings.qdrant_url, collection="txnews_entity_memory")
+
+
+def _get_edge_memory_qdrant() -> QdrantStore:
+    settings = get_settings()
+    return QdrantStore(url=settings.qdrant_url, collection="txnews_edge_memory")
+
+
 @dataclass
 class ToolContext:
     embedder: Embedder
     qdrant: QdrantStore
+    event_qdrant: QdrantStore
+    entity_qdrant: QdrantStore
+    edge_qdrant: QdrantStore
     qdrant_strategy: str
     embedding_model_name: str
 
@@ -75,6 +94,9 @@ class TxNewsTools:
         self.ctx = ToolContext(
             embedder=embedder,
             qdrant=_get_qdrant(),
+            event_qdrant=_get_event_memory_qdrant(),
+            entity_qdrant=_get_entity_memory_qdrant(),
+            edge_qdrant=_get_edge_memory_qdrant(),
             qdrant_strategy=qdrant_strategy,
             embedding_model_name=model_name,
         )
@@ -190,4 +212,170 @@ class TxNewsTools:
             "list_date": row.list_date,
             "aliases": row.aliases,
             "updated_at": row.updated_at.isoformat(),
+        }
+
+    def search_entities(self, *, q: str, limit: int = 10) -> list[dict[str, Any]]:
+        vector = self.ctx.embedder.embed(q[:2000])
+        qdrant = self.ctx.entity_qdrant
+        # v2 uses fixed collections; ensure_collection happens inside search().
+        try:
+            points = qdrant.search(vector=vector, limit=int(limit), filter_payload={"graph_env": "prod"})
+        except Exception:
+            return []
+        out: list[dict[str, Any]] = []
+        for p in points:
+            payload = getattr(p, "payload", None)
+            if not isinstance(payload, dict):
+                continue
+            out.append(
+                {
+                    "node_id": payload.get("node_id"),
+                    "ts_code": payload.get("ts_code"),
+                    "name": payload.get("name"),
+                    "industry": payload.get("industry"),
+                    "score": float(p.score or 0.0),
+                    "updated_at_ts": payload.get("updated_at_ts"),
+                }
+            )
+        return out
+
+    def search_events(self, *, q: str, limit: int = 10, recent_hours: int = 72) -> list[dict[str, Any]]:
+        vector = self.ctx.embedder.embed(q[:2000])
+        qdrant = self.ctx.event_qdrant
+        try:
+            points = qdrant.search(vector=vector, limit=int(limit), filter_payload={"graph_env": "prod"})
+        except Exception:
+            return []
+        cutoff = utcnow() - timedelta(hours=int(recent_hours))
+        cutoff_ts = int(cutoff.timestamp())
+
+        out: list[dict[str, Any]] = []
+        for p in points:
+            payload = getattr(p, "payload", None)
+            if not isinstance(payload, dict):
+                continue
+            last_ts = int(payload.get("last_published_at_ts") or 0)
+            if last_ts and last_ts < cutoff_ts:
+                continue
+            event_id = str(payload.get("event_id") or "").strip()
+            if not event_id:
+                continue
+            cids = payload.get("canonical_ids") if isinstance(payload.get("canonical_ids"), list) else []
+            evidence: list[dict[str, Any]] = []
+            for cid in [str(x) for x in cids[:8]]:
+                a = get_article(self.ctx.engine, cid)
+                v = get_latest_version(self.ctx.engine, cid)
+                if not a:
+                    continue
+                evidence.append(
+                    {
+                        "canonical_id": cid,
+                        "title": a.title,
+                        "url": v.url if v else None,
+                        "published_at": v.published_at.isoformat() if v and v.published_at else None,
+                        "source_id": v.source_id if v else None,
+                    }
+                )
+            out.append(
+                {
+                    "node_id": payload.get("node_id"),
+                    "event_id": event_id,
+                    "event_type": payload.get("event_type"),
+                    "snapshot_text": payload.get("snapshot_text"),
+                    "score": float(p.score or 0.0),
+                    "evidence": evidence,
+                }
+            )
+        return out
+
+    def get_event_neighbors(self, *, event_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        src = node_id_event(event_id)
+        qdrant = self.ctx.edge_qdrant
+        # Scan edges by payload filter (non-vector).
+        recs: list[Any] = []
+        offset = None
+        while True:
+            try:
+                pts, offset2 = qdrant.scroll(
+                    filter_payload={"graph_env": "prod", "src": src, "relation": "related_to"},
+                    limit=256,
+                    with_payload=True,
+                    with_vectors=False,
+                    offset=offset,
+                )
+            except Exception:
+                return []
+            recs.extend(pts)
+            if not offset2:
+                break
+            offset = offset2
+
+        edges: list[dict[str, Any]] = []
+        for r in recs:
+            payload = getattr(r, "payload", None)
+            if not isinstance(payload, dict):
+                continue
+            edges.append(payload)
+        edges.sort(key=lambda x: float(x.get("weight") or 0.0), reverse=True)
+        edges = edges[: int(limit)]
+
+        # Fetch neighbor event snapshots.
+        node_ids = [str(e.get("dst") or "") for e in edges if str(e.get("dst") or "").startswith("event:")]
+        pids = [point_id(graph_env="prod", item_id=nid) for nid in node_ids]
+        by_node_id: dict[str, dict[str, Any]] = {}
+        if pids:
+            for r in self.ctx.event_qdrant.retrieve(point_ids=pids, with_payload=True, with_vectors=False):
+                payload = getattr(r, "payload", None)
+                if isinstance(payload, dict) and payload.get("node_id"):
+                    by_node_id[str(payload["node_id"])] = payload
+
+        out: list[dict[str, Any]] = []
+        for e in edges:
+            dst = str(e.get("dst") or "")
+            ev = by_node_id.get(dst) or {}
+            out.append(
+                {
+                    "dst_event_id": ev.get("event_id") or dst.replace("event:", ""),
+                    "dst_event_type": ev.get("event_type"),
+                    "dst_snapshot_text": ev.get("snapshot_text"),
+                    "weight": e.get("weight"),
+                    "confidence": e.get("confidence"),
+                    "reason_text": e.get("reason_text"),
+                    "evidence_canonical_ids": e.get("evidence_canonical_ids") or [],
+                }
+            )
+        return out
+
+    def explain_connection(self, *, event_a: str, event_b: str) -> dict[str, Any]:
+        src = node_id_event(event_a)
+        dst = node_id_event(event_b)
+        qdrant = self.ctx.edge_qdrant
+
+        def _find(s: str, d: str) -> dict[str, Any] | None:
+            try:
+                pts, _ = qdrant.scroll(
+                    filter_payload={"graph_env": "prod", "src": s, "dst": d, "relation": "related_to"},
+                    limit=1,
+                    with_payload=True,
+                    with_vectors=False,
+                    offset=None,
+                )
+            except Exception:
+                return None
+            if not pts:
+                return None
+            payload = getattr(pts[0], "payload", None)
+            return payload if isinstance(payload, dict) else None
+
+        edge = _find(src, dst) or _find(dst, src)
+        if not edge:
+            return {"error": "not_found"}
+        return {
+            "src": edge.get("src"),
+            "dst": edge.get("dst"),
+            "relation": edge.get("relation"),
+            "weight": edge.get("weight"),
+            "confidence": edge.get("confidence"),
+            "reason_text": edge.get("reason_text"),
+            "evidence_canonical_ids": edge.get("evidence_canonical_ids") or [],
         }

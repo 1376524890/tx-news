@@ -1,8 +1,9 @@
+<!-- Input: msg 字符串 -->
+<!-- Output: 简单计数器组件（Vite 模板示例） -->
+<!-- Pos: 示例组件（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 <script setup lang="ts">
 import { ref } from 'vue'
-
 defineProps<{ msg: string }>()
-
 const count = ref(0)
 </script>
 

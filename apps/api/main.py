@@ -1,5 +1,5 @@
 # Input: HTTP 请求 + Postgres/Qdrant/Redis 等依赖 + 用户 Cookie（可选）+（可选）在线 LLM 配置
-# Output: 公网/用户侧 API + 对话 UI（8000；默认使用在线 LLM，不自动回退本地 vLLM）
+# Output: 公网/用户侧 API + 对话 UI（8000；在线 LLM 出错时可回退本地 vLLM）+ 看板 KG 反馈加权
 # Pos: Public API 进程入口（变更时同步更新以上注释与所属目录 FOLDER.md；并在主数据缺失时尝试从本地缓存引导）
 
 from __future__ import annotations
@@ -29,11 +29,14 @@ from tx_news.settings import get_settings
 from tx_news.storage.postgres import (
     bootstrap_a_share_basic_from_cache,
     get_a_share,
+    get_a_shares,
     get_analysis,
     get_article,
     get_event_canonical_ids,
+    get_feedback_counts,
     get_latest_version,
     init_db,
+    insert_feedback,
     make_engine,
 )
 from tx_news.storage.qdrant import QdrantStore, scored_point_canonical_id
@@ -230,6 +233,30 @@ class UserLLMConfigIn(BaseModel):
     api_key: str = Field(min_length=1)
 
 
+class FeedbackIn(BaseModel):
+    kind: str = Field(min_length=1, max_length=64)
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/feedback", operation_id="create_feedback")
+def create_feedback(request: Request, body: FeedbackIn) -> Response:
+    """
+    Lightweight UI feedback/log endpoint for closing the loop (clicks/likes/graph interactions).
+    Uses the per-user cookie uid to support per-user evaluation without requiring auth.
+    """
+    uid, headers = _ensure_uid(request)
+    settings = get_settings()
+    engine = make_engine(settings.pg_dsn)
+    init_db(engine)
+    data = dict(body.data or {})
+    # Best-effort request metadata (avoid storing raw headers).
+    data.setdefault("path", str(request.url.path))
+    data.setdefault("client", getattr(getattr(request, "client", None), "host", None))
+    data.setdefault("ua", str(request.headers.get("user-agent") or "")[:300])
+    insert_feedback(engine, uid=uid, kind=body.kind, data=data)
+    return JSONResponse({"ok": True}, headers={**headers, **NO_STORE_HEADERS})
+
+
 @app.get("/api/config", operation_id="get_user_llm_config")
 def api_get_config(request: Request) -> Response:
     uid, headers = _ensure_uid(request)
@@ -350,6 +377,228 @@ def dashboard_summary(
             "top_event_types": top_event_types,
             "top_tickers": top_tickers,
             "recent": recent,
+        },
+        headers=NO_STORE_HEADERS,
+    )
+
+
+@app.get("/kg/graph", operation_id="kg_graph")
+def kg_graph(
+    minutes: int = Query(default=180, ge=5, le=60 * 24),
+    limit_articles: int = Query(default=600, ge=50, le=5000),
+    max_events: int = Query(default=80, ge=10, le=500),
+    max_tickers: int = Query(default=160, ge=10, le=2000),
+) -> Response:
+    """
+    Public near-real-time KG graph snapshot used by the dashboard visualization.
+    Current node types are fixed: event (event_id) and ticker (ts_code).
+    """
+    settings = get_settings()
+    engine = make_engine(settings.pg_dsn)
+    init_db(engine)
+
+    window_seconds = int(minutes) * 60
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "with recent as ("
+                "  select canonical_id, event_type, data->>'event_id' as event_id, data->'tickers' as tickers, created_at "
+                "  from analyses "
+                "  where created_at >= (now() - (:sec || ' seconds')::interval) "
+                "  and (data->>'event_id') is not null and (data->>'event_id') <> ''"
+                "), latest_v as ("
+                "  select distinct on (canonical_id) canonical_id, url, source_id, "
+                "    coalesce(published_at, fetched_at) as published_at "
+                "  from article_versions "
+                "  order by canonical_id, coalesce(published_at, fetched_at) desc"
+                ") "
+                "select r.canonical_id, r.event_id, r.event_type, r.tickers, r.created_at, "
+                "  a.title, lv.url, lv.published_at, lv.source_id "
+                "from recent r "
+                "left join articles a on a.canonical_id = r.canonical_id "
+                "left join latest_v lv on lv.canonical_id = r.canonical_id "
+                "order by r.created_at desc "
+                "limit :limit"
+            ),
+            {"sec": window_seconds, "limit": int(limit_articles)},
+        ).all()
+
+    canonical_ids = {str(r[0]) for r in rows if r[0]}
+    feedback_by_canonical = get_feedback_counts(
+        engine,
+        canonical_ids=sorted(canonical_ids),
+        kinds=["kg_graph_article_thumb_up", "kg_graph_article_thumb_down"],
+        window_seconds=window_seconds,
+    )
+
+    def _feedback_for(canonical_id: str) -> tuple[int, int]:
+        entry = feedback_by_canonical.get(str(canonical_id), {})
+        up = int(entry.get("kg_graph_article_thumb_up") or 0)
+        down = int(entry.get("kg_graph_article_thumb_down") or 0)
+        return up, down
+
+    def _feedback_payload(up: int | None, down: int | None) -> dict[str, int]:
+        up = int(up or 0)
+        down = int(down or 0)
+        return {"up": up, "down": down, "score": up - down}
+
+    # Build event/ticker bipartite graph from analyses.
+    event_by_id: dict[str, dict[str, Any]] = {}
+    ticker_count: dict[str, int] = {}
+    edge_count: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def _tickers(v: Any) -> list[dict[str, Any]]:
+        return _normalize_tickers(v)
+
+    for canonical_id, event_id, event_type, tickers, created_at, title, url, published_at, source_id in rows:
+        cid = str(canonical_id or "").strip()
+        if not cid:
+            continue
+        eid = str(event_id or "").strip()
+        if not eid:
+            continue
+        fb_up, fb_down = _feedback_for(cid)
+        ev = event_by_id.setdefault(
+            eid,
+            {
+                "event_id": eid,
+                "event_type": str(event_type or "other"),
+                "articles": [],
+                "count": 0,
+                "feedback_up": 0,
+                "feedback_down": 0,
+                "last_created_at": None,
+            },
+        )
+        ev["count"] = int(ev.get("count") or 0) + 1
+        ev["feedback_up"] = int(ev.get("feedback_up") or 0) + fb_up
+        ev["feedback_down"] = int(ev.get("feedback_down") or 0) + fb_down
+        ts = created_at.isoformat() if created_at else None
+        if ts and (not ev["last_created_at"] or ts > ev["last_created_at"]):
+            ev["last_created_at"] = ts
+        if len(ev["articles"]) < 12:
+            ev["articles"].append(
+                {
+                    "canonical_id": cid,
+                    "title": title,
+                    "url": url,
+                    "source_id": source_id,
+                    "published_at": published_at.isoformat() if published_at else None,
+                    "created_at": ts,
+                    "thumbs_up": fb_up,
+                    "thumbs_down": fb_down,
+                }
+            )
+
+        for t in _tickers(tickers):
+            ts_code = str((t or {}).get("ts_code") or "").strip()
+            if not ts_code:
+                continue
+            ticker_count[ts_code] = ticker_count.get(ts_code, 0) + 1
+            key = (eid, ts_code)
+            e = edge_count.setdefault(
+                key,
+                {
+                    "event_id": eid,
+                    "ts_code": ts_code,
+                    "count": 0,
+                    "evidence": [],
+                    "feedback_up": 0,
+                    "feedback_down": 0,
+                },
+            )
+            e["count"] = int(e.get("count") or 0) + 1
+            e["feedback_up"] = int(e.get("feedback_up") or 0) + fb_up
+            e["feedback_down"] = int(e.get("feedback_down") or 0) + fb_down
+            if len(e["evidence"]) < 12:
+                e["evidence"].append(cid)
+
+    # Trim to keep the dashboard visualization responsive.
+    def _event_rank(item: dict[str, Any]) -> int:
+        base = int(item.get("count") or 0)
+        score = int(item.get("feedback_up") or 0) - int(item.get("feedback_down") or 0)
+        return base + score
+
+    top_event_ids = [
+        k
+        for k, _ in sorted(
+            event_by_id.items(),
+            key=lambda kv: _event_rank(kv[1]),
+            reverse=True,
+        )[: int(max_events)]
+    ]
+    top_events = {eid: event_by_id[eid] for eid in top_event_ids if eid in event_by_id}
+
+    top_ts_codes = [k for k, _ in sorted(ticker_count.items(), key=lambda kv: kv[1], reverse=True)[: int(max_tickers)]]
+    a_share_rows = get_a_shares(engine, top_ts_codes)
+    ticker_name = {r.ts_code: r.name for r in a_share_rows}
+
+    nodes: list[dict[str, Any]] = []
+    links: list[dict[str, Any]] = []
+
+    for eid, ev in top_events.items():
+        feedback = _feedback_payload(ev.get("feedback_up"), ev.get("feedback_down"))
+        count_raw = int(ev.get("count") or 0)
+        count = max(1, count_raw + feedback["score"])
+        nodes.append(
+            {
+                "id": f"event:{eid}",
+                "kind": "event",
+                "label": str(ev.get("event_type") or eid),
+                "event_id": eid,
+                "event_type": ev.get("event_type"),
+                "count": count,
+                "count_raw": count_raw,
+                "feedback": feedback,
+                "last_created_at": ev.get("last_created_at"),
+                "articles": ev.get("articles") or [],
+            }
+        )
+
+    allowed_events = set(top_events.keys())
+    allowed_tickers = set(top_ts_codes)
+
+    for ts_code in top_ts_codes:
+        nodes.append(
+            {
+                "id": f"ticker:{ts_code}",
+                "kind": "ticker",
+                "label": f"{ts_code} {ticker_name.get(ts_code) or ''}".strip(),
+                "ts_code": ts_code,
+                "name": ticker_name.get(ts_code),
+                "count": int(ticker_count.get(ts_code) or 0),
+            }
+        )
+
+    for (eid, ts_code), e in edge_count.items():
+        if eid not in allowed_events or ts_code not in allowed_tickers:
+            continue
+        feedback = _feedback_payload(e.get("feedback_up"), e.get("feedback_down"))
+        weight_raw = int(e.get("count") or 0)
+        weight = max(1, weight_raw + feedback["score"])
+        links.append(
+            {
+                "source": f"event:{eid}",
+                "target": f"ticker:{ts_code}",
+                "relation": "mentions",
+                "weight": weight,
+                "weight_raw": weight_raw,
+                "feedback": feedback,
+                "evidence": e.get("evidence") or [],
+            }
+        )
+
+    return JSONResponse(
+        {
+            "window_minutes": int(minutes),
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "nodes": nodes,
+            "links": links,
+            "stats": {
+                "events": len(top_events),
+                "tickers": len(top_ts_codes),
+                "links": len(links),
+            },
         },
         headers=NO_STORE_HEADERS,
     )
@@ -707,6 +956,126 @@ def _has_network_error(e: BaseException) -> bool:
     return False
 
 
+def _iter_exception_chain(e: BaseException) -> list[BaseException]:
+    cur: BaseException | None = e
+    seen: set[int] = set()
+    out: list[BaseException] = []
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        out.append(cur)
+        cur = cur.__cause__ or cur.__context__
+    return out
+
+
+def _extract_llm_error(e: BaseException) -> dict[str, Any] | None:
+    for cur in _iter_exception_chain(e):
+        if isinstance(cur, httpx.HTTPStatusError) and getattr(cur, "response", None) is not None:
+            resp = cur.response
+            status = int(getattr(resp, "status_code", 0) or 0)
+            payload: Any = None
+            try:
+                payload = resp.json()
+            except Exception:
+                payload = None
+            message = ""
+            err_type = ""
+            code = ""
+            if isinstance(payload, dict):
+                err = payload.get("error")
+                if isinstance(err, dict):
+                    message = str(err.get("message") or "")
+                    err_type = str(err.get("type") or "")
+                    code = str(err.get("code") or "")
+                elif isinstance(err, str):
+                    message = str(err)
+            if not message:
+                text = str(getattr(resp, "text", "") or "").strip()
+                message = text
+            message = " ".join(message.split())
+            if len(message) > 300:
+                message = message[:300] + "…"
+            return {"status": status, "message": message, "type": err_type, "code": code}
+    return None
+
+
+def _is_provider_blocked_error(info: dict[str, Any]) -> bool:
+    status = int(info.get("status") or 0)
+    if status in {401, 402, 403}:
+        return True
+    msg = str(info.get("message") or "").lower()
+    err_type = str(info.get("type") or "").lower()
+    code = str(info.get("code") or "").lower()
+    tokens = ["arrearage", "overdue", "insufficient", "billing", "payment", "quota", "balance", "credit", "access denied"]
+    if any(t in msg for t in tokens):
+        return True
+    if err_type in {"arrearage", "insufficient_balance"}:
+        return True
+    if code in {"arrearage", "insufficient_balance"}:
+        return True
+    return False
+
+
+def _should_fallback_to_deep(err_info: dict[str, Any] | None, e: BaseException) -> bool:
+    if _has_network_error(e):
+        return True
+    if err_info and _is_provider_blocked_error(err_info):
+        return True
+    return False
+
+
+def _format_llm_error(err_info: dict[str, Any] | None, e: BaseException) -> str:
+    if err_info:
+        detail = err_info.get("message") or ""
+        kind = err_info.get("type") or err_info.get("code") or ""
+        status = err_info.get("status") or ""
+        parts = [p for p in [str(kind).strip(), str(detail).strip()] if p]
+        suffix = f"({status}) " if status else ""
+        return f"{suffix}{' / '.join(parts) or 'HTTP error'}".strip()
+    return str(e)
+
+
+def _resolve_deep_llm_for_chat(settings: Any, file_cfg: Any, accel: str) -> dict[str, Any]:
+    deep_llm = settings.resolve_llm_deep(file_cfg) if accel == "gpu" else {}
+    if accel != "cpu":
+        return deep_llm
+    llm = file_cfg.llm or {}
+    deep_cfg = llm.get("deep") if isinstance(llm.get("deep"), dict) else {}
+    deep_env_is_set = any(
+        [
+            (settings.llm_deep_base_url or "").strip(),
+            (settings.llm_deep_model_name or "").strip(),
+            (settings.llm_deep_api_key or "").strip(),
+            settings.llm_deep_timeout_seconds is not None,
+        ]
+    )
+    if not deep_cfg and not deep_env_is_set:
+        return deep_llm
+    base_url = (
+        (settings.llm_deep_base_url or "").strip()
+        or str(deep_cfg.get("base_url") or "").strip()
+        or "http://127.0.0.1:9999/v1"
+    )
+    model = (
+        (settings.llm_deep_model_name or "").strip()
+        or str(deep_cfg.get("model") or "").strip()
+        or "deepseekr1-merged"
+    )
+    api_key = (
+        (settings.llm_deep_api_key or "").strip()
+        or str(deep_cfg.get("api_key") or "").strip()
+        or None
+    )
+    timeout_seconds = int(settings.llm_deep_timeout_seconds or deep_cfg.get("timeout_seconds") or 120)
+    provider = str(deep_cfg.get("provider") or "openai_compat")
+    return {
+        "provider": provider,
+        "base_url": base_url,
+        "model": model,
+        "api_key": api_key,
+        "timeout_seconds": timeout_seconds,
+    }
+
+
 @app.post("/chat", response_model=ChatResponse, operation_id="chat_agent")
 def chat_agent(req: ChatRequest, request: Request) -> ChatResponse:
     settings = get_settings()
@@ -719,14 +1088,13 @@ def chat_agent(req: ChatRequest, request: Request) -> ChatResponse:
     timeout_seconds = int(llm.get("timeout_seconds") or 60)
 
     accel = (settings.accelerator or "").strip().lower() or "cpu"
-    deep_llm = settings.resolve_llm_deep(file_cfg) if accel == "gpu" else {}
+    deep_llm = _resolve_deep_llm_for_chat(settings, file_cfg, accel)
     deep_base_url = str(deep_llm.get("base_url") or "").strip()
     deep_model = str(deep_llm.get("model") or "deepseekr1-merged").strip()
     deep_timeout = int(deep_llm.get("timeout_seconds") or 120)
     can_fallback_to_deep = bool(
         settings.chat_allow_deep_fallback
         and (not settings.require_user_llm)
-        and accel == "gpu"
         and deep_base_url
         and deep_base_url != str(base_url)
         and _is_local_llm_base_url(deep_base_url)
@@ -780,7 +1148,8 @@ def chat_agent(req: ChatRequest, request: Request) -> ChatResponse:
             }
         )
     except Exception as e:
-        if can_fallback_to_deep and _has_network_error(e):
+        err_info = _extract_llm_error(e)
+        if can_fallback_to_deep and _should_fallback_to_deep(err_info, e):
             try:
                 agent = TxNewsAgent(
                     api_key=str(deep_llm.get("api_key") or ""),
@@ -796,12 +1165,16 @@ def chat_agent(req: ChatRequest, request: Request) -> ChatResponse:
                 return ChatResponse(message=out)
             except Exception:
                 pass
+        hint = ""
+        if err_info and _is_provider_blocked_error(err_info):
+            hint = "提示：在线 LLM 返回鉴权/计费错误（常见为欠费或 Key 无权限）。请更换/充值，或改用本地 vLLM。\n"
         return ChatResponse(
             message={
                 "role": "assistant",
                 "content": (
                     "对话失败：LLM/检索/向量化组件不可用。\n"
-                    f"错误：{e}\n"
+                    f"错误：{_format_llm_error(err_info, e)}\n"
+                    f"{hint}"
                     "请检查：容器内是否能访问 `llm.chat.base_url`（网络/代理/证书/超时），以及 LLM 的 base_url/api_key 配置；"
                     "并确认 Qdrant 正常运行与 embedding 模型可用。"
                 ),
@@ -823,14 +1196,13 @@ def chat_agent_stream(req: ChatRequest, request: Request) -> StreamingResponse:
     trace_id = secrets.token_hex(4)
 
     accel = (settings.accelerator or "").strip().lower() or "cpu"
-    deep_llm = settings.resolve_llm_deep(file_cfg) if accel == "gpu" else {}
+    deep_llm = _resolve_deep_llm_for_chat(settings, file_cfg, accel)
     deep_base_url = str(deep_llm.get("base_url") or "").strip()
     deep_model = str(deep_llm.get("model") or "deepseekr1-merged").strip()
     deep_timeout = int(deep_llm.get("timeout_seconds") or 120)
     can_fallback_to_deep = bool(
         settings.chat_allow_deep_fallback
         and (not settings.require_user_llm)
-        and accel == "gpu"
         and deep_base_url
         and deep_base_url != str(base_url)
         and _is_local_llm_base_url(deep_base_url)
@@ -962,18 +1334,22 @@ def chat_agent_stream(req: ChatRequest, request: Request) -> StreamingResponse:
                 timeout_seconds=int(timeout_local),
             )
 
-            # Try primary first; on transient network errors, optionally fall back to local vLLM.
+            # Try primary first; on network/auth/billing errors, optionally fall back to local vLLM.
             try:
                 yield from _run_stream(agent=primary)
                 return
             except Exception as e:
-                if can_fallback_to_deep and _has_network_error(e):
+                err_info = _extract_llm_error(e)
+                if can_fallback_to_deep and _should_fallback_to_deep(err_info, e):
                     logger.warning(
                         "chat_stream primary llm failed; fallback to deep llm trace=%s err=%s",
                         trace_id,
                         e,
                     )
-                    yield _sse("delta", {"content": "\n\n（网络不稳定，已切换到本地 vLLM）\n"})
+                    note = "（在线 LLM 不可用，已切换到本地 vLLM）"
+                    if _has_network_error(e):
+                        note = "（网络不稳定，已切换到本地 vLLM）"
+                    yield _sse("delta", {"content": f"\n\n{note}\n"})
                     fallback = TxNewsAgent(
                         api_key=str(deep_llm.get("api_key") or ""),
                         model=deep_model,
@@ -988,12 +1364,17 @@ def chat_agent_stream(req: ChatRequest, request: Request) -> StreamingResponse:
             yield _sse_done({"role": "assistant", "content": f"对话失败：{e}", "meta": {"tools": [], "evidence": []}})
         except Exception as e:
             logger.exception("chat_stream exception trace=%s", trace_id)
+            err_info = _extract_llm_error(e)
+            hint = ""
+            if err_info and _is_provider_blocked_error(err_info):
+                hint = "提示：在线 LLM 返回鉴权/计费错误（常见为欠费或 Key 无权限）。请更换/充值，或改用本地 vLLM。\n"
             yield _sse_done(
                 {
                     "role": "assistant",
                     "content": (
                         "对话失败：LLM/检索/向量化组件不可用。\n"
-                        f"错误：{e}\n"
+                        f"错误：{_format_llm_error(err_info, e)}\n"
+                        f"{hint}"
                         "请检查：容器内是否能访问 `llm.chat.base_url`（网络/代理/证书/超时），以及 LLM 的 base_url/api_key 配置；"
                         "并确认 Qdrant 正常运行与 embedding 模型可用。"
                     ),

@@ -1,10 +1,10 @@
-<!-- Input: 项目背景/目标/架构设计信息 + v1（基于 v0 单机架构）的功能与部署方式 -->
-<!-- Output: 面向使用者与开发者的使用说明（快速开始/API/UI/架构/方案/取舍/路线图） -->
+<!-- Input: 项目背景/目标/架构设计信息 + v2 功能与部署方式 + v2 技术路线 -->
+<!-- Output: 面向使用者与开发者的使用说明（快速开始/API/UI/架构/取舍/路线图/技术路线速览） -->
 <!-- Pos: 根目录主文档（变更时同步更新以上注释与所属目录 FOLDER.md） -->
 
-# TX-news 高时效经济新闻拉取与分析系统（v1）
+# TX-news 高时效经济新闻拉取与分析系统（v2）
 
-*目标是在单机可自托管的前提下，完成 **采集 → 清洗 → 去重 → 入库 → 向量检索 → 结构化分析 → 信号/对话** 的闭环（UI/API/MCP）。*
+*目标是在单机可自托管的前提下，完成 **采集 → 清洗 → 去重 → 入库 → 向量检索 → 结构化分析 → 图谱构建 → Graph RAG/对话** 的闭环（UI/API/MCP）。*
 
 核心约束：
 - 尽量自建/自托管：Postgres/Redis/NATS/MinIO/Qdrant 本地可跑。
@@ -12,15 +12,107 @@
 - 合规：系统保存 raw 全文用于审计/回放；UI/API 不展示新闻全文，仅展示结构化结果与链接。
 
 快速导航：
+- v2 技术路线速览：图谱路线、数据流、程序框图、调用链
 - 快速开始：一键部署/启动/验证
 - API：检索/对话（含 SSE 流式）/状态接口
 - UI：对话页（Markdown）与配置页（按用户设置在线 LLM）
 - 架构：调用链、数据流、关键模块与取舍
-- v1：可优化方向清单
+- v2：路线图与后续方向
 
 ---
 
-## 1. 快速开始（单机 v1）
+## 0. v2 技术路线速览
+
+v2 在现有采集/分析基础上，增加“事件-实体-关系”图谱，并用反馈与治理任务让图谱持续更新。
+
+- 事件是节点，A 股公司/股票是实体节点，关系边带证据与原因。
+- Qdrant 存图谱记忆，Postgres 存审计/反馈，API 提供图谱给前端。
+- 反馈会影响权重，定时任务会清理旧边、重算摘要。
+
+详细说明见 `docs/V2_NEWS_KG_IMPLEMENTATION.md`。
+
+### 0.1 v2 数据流
+```mermaid
+flowchart TD
+  S[新闻源] --> C[Collector]
+  C --> P[Pipeline 解析/分析]
+  P --> KG[kg_update_from_canonical]
+  KG --> Q[Qdrant 图谱记忆]
+  Q --> API["/kg/graph"]
+  API --> UI[Dashboard 图谱]
+  UI --> FB[反馈: 点击/赞踩]
+  FB --> GOV[kg_gc / kg_reconcile]
+  GOV --> KG
+```
+
+### 0.2 v2 程序框图（完整链路）
+```mermaid
+flowchart TD
+  subgraph Ingest[数据抓取与分析]
+    S[新闻源] --> C[Collector 抓取]
+    C --> N[NATS 消息]
+    C --> M[MinIO 原文]
+    N --> W[Worker 流水线]
+    W --> P[Postgres 结构化数据]
+    W --> V[Qdrant 新闻向量]
+  end
+
+  subgraph Graph[图谱构建与更新]
+    KG[图谱更新任务（kg_update_from_canonical）]
+    EM[事件记忆（Qdrant）]
+    EN[实体记忆（Qdrant）]
+    ED[关系边记忆（Qdrant）]
+    FB[反馈日志（Postgres）]
+    GOV[图谱治理任务（kg_gc / kg_reconcile）]
+  end
+
+  subgraph Chat[对话与 Graph RAG]
+    U[用户] --> UI[Web 对话页]
+    UI --> API["/chat/stream API"]
+    API --> Agent[TxNewsAgent]
+    Agent --> Tools[Graph RAG 工具集]
+    Agent --> LLM[LLM 推理]
+    LLM --> API
+    API --> UI
+  end
+
+  P --> KG
+  KG --> EM
+  KG --> EN
+  KG --> ED
+  FB --> GOV
+  GOV --> KG
+
+  Tools --> EM
+  Tools --> EN
+  Tools --> ED
+  Tools --> P
+
+  UI --> FAPI["/feedback API"]
+  FAPI --> FB
+
+  UI --> Dash[Dashboard 图谱页]
+  Dash --> GAPI["/kg/graph API"]
+  GAPI --> EM
+  GAPI --> EN
+  GAPI --> ED
+```
+
+### 0.3 调用链：从新闻到图谱
+```mermaid
+flowchart TD
+  Ingest[ingest_raw] --> Normalize[normalize_raw]
+  Normalize --> Dedup[dedup_store]
+  Dedup --> Analyze[analyze]
+  Analyze --> Deep[deep_analysis 可选]
+  Analyze --> KG[kg_update_from_canonical]
+  Deep --> KG
+  KG --> Event[写 event_memory]
+  KG --> Entity[写 entity_memory]
+  KG --> Edge[写 edge_memory]
+```
+
+## 1. 快速开始（单机 v2）
 
 ### 1.1 前置条件
 - Docker + Docker Compose（必需；用于构建镜像与一键启动）
@@ -75,7 +167,7 @@ scripts\start.cmd
 - `TXNEWS_COMPOSE_LOG_FILE=...`：容器日志落盘文件路径（默认 `var/log/compose.log`）
 
 多 GPU（例如 4090×2）建议：
-- v1 是“多进程”模型：worker/API/collector 都是独立进程；vLLM 会自动使用两张 GPU（tensor-parallel-size=2）解决 KV 缓存不足问题。
+- 当前是“多进程”模型：worker/API/collector 都是独立进程；vLLM 会自动使用两张 GPU（tensor-parallel-size=2）解决 KV 缓存不足问题。
 - `config/config.yaml: embedding.model_name` 默认选用较大中文向量模型；若你更关注速度或显存占用，可换为 `BAAI/bge-small-zh-v1.5`（质量/速度权衡）。
 - embedding 默认使用 CPU（除非显式设置 `TXNEWS_EMBEDDING_DEVICE`），通常无需占用 GPU 资源。
 
@@ -150,7 +242,7 @@ TXNEWS_LLM_DEEP_BASE_URL=http://host.docker.internal:9999/v1
 ```yaml
 embedding:
   model_name: BAAI/bge-large-zh-v1.5
-  # device 推荐使用 CPU（v1 默认会覆盖为 cpu，除非设置 TXNEWS_EMBEDDING_DEVICE）
+  # device 推荐使用 CPU（默认会覆盖为 cpu，除非设置 TXNEWS_EMBEDDING_DEVICE）
   device: cpu
   use_fp16: false  # 仅在 GPU 上有效，CPU 模式下会被忽略
   qdrant_collection_strategy: auto
@@ -281,11 +373,10 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 ## 3. 用户界面（UI）说明
 
 ### 3.1 对话页（`/`）
-- **v1 (Vue 3)**：基于 Vue 3 + TypeScript 重构的 SPA。
+- **Vue 3 SPA（当前）**：基于 Vue 3 + TypeScript 的单页应用。
   - 支持 SSE 流式对话，实时渲染 Markdown（`marked`）。
   - 侧边栏实时展示信号（Polling），无需手动刷新。
   - 工具调用（Tool Calls）实时可视化展示。
-- *v0 (Deprecated)*：原静态 HTML/JS 仍在 `apps/api/static`，但不再作为默认 UI。
 
 ### 3.2 配置页（`http://localhost:8000/config`）
 - 用于每个前端用户配置自己的在线 LLM（base_url/model/api_key），从而让 `/chat` 与 `/chat/stream` 按用户分摊成本。
@@ -307,7 +398,7 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 - `scripts/`：本地一键启动/停止
 - `var/`：运行态日志与缓存（gitignored）
 
-### 4.2 技术栈（v1）
+### 4.2 技术栈（v2）
 - 语言：Python 3.10+
 - API：FastAPI + Uvicorn
 - 异步任务：Celery（broker/backend：Redis）
@@ -315,6 +406,8 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 - OLTP：PostgreSQL（SQLAlchemy）
 - 对象存储：MinIO（S3 API）
 - 向量库：Qdrant
+- 图谱：Qdrant event/entity/edge memory + GraphOps 规则管道
+- Graph RAG：Agent 工具编排（graph memory 检索 + 解释关系）
 - Embedding：sentence-transformers（默认 CPU；可用 `TXNEWS_EMBEDDING_DEVICE` 显式覆盖；模型可本地路径或 HF 下载）
 - LLM：OpenAI-compatible Chat Completions（默认 DashScope compatible-mode；可替换其它兼容服务）
 - 前端：Vue 3 + TypeScript + Vite（SPA），由 API 进程挂载构建产物 `dist_public/`（可选 `dist_admin/`）。
@@ -331,22 +424,27 @@ curl -N -X POST "http://localhost:8000/chat/stream" \\
 
 ---
 
-## 5. 调用链与数据流（单机实现）
+## 5. 调用链与数据流（v2 单机实现）
 
 ### 5.1 高层数据流
 ```mermaid
-graph LR
-	  S[Sources] --> C[apps/collector]
-	  C -->|publish txnews.raw| JS[NATS JetStream]
-	  JS --> B[apps/worker/nats_bridge]
-	  B -->|ingest_raw.delay| Q[Celery/Redis]
-	  Q --> W[Celery Worker]
-	  W --> P[(Postgres)]
-	  W --> M[(MinIO)]
-	  W --> V[(Qdrant)]
-	  API[apps/api] --> P
-	  API --> V
-	  UI[Vue SPA] --> API
+flowchart TD
+  S[Sources] --> C[apps/collector]
+  C -->|publish txnews.raw| JS[NATS JetStream]
+  C --> M[(MinIO)]
+  JS --> B[apps/worker/nats_bridge]
+  B -->|ingest_raw.delay| Q[Celery/Redis]
+  Q --> W[Celery Worker]
+  W --> P[(Postgres)]
+  W --> V[(Qdrant 新闻向量)]
+  P --> KG[kg_update_from_canonical]
+  KG --> G[(Qdrant 图谱 memory)]
+  API[apps/api] --> P
+  API --> V
+  API --> G
+  UI[Vue SPA] --> API
+  UI --> F[反馈接口]
+  F --> P
 ```
 
 ### 5.2 单条新闻的任务链
@@ -358,13 +456,17 @@ sequenceDiagram
   participant Celery as Celery Worker
   participant S3 as MinIO
   participant PG as Postgres
-  participant Q as Qdrant
+  participant Q as Qdrant 新闻向量
+  participant KG as KG Task
+  participant GQ as Qdrant 图谱记忆
   Collector->>S3: put raw bytes
   Collector->>NATS: publish raw metadata (s3_key)
   Bridge->>Celery: ingest_raw.delay(raw)
   Celery->>S3: get raw bytes
   Celery->>PG: upsert raw/article/version/analysis/signal
   Celery->>Q: search/upsert vector
+  Celery->>KG: kg_update_from_canonical.delay(canonical_id)
+  KG->>GQ: upsert event/entity/edge
 ```
 
 ### 5.3 代码级调用链（从采集到分析）
@@ -375,6 +477,8 @@ sequenceDiagram
   - `dedup_store`：LSH 近重复 + Qdrant 语义去重 + 写入 Postgres/Qdrant
   - `analyze`：规则分析 +（可选）LLM JSON 增强 + 写入 analyses/signals
   - `deep_analysis`：仅对新 canonical 且 LLM 可用触发深分析（二次推理）
+- `src/tx_news/tasks/kg.py`：
+  - `kg_update_from_canonical`：基于分析结果写入 event/entity/edge 图谱记忆
 
 ### 5.4 对话页“获取新闻→知识库匹配→分析→反馈”（SSE）
 ```mermaid
@@ -387,7 +491,8 @@ sequenceDiagram
   participant Tools as TxNewsTools
   participant PG as Postgres（articles/versions/analyses）
   participant Emb as Embedding 模型
-  participant Q as Qdrant（向量库）
+  participant Q as Qdrant（新闻向量）
+  participant QG as Qdrant 图谱记忆
 
   User->>UI: 输入问题并发送
   UI->>API: POST /chat/stream（messages/recent_minutes/max_steps）
@@ -405,7 +510,18 @@ sequenceDiagram
   Agent-->>API: SSE tool/tool_result
   Agent->>LLM: 追加 tool 结果继续推理
 
-  Note over LLM,Tools: 2) 知识库匹配（向量检索）
+  Note over LLM,Tools: 2) Graph RAG（图谱检索与关系解释）
+  LLM-->>Agent: tool_call(search_entities/search_events)
+  Agent->>Tools: search_entities / search_events
+  Tools->>QG: query graph memory
+  QG-->>Tools: nodes/edges
+  Tools->>PG: 回查证据元信息
+  PG-->>Tools: rows
+  Tools-->>Agent: graph hits（node/edge + evidence）
+  Agent-->>API: SSE tool/tool_result
+  Agent->>LLM: 追加 tool 结果继续推理
+
+  Note over LLM,Tools: 3) 知识库匹配（向量检索）
   LLM-->>Agent: tool_call(search_news)
   Agent->>Tools: search_news(q, limit)
   Tools->>Emb: embed(q) 得到 query vector
@@ -418,7 +534,7 @@ sequenceDiagram
   Agent-->>API: SSE tool/tool_result
   Agent->>LLM: 追加 tool 结果继续推理
 
-  Note over Agent,LLM: 3) 基于证据生成回答（Markdown）\n并附 meta.evidence（可点击 URL 列表）
+  Note over Agent,LLM: 4) 基于证据生成回答（Markdown）\n并附 meta.evidence（可点击 URL 列表）
   LLM-->>Agent: final assistant message
   Agent-->>API: done（message.content + meta.tools/meta.evidence）
   API-->>UI: SSE done
@@ -427,7 +543,8 @@ sequenceDiagram
 
 关键消息与任务名（便于对齐“数据流/调用链”）：
 - NATS subject：`${TXNEWS_NATS_STREAM}.raw`（默认 `txnews.raw`）
-- Celery 任务（示例）：`tx_news.tasks.pipeline.ingest_raw` / `normalize_raw` / `dedup_store` / `analyze`
+- Celery 任务（示例）：`tx_news.tasks.pipeline.ingest_raw` / `normalize_raw` / `dedup_store` / `analyze` / `tx_news.tasks.kg.kg_update_from_canonical`
+- 定时任务（示例）：`tx_news.tasks.kg.kg_gc` / `tx_news.tasks.kg.kg_reconcile`
 
 ---
 
@@ -436,7 +553,7 @@ sequenceDiagram
 ### 6.1 采集（Collector）
 - 输入：`config/sources.txt`
 - 输出：raw bytes → MinIO；raw metadata → NATS（subject: `${TXNEWS_NATS_STREAM}.raw`）
-- v0 策略：每 60 秒 `run_once()`；可用 `crawler.max_concurrency` 控制并发与 `max_retries` 控制重试
+- 默认策略：每 60 秒 `run_once()`；可用 `crawler.max_concurrency` 控制并发与 `max_retries` 控制重试
 
 ### 6.2 清洗与正文抽取（Normalize）
 - `readability-lxml` 抽取正文；尽量产出 `title/text/checksum/published_at`
@@ -445,11 +562,11 @@ sequenceDiagram
 ### 6.3 去重（LSH + 语义）
 目标：把跨源转载/同稿归并到 `canonical_id`，并保留版本链路。
 
-流水线（v0）：
+流水线：
 1) LSH（MinHash）近重复：快速过滤同稿/轻微改写
 2) embedding 语义去重：对非近重复候选计算向量，Qdrant 搜索 top1，相似度超过阈值则归并
 
-关键参数（v0 默认）：
+默认参数：
 - LSH 阈值：`0.85`（见 `src/tx_news/dedup/lsh.py`）
 - 语义归并阈值：`score >= 0.92`（见 `src/tx_news/tasks/pipeline.py`）
 
@@ -459,9 +576,9 @@ sequenceDiagram
   - `device`：`auto/cpu/cuda/cuda:0`
   - `use_fp16`：GPU 建议开启
   - `qdrant_collection_strategy`：`auto/base/scoped`
-- v1 默认强制 embedding 使用 CPU（除非显式设置 `TXNEWS_EMBEDDING_DEVICE`）。
+- 默认使用 CPU（除非显式设置 `TXNEWS_EMBEDDING_DEVICE`）。
 - Qdrant 兼容：
-  - point id：Qdrant 只接受 `int/uuid`，v0 使用确定性 UUID（uuid5）写入，同时把原 `canonical_id` 放入 payload，检索时优先从 payload 取回 canonical_id。
+  - point id：Qdrant 只接受 `int/uuid`，当前使用确定性 UUID（uuid5）写入，同时把原 `canonical_id` 放入 payload，检索时优先从 payload 取回 canonical_id。
   - collection：若换模型导致向量维度变化，`auto` 会自动切换到 `base__<model>__<dim>`，避免维度不匹配直接报错。
 
 Embedding 首次下载提示：
@@ -485,7 +602,13 @@ TXNEWS_LLM_MODEL_NAME="<model-name>"
 TXNEWS_LLM_API_KEY="<api-key>"
 ```
 
-### 6.6 A 股主数据（Tushare/AkShare）
+### 6.6 图谱构建与 Graph RAG
+- 入口：`kg_update_from_canonical` 基于 analyses/event_id/tickers 生成 event/entity/edge。
+- 图谱记忆：写入 Qdrant event_memory/entity_memory/edge_memory，边带 reason_text 与证据。
+- 反馈闭环：`/feedback` 写入 Postgres，`kg_gc`/`kg_reconcile` 定时调整权重与快照。
+- Graph RAG：对话工具通过 `search_events/search_entities/get_event_neighbors/explain_connection` 取图谱，再结合 Postgres 证据输出。
+
+### 6.7 A 股主数据（Tushare/AkShare）
 - 缓存文件：`var/cache/a_share/stock_basic.json`
 - Docker 运行：compose 默认挂载 `./var/cache:/app/var/cache`，便于跨重启复用缓存与引导空库
 - 默认 TTL：12 小时（`tushare.cache_ttl_hours`）；未过期直接使用缓存入库，避免频繁请求
@@ -496,17 +619,17 @@ TXNEWS_LLM_API_KEY="<api-key>"
 - `python -m apps.bootstrap`：仅在 `a_share_basic` 为空时尝试同步（best-effort；适合作为 Docker/K8s Job 的引导步骤）
  - `python -m apps.db_init`：仅建表初始化（create_all；适合作为 Docker/K8s Job，避免空库导致接口 500）
 
-### 6.6.1 Raw 保留与清理（Retention）
+### 6.7.1 Raw 保留与清理（Retention）
 - `retention.raw_days` 控制 raw 全文与抓取记录的保留天数（默认 7 天）
 - 维护任务：`tx_news.tasks.maintenance.cleanup_raw`（删除过期 raw 记录与 MinIO 对应对象）
 
-### 6.7 MCP 工具服务（stdio）
+### 6.8 MCP 工具服务（stdio）
 `apps/mcp/server.py` 提供最小 MCP/JSON-RPC 工具接口，适合外部 Agent/编排器通过 stdio 集成检索能力。
 ```bash
 python -m apps.mcp.server
 ```
 
-### 6.7.1 本地微调 LLM（Deep Analyse）与训练集规则
+### 6.8.1 本地微调 LLM（Deep Analyse）与训练集规则
 本项目支持在 GPU 模式下让 **worker 常规分析 + 深分析** 优先使用本地 vLLM（OpenAI-compatible `/v1/chat/completions`），以降低 token 成本并提升输出 JSON 的稳定性；对话（`/chat`）默认保持云端模型（`llm.chat`，不自动回退本地 vLLM；如需回退，显式设置 `TXNEWS_CHAT_ALLOW_DEEP_FALLBACK=1`）。
 
 相关目录/文件（以实际文件为准）：
@@ -522,10 +645,11 @@ python -m apps.mcp.server
 - **覆盖与配比**：样本需覆盖 `policy/macro_data/liquidity/company_event/geopolitics/industry_supply_demand/other`；建议包含一定比例“初步分析错误→深分析纠错”与“证据不足→输出 uncertain”的样本。
 - **自动质检（建议强制）**：解析 JSON、字段齐全、event_type 合法、evidence URL 不越界、tickers schema 稳定（建议统一为 `[{ts_code,name,confidence?}]`），并做去重与长度裁剪（`cutoff_len` 约束）。
 
-### 6.8 数据库与知识库（v0：存储心智模型）
-本项目把“可审计的结构化事实”放在 **数据库（Postgres）**，把“语义召回索引”放在 **知识库（Qdrant 向量索引）**，二者用 `canonical_id` 串联：
-- **数据库（Postgres）**：事实主存储（canonical/版本链/分析结果/信号/主数据/抓取审计索引）；`articles.text` 与 raw 仅用于内部去重/分析/回放，HTTP API 默认不返回原文（合规/版权）。
-- **知识库（KB = Qdrant 向量索引 + Postgres 回表）**：`/search` 先在 Qdrant 做向量召回拿到 `canonical_id`（与少量 payload），再回表 Postgres 拼装 `title/url/published_at/event_type/tickers` 等结构化字段；Agent/MCP 的 `search_news` 同理。
+### 6.9 数据库与知识库（v2）
+本项目把“可审计的结构化事实”放在 **数据库（Postgres）**，把“向量索引与图谱记忆”放在 **Qdrant**，二者通过 `canonical_id` 与 `event_id/ts_code` 对齐：
+- **数据库（Postgres）**：事实主存储（canonical/版本链/分析结果/信号/主数据/抓取审计索引 + 反馈/审计/回滚日志）；`articles.text` 与 raw 仅用于内部去重/分析/回放，HTTP API 默认不返回原文（合规/版权）。
+- **新闻向量（Qdrant）**：`/search` 先在 Qdrant 做向量召回拿到 `canonical_id`（与少量 payload），再回表 Postgres 拼装 `title/url/published_at/event_type/tickers` 等结构化字段；Agent/MCP 的 `search_news` 同理。
+- **图谱记忆（Qdrant）**：`txnews_event_memory/txnews_entity_memory/txnews_edge_memory` 用于图谱展示与 Graph RAG（关系解释 + 邻居检索）。
 
 Postgres 核心表（以 `src/tx_news/db.py` 为准）：
 - `raw_documents`：抓取记录（url/status/checksum/s3_key/headers/…；raw bytes 在 MinIO）
@@ -534,16 +658,19 @@ Postgres 核心表（以 `src/tx_news/db.py` 为准）：
 - `analyses`：结构化分析结果（event_type/data(JSONB)/llm_used/created_at）
 - `signals`：系统信号（breaking/analysis_updated/deep_analysis_updated 等）
 - `a_share_basic`：A 股主数据（ts_code/name/aliases/…）
+- `feedback_logs`：用户点击/赞踩反馈
+- `kg_runs`/`kg_ops_log`/`kg_snapshots`：图谱更新审计与回滚
 
-Qdrant（知识库向量索引）写入形态（以 `src/tx_news/tasks/pipeline.py:dedup_store()` 为准）：
-- 每条 canonical 1 个 point：`vector = embedding(articles.text)`；`point_id` 使用 `canonical_id` 派生的确定性 UUID（兼容 Qdrant id 类型限制）
-- payload（最小元信息）：`canonical_id/title/source_id/url/published_at`（用于检索命中后的快速展示/过滤；最终仍以 Postgres 为准）
+Qdrant 写入形态：
+- **新闻向量**（以 `src/tx_news/tasks/pipeline.py:dedup_store()` 为准）：每条 canonical 1 个 point（`vector = embedding(articles.text)`）；`point_id` 使用 `canonical_id` 派生的确定性 UUID；payload 存 `canonical_id/title/source_id/url/published_at/published_at_ts/fetched_at_ts`。
+- **图谱记忆**（以 `src/tx_news/tasks/kg.py` 为准）：event/entity/edge 三类 collection，边带 `reason_text` 与 `evidence_canonical_ids`。
 
-### 6.9 配置参考（v0 常用项）
+### 6.10 配置参考（常用项）
 推荐只改这两处：`config/config.yaml`（业务参数）与 `.env`（连接串/密钥/运行开关）。
 
 `.env`（常用）：
 - `TXNEWS_PG_DSN`/`TXNEWS_REDIS_URL`/`TXNEWS_NATS_URL`/`TXNEWS_S3_*`/`TXNEWS_QDRANT_*`：基础设施连接
+- `TXNEWS_DEDUP_WINDOW_HOURS`：去重窗口（小时；LSH/Qdrant 仅对比窗口内文章）
 - `TXNEWS_LLM_BASE_URL`/`TXNEWS_LLM_MODEL_NAME`/`TXNEWS_LLM_API_KEY`：LLM（OpenAI 兼容）
 - `TXNEWS_CHAT_ALLOW_DEEP_FALLBACK`：对话在网络不稳定时是否允许回退 `llm.deep`（默认 0；建议保持 0）
 - `TXNEWS_ALLOW_FULL_TEXT`：是否允许内部 KB 接口返回抽取后的全文（默认 0）
@@ -558,7 +685,7 @@ Qdrant（知识库向量索引）写入形态（以 `src/tx_news/tasks/pipeline.
 
 ---
 
-## 7. 关键组件取舍（v0 的选择与优缺点）
+## 7. 关键组件取舍（v2）
 
 ### 7.1 NATS JetStream（事件流）
 优点：轻量、单机友好、延迟低、易运维；consumer pending 可观测。  
@@ -593,15 +720,15 @@ Qdrant（知识库向量索引）写入形态（以 `src/tx_news/tasks/pipeline.
 优点：可离线、自主可控；GPU 可显著提速；一处向量可复用于去重/检索。  
 缺点：模型下载与缓存管理需要规范；模型升级会带来向量维度/分布变化。
 
-### 7.7 常见替代方案对比（v0 取舍）
+### 7.7 常见替代方案对比（当前取舍）
 
-| 目标 | v0 方案 | 常见替代 | v0 取舍原因（简述） |
+| 目标 | 当前方案 | 常见替代 | 取舍原因（简述） |
 | --- | --- | --- | --- |
 | 事件流 | NATS JetStream | Kafka/Redpanda | 单机起步更轻；延迟低；运维成本更小（大规模治理不如 Kafka）。 |
-| 任务编排 | Celery + Redis | Temporal/Argo/Airflow | Python 生态直连、改造成本低；复杂工作流/可观测性可在 v1 引入。 |
+| 任务编排 | Celery + Redis | Temporal/Argo/Airflow | Python 生态直连、改造成本低；复杂工作流/可观测性可在后续引入。 |
 | 向量检索 | Qdrant | pgvector/FAISS/ES kNN | Qdrant 过滤+性能更稳、独立扩展；pgvector 更省组件但检索/过滤能力受限。 |
 | raw 存储 | MinIO(S3) | 本地 FS/OSS | raw 用于审计/回放，S3 接口利于后续扩展；单机也能跑。 |
-| LLM | OpenAI-compatible API | 本地 vLLM/self-host | v0 默认“可选 LLM”：先把数据链路跑通；本地推理可在 v1 做成本与延迟优化。 |
+| LLM | OpenAI-compatible API | 本地 vLLM/self-host | 默认“可选 LLM”：先保证数据链路可跑通；本地推理可在后续做成本与延迟优化。 |
 
 ---
 
@@ -626,35 +753,22 @@ Qdrant（知识库向量索引）写入形态（以 `src/tx_news/tasks/pipeline.
 - vLLM 日志（宿主机进程）：`tail -f var/log/vllm.log`（Windows：`Get-Content var\\log\\vllm.log -Wait -Tail 200`）
 
 ### 8.4 Cloudflare Tunnel / 反代仅暴露单端口
-- 若仅能访问 `8000`：使用配置页 `http://<host>:8000/config`（而不是 `8001`），并确保反代不要缓存 `/status`、`/signals`、`/dashboard/summary`（本项目已对这些接口默认设置 `Cache-Control: no-store`）。
+- 若仅能访问 `8000`：使用配置页 `http://<host>:8000/config`（而不是 `8001`），并确保反代不要缓存 `/status`、`/signals`、`/dashboard/summary`、`/kg/graph`（本项目已对这些接口默认设置 `Cache-Control: no-store`）。
 
 ---
 
-## 9. v1 可优化方向（路线图）
+## 9. v2 路线与迭代重点
 
-### 9.0 v1 已实现（迭代总结）
-- 前端：Vue 3 + TS SPA（public：对话 + 看板；admin：配置页），SSE 流式对话 + 工具进度可视化（完成后自动折叠），侧栏统计包含轮询接口平均耗时。
-- API：用户侧提供 `/search`（向量检索）、`/chat/stream`（SSE）、`/status`（最小依赖/计数）、`/dashboard/summary`（看板聚合）；并提供 `/api/config`（按用户设置在线 LLM；单端口反代可用），对 `tickers` 等字段做兼容处理以避免 500。
-- 存储与稳定性：SQLAlchemy Engine 进程内复用，降低长跑场景 Postgres 连接数膨胀风险；Qdrant collection 支持按模型/维度策略自动兼容。
-- 集成：提供 `apps/mcp/server.py`（stdio JSON-RPC）用于外部 Agent/LLM 以 MCP 方式调用知识库/数据库检索能力。
+### 9.0 v2 已包含（核心能力）
+- 图谱记忆：event/entity/edge 三类记忆写入 Qdrant，并提供 `/kg/graph` 给看板展示。
+- 反馈闭环：`/feedback` 写入 `feedback_logs`，`kg_gc`/`kg_reconcile` 做调权与清理。
+- Graph RAG：对话工具支持事件/实体检索、邻居查询与关系解释。
+- 现有检索与对话：`/search`、`/chat/stream`、`/status`、`/dashboard/summary` 按 v2 继续保留与使用。
 
-v1 建议聚焦“检索质量 + 可观测性 + 成本治理 + 规模化”：
-- 检索与证据定位
-  - chunking + chunk 向量（证据更精确）
-  - 混合检索（向量召回 + 关键词/过滤 + 重排）
-  - 事件级向量与时间线摘要向量（Event-Centric RAG）
-- 分析质量与可回放
-  - prompt/schema 版本化；输出幂等缓存与回放工具
-  - 规则/LLM 的 A/B 对比与质量评测集（离线评测）
-- 资源与吞吐
-  - 多进程/多队列：embedding 与 LLM 调用隔离；GPU worker pool
-  - 更细粒度限流与熔断（按 provider/模型/源站）
-- 可观测性与运维
-  - 指标体系（Prometheus/OpenTelemetry）与 tracing（替代仅日志）
-  - 更强的管理台：任务队列长度、重试率、失败分布、耗时分位数
-- 安全与产品化
-  - API Key/Auth、速率限制、审计日志
-  - 多租户/多市场扩展（A 股以外的实体库与规则集）
+### 9.1 v2 后续方向（可选）
+- 图谱质量评测：证据覆盖率、关系置信度分布、反馈命中率。
+- Graph RAG 解释力：关系链路可视化、可追溯原因模板。
+- 观测与治理：关键链路耗时/失败率指标，任务级 tracing。
 
 ---
 

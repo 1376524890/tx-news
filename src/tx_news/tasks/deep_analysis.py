@@ -18,6 +18,7 @@ from tx_news.settings import get_settings
 from tx_news.storage.postgres import get_analysis, get_article, get_latest_version, init_db, make_engine, upsert_analysis, insert_signal
 from tx_news.storage.qdrant import QdrantStore, scored_point_canonical_id
 from tx_news.tasks.celery_app import celery_app
+from tx_news.tasks.kg import kg_update_from_canonical
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,41 @@ DEEP_LOCK_TTL_SECONDS = 20 * 60
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _is_article_expired(published_at: str | None, fetched_at: str | None, hours: int = 72) -> bool:
+    """Check if article is expired based on published_at or fetched_at (UTC+8)."""
+    from datetime import timedelta
+
+    try:
+        utc8_tz = timezone(timedelta(hours=8))
+        now = datetime.now(utc8_tz)
+        cutoff_ts = (now - timedelta(hours=hours)).timestamp()
+        
+        if published_at:
+            try:
+                dt = datetime.fromisoformat(published_at)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                ts = dt.timestamp()
+                if ts < cutoff_ts:
+                    return True
+            except Exception:
+                pass
+        
+        if fetched_at:
+            try:
+                dt = datetime.fromisoformat(fetched_at)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                ts = dt.timestamp()
+                if ts < cutoff_ts:
+                    return True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return False
 
 
 def _release_redis_lock(redis: Redis, key: str, token: str) -> None:
@@ -60,6 +96,13 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
     canonical_id = str(canonical.get("canonical_id") or "").strip()
     if not canonical_id:
         return {"skipped": True, "reason": "missing_canonical_id"}
+
+    # Skip deep analysis for expired articles (>72 hours)
+    published_at = canonical.get("published_at")
+    fetched_at = canonical.get("fetched_at")
+    if _is_article_expired(published_at, fetched_at, hours=72):
+        logger.info("deep_analysis skipped canonical_id=%s reason=article_expired", canonical_id)
+        return {"skipped": True, "reason": "article_expired"}
 
     current_checksum = str(canonical.get("checksum") or "").strip()
     current_analysis = get_analysis(engine, canonical_id)
@@ -165,6 +208,12 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
         }
         upsert_analysis(engine, canonical_id, event_type=str(result.get("event_type", event_type)), data=result, llm_used=True)
         insert_signal(engine, canonical_id, "deep_analysis_updated", {"event_type": result.get("event_type", event_type)})
+
+        # v2 KG update after deep optimization (best-effort).
+        try:
+            kg_update_from_canonical.delay(canonical_id)
+        except Exception as e:
+            logger.warning("failed to enqueue kg_update after deep canonical_id=%s err=%s", canonical_id, e)
         return {"updated": True}
     finally:
         if got_lock and redis is not None:

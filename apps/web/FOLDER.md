@@ -9,17 +9,29 @@
 架构（≤3行）：
 - Vue 3 + Vite + TypeScript 单页应用（SPA）。
 - 替代原 `apps/api/static`，提供更丰富的交互与动态更新。
-- 构建后产物位于 `dist_public/`（对话/看板/配置入口）与 `dist_admin/`（可选独立配置页），分别由 8000/8001 服务挂载。
+- 构建后产物位于 `dist_public/`（对话/看板/配置入口）与 `dist_admin/`（可选独立配置页），分别由 8000/8001 服务挂载；`dist/` 为默认 Vite 单构建产物（保留以兼容旧流程）。
+- 看板页包含二维知识图谱可视化组件（SVG），用于实时展示 KG 节点与连接关系。
 
 ## 文件
 
 | 文件 | 地位 | 功能 |
 | --- | --- | --- |
 | `README.md` | 说明文档 | 前端构建/开发说明。 |
+| `index.html` | 入口模板 | Vite SPA HTML 模板（public/admin 均复用）。 |
 | `src/main.ts` | 入口 | 挂载 Vue 应用与 Router。 |
 | `src/router/` | 路由 | 构建模式区分：public UI `/`（对话）+ `/dashboard`（看板）+ `/config`（配置）；admin UI `/`（配置）。 |
-| `src/views/` | 页面 | `ChatView.vue`（对话）、`DashboardView.vue`（看板）、`ConfigView.vue`（配置）；`AdminView.vue` 为 legacy。 |
-| `src/components/` | 组件 | 通用组件（如 `TimeSeriesChart.vue` 折线图）。 |
+| `src/views/` | 页面 | `ChatView.vue`（对话）、`DashboardView.vue`（看板）、`ConfigView.vue`（配置）。 |
+| `src/components/` | 组件 | 通用组件（如 `TimeSeriesChart.vue` 折线图、`KG3DGraph.vue` 2D 知识图谱）。 |
 | `src/style.css` | 样式 | 全局样式（移植自原 static/style.css）。 |
+| `public/` | 公共资源 | 不经编译的静态资源（构建时直接复制）。 |
+| `dist_public/` | 构建产物 | public UI 构建结果（API 8000 挂载）。 |
+| `dist_admin/` | 构建产物 | admin UI 构建结果（API 8001 挂载）。 |
+| `dist/` | 旧构建 | 默认 Vite 单构建产物（保留）。 |
 | `package.json` | 依赖 | Vue, Vite, vue-router, marked 等。 |
-| `vite.config.ts` | 配置 | 开发代理与构建配置。 |
+| `package-lock.json` | 锁文件 | 固化 npm 依赖解析；用于 Docker `npm ci` 的确定性构建。 |
+| `tsconfig.json` | 配置 | TypeScript 基础配置。 |
+| `tsconfig.app.json` | 配置 | 应用编译配置（Vite）。 |
+| `tsconfig.node.json` | 配置 | Vite 配置/脚本的 Node 编译配置。 |
+| `vite.config.ts` | 配置 | 开发代理/构建配置与 dev `allowedHosts`，包含 `/dashboard` 等 API 代理（可用 `TXNEWS_VITE_ALLOWED_HOSTS` 追加）。 |
+| `.gitignore` | 维护 | 忽略本地构建产物与依赖。 |
+| `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |

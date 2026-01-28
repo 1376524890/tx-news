@@ -1,5 +1,5 @@
 # Input: git 跟踪规则
-# Output: 忽略本地运行态/缓存/密钥文件
+# Output: 忽略本地运行态/缓存/密钥文件（含 celerybeat-schedule.*）
 # Pos: 仓库维护配置（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 result_model/
@@ -13,5 +13,9 @@ __pycache__/
 .run/
 var/
 data/
-
+celerybeat-schedule
+celerybeat-schedule.*
+*.bak
+*.dat
+*.dir
 # MinIO/Qdrant/Postgres docker volumes are outside repo

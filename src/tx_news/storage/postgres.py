@@ -1,5 +1,5 @@
 # Input: Postgres DSN（进程内缓存 Engine）与 ORM 模型
-# Output: 建表与 CRUD/查询函数（articles/versions/analysis/signals/a_share 等）+（可选）从本地缓存引导主数据
+# Output: 建表与 CRUD/查询函数（articles/versions/analysis/signals/a_share/feedback/kg_ops 等）+ 反馈汇总 +（可选）从本地缓存引导主数据
 # Pos: Postgres 数据访问层（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -9,12 +9,25 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from threading import Lock
 
-from sqlalchemy import create_engine, desc, select
+from sqlalchemy import create_engine, desc, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from tx_news.db import AShareBasic, Analysis, Article, ArticleVersion, Base, RawDoc, Signal, Source
+from tx_news.db import (
+    AShareBasic,
+    Analysis,
+    Article,
+    ArticleVersion,
+    Base,
+    FeedbackLog,
+    KGOpsLog,
+    KGRun,
+    KGSnapshot,
+    RawDoc,
+    Signal,
+    Source,
+)
 
 
 def utcnow() -> datetime:
@@ -178,6 +191,110 @@ def insert_signal(engine: Engine, canonical_id: str, kind: str, data: dict) -> N
         s.add(Signal(canonical_id=canonical_id, kind=kind, data=data, created_at=utcnow()))
 
 
+def insert_feedback(engine: Engine, *, uid: str, kind: str, data: dict) -> None:
+    with session_scope(engine) as s:
+        s.add(FeedbackLog(uid=str(uid or ""), kind=str(kind or ""), data=data or {}, created_at=utcnow()))
+
+
+def get_feedback_counts(
+    engine: Engine,
+    *,
+    canonical_ids: list[str],
+    kinds: list[str],
+    window_seconds: int | None = None,
+) -> dict[str, dict[str, int]]:
+    if not canonical_ids or not kinds:
+        return {}
+    if engine.url.get_backend_name() != "postgresql":
+        return {}
+    clauses = [
+        "kind = any(:kinds)",
+        "(data->>'canonical_id') = any(:canonical_ids)",
+    ]
+    params: dict[str, object] = {
+        "kinds": list(kinds),
+        "canonical_ids": list(canonical_ids),
+    }
+    if window_seconds and window_seconds > 0:
+        clauses.append("created_at >= (now() - (:window_sec || ' seconds')::interval)")
+        params["window_sec"] = int(window_seconds)
+    query = text(
+        "select data->>'canonical_id' as canonical_id, kind, count(*) as n "
+        "from feedback_logs "
+        f"where {' and '.join(clauses)} "
+        "group by canonical_id, kind"
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(query, params).all()
+    out: dict[str, dict[str, int]] = {}
+    for canonical_id, kind, n in rows:
+        if not canonical_id:
+            continue
+        entry = out.setdefault(str(canonical_id), {})
+        entry[str(kind)] = int(n or 0)
+    return out
+
+
+def create_kg_run(engine: Engine, *, run_id: str, graph_env: str, trigger_canonical_id: str) -> None:
+    with session_scope(engine) as s:
+        s.add(
+            KGRun(
+                run_id=str(run_id),
+                graph_env=str(graph_env),
+                trigger_canonical_id=str(trigger_canonical_id),
+                status="running",
+                started_at=utcnow(),
+                finished_at=None,
+            )
+        )
+
+
+def finish_kg_run(engine: Engine, *, run_id: str, status: str) -> None:
+    with session_scope(engine) as s:
+        r = s.get(KGRun, str(run_id))
+        if not r:
+            return
+        r.status = str(status)
+        r.finished_at = utcnow()
+
+
+def insert_kg_ops_log(engine: Engine, *, run_id: str, phase: str, payload: dict) -> None:
+    with session_scope(engine) as s:
+        s.add(
+            KGOpsLog(
+                run_id=str(run_id),
+                phase=str(phase),
+                payload=payload or {},
+                created_at=utcnow(),
+            )
+        )
+
+
+def insert_kg_snapshot(
+    engine: Engine,
+    *,
+    snapshot_id: str,
+    run_id: str,
+    graph_env: str,
+    snapshot_payload: dict,
+) -> None:
+    with session_scope(engine) as s:
+        s.add(
+            KGSnapshot(
+                snapshot_id=str(snapshot_id),
+                run_id=str(run_id),
+                graph_env=str(graph_env),
+                snapshot_payload=snapshot_payload or {},
+                created_at=utcnow(),
+            )
+        )
+
+
+def get_kg_snapshot(engine: Engine, *, snapshot_id: str) -> KGSnapshot | None:
+    with session_scope(engine) as s:
+        return s.get(KGSnapshot, str(snapshot_id))
+
+
 def get_article(engine: Engine, canonical_id: str) -> Article | None:
     with session_scope(engine) as s:
         return s.scalar(select(Article).where(Article.canonical_id == canonical_id))
@@ -226,6 +343,16 @@ def get_event_canonical_ids(engine: Engine, event_id: str, limit: int = 200) -> 
 def get_a_share(engine: Engine, ts_code: str):
     with session_scope(engine) as s:
         return s.scalar(select(AShareBasic).where(AShareBasic.ts_code == ts_code))
+
+
+def get_a_shares(engine: Engine, ts_codes: list[str]) -> list[AShareBasic]:
+    ts_codes = [str(x or "").strip() for x in (ts_codes or [])]
+    ts_codes = [x for x in ts_codes if x]
+    if not ts_codes:
+        return []
+    with session_scope(engine) as s:
+        rows = s.scalars(select(AShareBasic).where(AShareBasic.ts_code.in_(ts_codes))).all()
+        return list(rows)
 
 
 def upsert_a_share_basic(engine: Engine, rows: list[dict]) -> None:

@@ -3,7 +3,9 @@
 # Pos: 本地/单机编排定义（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 x-build-args: &build_args
-  NPM_REGISTRY: ${TXNEWS_NPM_REGISTRY:-}
+  # Default to the official registry to avoid lockfile `resolved` host pinning to a flaky mirror.
+  # Override via `TXNEWS_NPM_REGISTRY` if you need a local mirror.
+  NPM_REGISTRY: ${TXNEWS_NPM_REGISTRY:-https://registry.npmjs.org/}
   PIP_INDEX_URL: ${TXNEWS_PIP_INDEX_URL:-}
   PIP_EXTRA_INDEX_URL: ${TXNEWS_PIP_EXTRA_INDEX_URL:-}
   PIP_TRUSTED_HOST: ${TXNEWS_PIP_TRUSTED_HOST:-}
@@ -158,6 +160,34 @@ services:
       - redis
       - qdrant
       - minio
+    restart: unless-stopped
+
+  beat:
+    profiles: ["app"]
+    image: tx-news-worker:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: beat
+      args: *build_args
+    command: ["python", "-m", "celery", "-A", "tx_news.tasks.celery_app.celery_app", "beat", "-l", "INFO"]
+    env_file:
+      - .env
+    environment:
+      TXNEWS_REDIS_URL: redis://host.docker.internal:6379/0
+      TXNEWS_PG_DSN: postgresql+psycopg://txnews@postgres:5432/txnews
+      TXNEWS_NATS_URL: nats://nats:4222
+      TXNEWS_S3_ENDPOINT: http://minio:9000
+      TXNEWS_QDRANT_URL: http://qdrant:6333
+      HF_HOME: /app/var/hf
+    volumes:
+      - ./config:/app/config:ro
+      - ./var/cache:/app/var/cache
+      - hf_cache:/app/var/hf
+    depends_on:
+      - postgres
+      - redis
+      - qdrant
     restart: unless-stopped
 
   nats-bridge:

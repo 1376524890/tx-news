@@ -7,7 +7,7 @@
 > 一旦我所属的文件夹有所变化，请更新我。
 
 架构（≤3行）：
-- 单机数据流（v1）：`apps/collector` → NATS → `apps/worker`(Celery) → Postgres/Qdrant/MinIO；v2 交付入口见 `docs/V2_NEWS_KG_DELIVERY_PLAN.md`（详细设计见 `docs/V2_NEWS_KG_DESIGN.md`）。
+- 单机数据流（v1）：`apps/collector` → NATS → `apps/worker`(Celery) → Postgres/Qdrant/MinIO；v2 技术路线见 `docs/V2_NEWS_KG_IMPLEMENTATION.md`（其余 v2 文档仅保留入口指针职责）。
 - 运行入口在 `apps/`，可复用库在 `src/tx_news/`，配置在 `config/`。
 - 运维脚本在 `scripts/`；主程序推荐通过 Docker 运行（脚本会同步输出容器日志并落盘到 `var/log/compose.log`）；运行态目录（`var/`、`.run/`）均 gitignore。
 
@@ -15,18 +15,28 @@
 
 | 文件 | 地位 | 功能 |
 | --- | --- | --- |
-| `README.md` | 主文档 | 快速开始、API/UI 使用、架构与技术细节、取舍与路线图。 |
+| `README.md` | 主文档 | 快速开始、API/UI 使用、架构与技术细节、取舍、路线图与 v2 技术路线速览（含图谱程序框图说明）。 |
 | `AGENTS.md` | 贡献指南 | 本仓库的开发与协作约定。 |
 | `REQUIREMENTS.md` | 运维文档 | 环境/依赖/网络与密钥要求。 |
-| `docker-compose.yml` | 单机编排 | 默认启动基础设施；`profile=app` 时构建并启动主程序容器（含 `db-init` 建表与 `bootstrap` 一次性引导主数据；并支持注入 HTTP(S) 代理用于构建/运行期外网访问）。 |
+| `docker-compose.yml` | 单机编排 | 默认启动基础设施；`profile=app` 时构建并启动主程序容器（含 `db-init` 建表、`bootstrap` 一次性引导主数据、`beat` 定时任务；并支持注入 HTTP(S) 代理用于构建/运行期外网访问；build 阶段 npm registry 默认 `https://registry.npmjs.org/` 可覆写）。 |
 | `.dockerignore` | Docker 构建 | 缩小构建上下文，避免把运行态/缓存打进镜像。 |
 | `pyproject.toml` | 工具/打包配置 | `setuptools` + `ruff` 等配置入口。 |
 | `requirements.txt` | 运行依赖 | 服务运行所需 Python 依赖。 |
 | `requirements-dev.txt` | 开发依赖 | `pytest`/`ruff` 等开发工具依赖。 |
 | `pytest.ini` | 测试配置 | `pytest` 收集范围配置（避免扫描 `var/vendor` 等第三方目录）。 |
-| `.env.example` | 环境变量样例 | `.env` 模板（密钥/连接串建议通过 env 注入；含 `TXNEWS_CHAT_ALLOW_DEEP_FALLBACK` 等开关）。 |
-| `.gitignore` | 仓库维护 | 忽略本地运行态与缓存文件。 |
+| `.env.example` | 环境变量样例 | `.env` 模板（密钥/连接串建议通过 env 注入；含 build-time 镜像/代理与 `TXNEWS_CHAT_ALLOW_DEEP_FALLBACK` 等开关）。 |
+| `.gitignore` | 仓库维护 | 忽略本地运行态与缓存文件（含 `celerybeat-schedule.*`）。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |
+
+## 本地运行态文件（gitignored）
+
+| 文件 | 地位 | 功能 |
+| --- | --- | --- |
+| `.env` | 本地配置 | 本机环境变量（建议从 `.env.example` 复制）。 |
+| `.env.backup` | 备份 | 本地 `.env` 备份。 |
+| `celerybeat-schedule.dat` | 运行态 | celery beat 持久化调度状态（本地生成）。 |
+| `celerybeat-schedule.bak` | 运行态 | celery beat 调度状态备份。 |
+| `celerybeat-schedule.dir` | 运行态 | celery beat 调度状态索引。 |
 
 ## 子目录
 

@@ -59,6 +59,11 @@ class TxNewsAgent:
             "list_signals": self.tools.list_signals,
             "get_event_timeline": self.tools.get_event_timeline,
             "get_entity_profile": self.tools.get_entity_profile,
+            # v2 KG tools
+            "search_entities": self.tools.search_entities,
+            "search_events": self.tools.search_events,
+            "get_event_neighbors": self.tools.get_event_neighbors,
+            "explain_connection": self.tools.explain_connection,
         }
 
     def _chat_once_stream(
@@ -162,7 +167,8 @@ class TxNewsAgent:
             "1) 严禁输出新闻原文/大段引用；只允许输出你自己的摘要、结构化结论与可点击 URL。\n"
             "2) 任何结论必须先通过工具检索（list_recent/search_news 等）获取证据。\n"
             "3) 优先处理当天/突发：先调用 list_recent(minutes=%d, limit=20)。\n"
-            "4) 输出格式：请尽量使用条列与小标题，给出：结论、影响路径、相关标的、风险与不确定性、证据链接。\n"
+            "4) 检索策略：先 list_recent 校准新鲜度；优先用 search_entities/search_events 命中实体/事件，再用 get_event_neighbors/explain_connection 补充关联与原因；必要时再用 search_news 找补充证据。\n"
+            "5) 输出格式：请尽量使用条列与小标题，给出：结论、影响路径、相关标的、风险与不确定性、证据链接。\n"
             % int(recent_minutes)
         )
 
@@ -240,6 +246,26 @@ class TxNewsAgent:
                                     "published_at": item.get("published_at"),
                                 }
                             )
+                    elif name in {"search_events"} and isinstance(result, list):
+                        for item in result:
+                            ev = item.get("evidence")
+                            if not isinstance(ev, list):
+                                continue
+                            for evi in ev:
+                                if not isinstance(evi, dict):
+                                    continue
+                                cid = str(evi.get("canonical_id") or "")
+                                if not cid or cid in evidence_seen:
+                                    continue
+                                evidence_seen.add(cid)
+                                evidence.append(
+                                    {
+                                        "canonical_id": cid,
+                                        "source_id": evi.get("source_id"),
+                                        "url": evi.get("url"),
+                                        "published_at": evi.get("published_at"),
+                                    }
+                                )
                     elif name in {"get_article_analysis"} and isinstance(result, dict):
                         cid = str(result.get("canonical_id") or "")
                         if cid and cid not in evidence_seen:
@@ -407,6 +433,67 @@ class TxNewsAgent:
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_entities",
+                    "description": "检索实体记忆库（Qdrant txnews_entity_memory），返回匹配的 ts_code/name 等信息。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "q": {"type": "string", "minLength": 1},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                        },
+                        "required": ["q"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_events",
+                    "description": "检索事件快照库（Qdrant txnews_event_memory），返回 event_id/snapshot 与证据链接（不返回原文）。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "q": {"type": "string", "minLength": 1},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                            "recent_hours": {"type": "integer", "minimum": 1, "maximum": 720, "default": 72},
+                        },
+                        "required": ["q"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_event_neighbors",
+                    "description": "获取事件的邻居事件（基于 txnews_edge_memory related_to 边），返回原因与权重。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "event_id": {"type": "string", "minLength": 1},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                        },
+                        "required": ["event_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "explain_connection",
+                    "description": "解释两个事件之间的连接原因（读取 txnews_edge_memory），返回 reason_text 与证据 canonical_id。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "event_a": {"type": "string", "minLength": 1},
+                            "event_b": {"type": "string", "minLength": 1},
+                        },
+                        "required": ["event_a", "event_b"],
+                    },
+                },
+            },
         ]
 
     def run(self, *, messages: list[dict[str, str]], max_steps: int = 50, recent_minutes: int = 180) -> dict[str, Any]:
@@ -418,7 +505,8 @@ class TxNewsAgent:
             "1) 严禁输出新闻原文/大段引用；只允许输出你自己的摘要、结构化结论与可点击 URL。\n"
             "2) 任何结论必须先通过工具检索（list_recent/search_news 等）获取证据。\n"
             "3) 优先处理当天/突发：先调用 list_recent(minutes=%d, limit=20)。\n"
-            "4) 输出格式：请尽量使用条列与小标题，给出：结论、影响路径、相关标的、风险与不确定性、证据链接。\n"
+            "4) 检索策略：先 list_recent 校准新鲜度；优先用 search_entities/search_events 命中实体/事件，再用 get_event_neighbors/explain_connection 补充关联与原因；必要时再用 search_news 找补充证据。\n"
+            "5) 输出格式：请尽量使用条列与小标题，给出：结论、影响路径、相关标的、风险与不确定性、证据链接。\n"
             % int(recent_minutes)
         )
 
@@ -471,6 +559,26 @@ class TxNewsAgent:
                                     "published_at": item.get("published_at"),
                                 }
                             )
+                    elif name in {"search_events"} and isinstance(result, list):
+                        for item in result:
+                            ev = item.get("evidence")
+                            if not isinstance(ev, list):
+                                continue
+                            for evi in ev:
+                                if not isinstance(evi, dict):
+                                    continue
+                                cid = str(evi.get("canonical_id") or "")
+                                if not cid or cid in evidence_seen:
+                                    continue
+                                evidence_seen.add(cid)
+                                evidence.append(
+                                    {
+                                        "canonical_id": cid,
+                                        "source_id": evi.get("source_id"),
+                                        "url": evi.get("url"),
+                                        "published_at": evi.get("published_at"),
+                                    }
+                                )
                     elif name in {"get_article_analysis"} and isinstance(result, dict):
                         cid = str(result.get("canonical_id") or "")
                         if cid and cid not in evidence_seen:
