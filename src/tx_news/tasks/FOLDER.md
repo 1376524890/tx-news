@@ -7,7 +7,7 @@
 > 一旦我所属的文件夹有所变化，请更新我。
 
 架构（≤3行）：
-- `celery_app.py` 定义 Celery app 与任务注册策略（并包含 v2.2 所需的 beat_schedule）。
+- `celery_app.py` 定义 Celery app 与任务注册策略（并包含 v2.2 所需的 beat_schedule；并默认抑制 httpx/qdrant 的 HTTP Request 噪声日志）。
 - `pipeline.py` 定义 Raw→Normalize→Dedup 的主流水线任务（近重复 + 语义去重均按 `TXNEWS_DEDUP_WINDOW_HOURS` 只对比窗口内文章），并在 `dedup_store` 完成后显式入队 `analyze`（避免链式回调在 broker/DNS 抖动时丢失导致“分析不推进”）；同时对 `tickers` 等字段做 schema 归一化，保证 API/UI 稳定；并对相同 checksum 的 canonical 分析做幂等跳过，避免重复分析/重复 LLM 成本。
 - `news_queue.py` 维护分析优先队列，并由 Celery 定时 `queue_worker_task` 拉取队列触发 `pipeline.analyze`（队列工人对新入库 canonical 标记 `is_new_canonical`，确保深分析能被触发）。
 - `deep_analysis.py` 与 `maintenance.py` 提供“深分析”和“维护任务”（GPU 模式下 `pipeline.analyze()` 与深分析均优先使用 `llm.deep` 指向本地 vLLM；不可用时回退到 `llm.chat`（需配置 api_key）；embedding 支持绑定到指定 GPU，并在换模型/维度变化时自动兼容 Qdrant collection）。

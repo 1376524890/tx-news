@@ -4,10 +4,21 @@
 
 from __future__ import annotations
 
+import logging
+
 from celery import Celery
 from celery.schedules import crontab
 
 from tx_news.settings import get_settings
+
+
+def _configure_worker_logging() -> None:
+    """
+    Silence noisy HTTP request logs (httpx/httpcore/qdrant) while keeping INFO logs for tasks.
+    Celery's -l INFO should not include per-request transport logs.
+    """
+    for name in ("httpx", "httpcore", "qdrant_client", "qdrant_client.http"):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def make_celery() -> Celery:
@@ -61,6 +72,7 @@ def make_celery() -> Celery:
     return app
 
 
+_configure_worker_logging()
 celery_app = make_celery()
 
 # Ensure task modules are imported so their `@celery_app.task` decorators execute and

@@ -14,7 +14,14 @@ from tx_news.db import RawDoc
 from tx_news.integrations.tushare_sync import TushareSync
 from tx_news.settings import get_settings
 from tx_news.storage.minio import S3Client
-from tx_news.storage.postgres import init_db, make_engine, session_scope, upsert_a_share_basic, get_articles
+from tx_news.storage.postgres import (
+    get_articles,
+    get_latest_version,
+    init_db,
+    make_engine,
+    session_scope,
+    upsert_a_share_basic,
+)
 from tx_news.tasks.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -127,12 +134,15 @@ def analyze_recent_articles() -> dict[str, Any]:
     analyzed = 0
     skipped = 0
     for article in articles:
+        v = get_latest_version(engine, article.canonical_id)
+        fetched_at = (v.fetched_at if v else None) or article.created_at
+        published_at = (v.published_at if v else None) or article.created_at
         canonical = {
             "canonical_id": article.canonical_id,
-            "source_id": article.source_id,
-            "url": None,
-            "fetched_at": article.created_at.isoformat(),
-            "published_at": article.created_at.isoformat(),
+            "source_id": v.source_id if v else None,
+            "url": v.url if v else None,
+            "fetched_at": fetched_at.isoformat(),
+            "published_at": published_at.isoformat(),
             "checksum": article.checksum,
             "is_new_canonical": False,
         }
