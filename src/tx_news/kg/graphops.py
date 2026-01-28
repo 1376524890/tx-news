@@ -1,6 +1,6 @@
 # Input: rule-based KG deltas (nodes/edges) or LLM-produced plan
 # Output: GraphOpsPlan/EvalReport schema + minimal validator
-# Pos: v2 KG GraphOps schema（变更时同步更新以上注释与所属目录 FOLDER.md）
+# Pos: v2/v3 KG GraphOps schema（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 
 GraphEnv = Literal["prod", "sandbox"]
-OpType = Literal["UPSERT_EVENT", "UPSERT_TICKER", "UPSERT_EDGE", "DELETE_EDGE"]
+OpType = Literal["UPSERT_EVENT", "UPSERT_TICKER", "UPSERT_VARIABLE", "UPSERT_EDGE", "DELETE_EDGE"]
 CriticVerdict = Literal["pass", "fail"]
 EdgeVerdict = Literal["KEEP", "WEAKEN", "REMOVE"]
 
@@ -55,7 +55,7 @@ def validate_plan(plan: GraphOpsPlan) -> None:
     if not plan.ops:
         raise ValueError("GraphOpsPlan.ops is empty")
     for op in plan.ops:
-        if op.op in {"UPSERT_EVENT", "UPSERT_TICKER"}:
+        if op.op in {"UPSERT_EVENT", "UPSERT_TICKER", "UPSERT_VARIABLE"}:
             if not (isinstance(op.text, str) and op.text.strip()) and not (isinstance(op.vector, list) and op.vector):
                 raise ValueError(f"{op.op} missing embedding input (text/vector)")
             if not isinstance(op.payload, dict):
@@ -64,6 +64,8 @@ def validate_plan(plan: GraphOpsPlan) -> None:
                 raise ValueError("UPSERT_EVENT payload.snapshot_text is empty")
             if op.op == "UPSERT_TICKER" and not str(op.payload.get("description_text") or "").strip():
                 raise ValueError("UPSERT_TICKER payload.description_text is empty")
+            if op.op == "UPSERT_VARIABLE" and not str(op.payload.get("description_text") or "").strip():
+                raise ValueError("UPSERT_VARIABLE payload.description_text is empty")
         if op.op == "UPSERT_EDGE":
             if not (isinstance(op.text, str) and op.text.strip()) and not (isinstance(op.vector, list) and op.vector):
                 raise ValueError("UPSERT_EDGE missing embedding input (text/vector)")

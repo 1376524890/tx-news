@@ -1,5 +1,5 @@
 # Input: NATS raw payload + Postgres/MinIO/Qdrant/embedding/LLM（可选）+ 去重窗口配置
-# Output: canonical 入库、向量 upsert（含时间戳 payload）、analysis upsert/幂等跳过、signals 写入
+# Output: canonical 入库、向量 upsert（含时间戳 payload）、analysis/因果变量 upsert、signals 写入
 # Pos: 主流水线任务定义（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from celery import chain
 from redis import Redis
 from qdrant_client.http import models as qm
 
+from tx_news.analysis.causal_vars import load_causal_variables, normalize_affected_variables
 from tx_news.analysis.dashscope import DashScopeClient
 from tx_news.analysis.rules import EventWindowPlanner, classify_event_type, pick_key_entity, stable_event_id
 from tx_news.analysis.tickers import TickerMatcher
@@ -363,6 +364,7 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
             "event_type": event_type,
             "entities": entities,
             "tickers": tickers,
+            "affected_variables": [],
             "impact": {"scope": "index", "direction": "uncertain", "confidence": 0.3},
             "index_view": {"direction": "uncertain", "drivers": [], "risks": []},
             "evidence": [{"url": canonical["url"], "source_id": canonical["source_id"]}],
@@ -371,7 +373,7 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
         llm_used = False
         system = (
             "你是金融新闻分析助手。请只输出一个 JSON 对象，不要输出任何多余文本。"
-            "输出字段：event_type, entities, tickers, impact, index_view, evidence。"
+            "输出字段：event_type, entities, tickers, affected_variables, impact, index_view, evidence。"
             "注意：不要输出新闻全文，不要输出长段引用。"
         )
         user = (
@@ -379,6 +381,7 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
             f"正文：{text[:6000]}\n\n"
             f"已识别个股候选：{tickers}\n"
             "请基于以上内容进行结构化标注与推理，给出对大盘与个股的方向性判断（情景化）。"
+            "affected_variables 必须从 causal_variables.yaml 白名单中选择，输出方向（+/-/0/uncertain）。"
         )
 
         def _try_llm(llm_cfg: dict[str, Any], api_key: Any) -> bool:
@@ -390,7 +393,7 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
                 timeout_seconds=int(llm_cfg.get("timeout_seconds") or 60),
             )
             out = client.chat_json(system=system, user=user)
-            for k in ("event_type", "entities", "tickers", "impact", "index_view", "evidence"):
+            for k in ("event_type", "entities", "tickers", "affected_variables", "impact", "index_view", "evidence"):
                 if k in out:
                     result[k] = out[k]
             llm_used = True
@@ -412,6 +415,13 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
 
         result["tickers"] = _normalize_tickers(result.get("tickers"))
 
+        causal_cfg = file_cfg.causal if isinstance(file_cfg.causal, dict) else {}
+        max_vars = int(causal_cfg.get("max_event_variables") or 6)
+        var_index = load_causal_variables()
+        raw_vars = result.get("affected_variables")
+        normalized_vars = normalize_affected_variables(raw_vars, var_index=var_index, max_items=max_vars)
+        result["affected_variables"] = normalized_vars
+
         result["_txnews"] = {
             "text_checksum": current_checksum or None,
             "source_id": canonical.get("source_id"),
@@ -419,6 +429,7 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
             "published_at": canonical.get("published_at"),
             "fetched_at": canonical.get("fetched_at"),
             "analyzed_at": utcnow().isoformat(),
+            "affected_variables_raw": raw_vars if raw_vars and raw_vars != normalized_vars else None,
         }
 
         upsert_analysis(engine, canonical_id, event_type=str(result.get("event_type", event_type)), data=result, llm_used=llm_used)
@@ -429,6 +440,13 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
             kg_update_from_canonical.delay(canonical_id)
         except Exception as e:
             logger.warning("failed to enqueue kg_update canonical_id=%s err=%s", canonical_id, e)
+        # v3 causal synthesis (best-effort, event-driven).
+        try:
+            from tx_news.tasks.causal import causal_synthesize_from_canonical
+
+            causal_synthesize_from_canonical.delay(canonical_id)
+        except Exception as e:
+            logger.warning("failed to enqueue causal_synthesize canonical_id=%s err=%s", canonical_id, e)
     finally:
         if got_lock and redis is not None:
             try:

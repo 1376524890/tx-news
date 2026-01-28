@@ -34,6 +34,7 @@ def make_celery() -> Celery:
             "tx_news.tasks.deep_analysis",
             "tx_news.tasks.maintenance",
             "tx_news.tasks.kg",
+            "tx_news.tasks.causal",
             "tx_news.tasks.news_queue",
         ],
     )
@@ -43,6 +44,7 @@ def make_celery() -> Celery:
         "tx_news.tasks.deep_analysis.*": {"queue": "default"},
         "tx_news.tasks.maintenance.*": {"queue": "default"},
         "tx_news.tasks.kg.*": {"queue": "default"},
+        "tx_news.tasks.causal.*": {"queue": "default"},
         "tx_news.tasks.news_queue.*": {"queue": "default"},
     }
     app.conf.worker_prefetch_multiplier = 1
@@ -80,6 +82,7 @@ celery_app = make_celery()
 # (This prevents "Received unregistered task ..." when the worker starts.)
 from tx_news.tasks import deep_analysis as _deep_analysis  # noqa: E402,F401
 from tx_news.tasks import kg as _kg  # noqa: E402,F401
+from tx_news.tasks import causal as _causal  # noqa: E402,F401
 from tx_news.tasks import maintenance as _maintenance  # noqa: E402,F401
 from tx_news.tasks import news_queue as _news_queue  # noqa: E402,F401
 from tx_news.tasks import pipeline as _pipeline  # noqa: E402,F401

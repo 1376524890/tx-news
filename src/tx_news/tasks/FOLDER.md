@@ -12,6 +12,7 @@
 - `news_queue.py` 维护分析优先队列，并由 Celery 定时 `queue_worker_task` 拉取队列触发 `pipeline.analyze`（队列工人对新入库 canonical 标记 `is_new_canonical`，确保深分析能被触发）。
 - `deep_analysis.py` 与 `maintenance.py` 提供“深分析”和“维护任务”（GPU 模式下 `pipeline.analyze()` 与深分析均优先使用 `llm.deep` 指向本地 vLLM；不可用时回退到 `llm.chat`（需配置 api_key）；embedding 支持绑定到指定 GPU，并在换模型/维度变化时自动兼容 Qdrant collection）。
 - `kg.py` 提供 v2 KG 增量更新与治理任务：`kg_update_from_canonical`（sandbox→prod）、`kg_gc`（边 GC/衰减）、`kg_reconcile`（事件快照重算）、`kg_rollback`（回滚）与审计/快照写入。
+- `causal.py` 提供 v3 因果合成任务：从分析结果生成变量边与因果边（sandbox→prod），支持回滚。
 - 向量化：canonical 的 embedding 以“抽取后的正文文本”为输入（不再额外做字符级截断；实际长度仍可能受 embedding 模型的最大 token 限制影响）。
 
 ## 文件
@@ -25,4 +26,5 @@
 | `deep_analysis.py` | 深分析 | 相似检索 + LLM 二次推理并回写。 |
 | `maintenance.py` | 维护任务 | 主数据同步与 raw TTL 清理。 |
 | `kg.py` | v2 KG | KG 增量更新（sandbox→prod）、边 GC/衰减、事件快照重算与回滚。 |
+| `causal.py` | v3 因果 | 变量/因果边合成与回滚。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |

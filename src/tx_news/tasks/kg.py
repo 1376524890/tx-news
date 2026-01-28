@@ -1,6 +1,6 @@
 # Input: canonical_id（来自 v1 analyze/deep_analysis）+ Postgres(articles/analyses/versions) + Qdrant(event/entity/edge memory)
-# Output: v2 KG 增量更新（sandbox->prod），审计与快照，周期治理任务
-# Pos: v2 KG 任务入口（变更时同步更新以上注释与所属目录 FOLDER.md）
+# Output: v2/v3 KG 增量更新（sandbox->prod），审计与快照，周期治理任务
+# Pos: KG 任务入口（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
 
@@ -12,9 +12,10 @@ from typing import Any
 
 from redis import Redis
 
+from tx_news.analysis.causal_vars import load_causal_variables, normalize_affected_variables
 from tx_news.embedding.embedder import DEFAULT_EMBEDDING_MODEL, build_embedder
 from tx_news.kg.graphops import EvalReport, GraphOp, GraphOpsPlan, validate_plan
-from tx_news.kg.ids import edge_id, node_id_event, node_id_ticker, point_id
+from tx_news.kg.ids import edge_id, node_id_event, node_id_ticker, node_id_variable, point_id
 from tx_news.kg.scoring import related_to_reason_and_weight
 from tx_news.kg.snapshot import build_event_snapshot_text
 from tx_news.settings import get_settings
@@ -77,6 +78,78 @@ def _normalize_tickers(value: Any) -> list[str]:
         seen.add(ts)
         uniq.append(ts)
     return uniq
+
+
+def _pick_direction(counts: dict[str, int]) -> tuple[str, float]:
+    pos = int(counts.get("+") or 0)
+    neg = int(counts.get("-") or 0)
+    neu = int(counts.get("0") or 0)
+    total = pos + neg + neu
+    if total <= 0:
+        return "uncertain", 0.0
+    if pos == neg and pos > 0:
+        return "uncertain", pos / total
+    if pos > neg:
+        return "+", pos / total
+    if neg > pos:
+        return "-", neg / total
+    if neu > 0:
+        return "0", neu / total
+    return "uncertain", 0.0
+
+
+def _aggregate_event_variables(
+    engine,
+    canonical_ids: list[str],
+    *,
+    max_vars: int,
+) -> list[dict[str, Any]]:
+    var_index = load_causal_variables()
+    stats: dict[str, dict[str, Any]] = {}
+    for cid in canonical_ids:
+        an = get_analysis(engine, cid)
+        if not an or not isinstance(an.data, dict):
+            continue
+        raw = an.data.get("affected_variables")
+        vars_norm = normalize_affected_variables(raw, var_index=var_index, max_items=max_vars)
+        for v in vars_norm:
+            name = str(v.get("var") or "").strip()
+            if not name:
+                continue
+            st = stats.setdefault(
+                name,
+                {
+                    "dir_counts": {"+": 0, "-": 0, "0": 0},
+                    "conf_sum": 0.0,
+                    "conf_n": 0,
+                    "evidence": [],
+                },
+            )
+            direction = str(v.get("direction") or "uncertain")
+            if direction in st["dir_counts"]:
+                st["dir_counts"][direction] += 1
+            st["conf_sum"] += float(v.get("confidence") or 0.0)
+            st["conf_n"] += 1
+            if len(st["evidence"]) < 64:
+                st["evidence"].append(cid)
+
+    out: list[dict[str, Any]] = []
+    for name, st in stats.items():
+        direction, consistency = _pick_direction(st.get("dir_counts") or {})
+        conf_n = int(st.get("conf_n") or 0)
+        conf_avg = (float(st.get("conf_sum") or 0.0) / conf_n) if conf_n > 0 else 0.0
+        evidence = list(dict.fromkeys(st.get("evidence") or []))[:64]
+        out.append(
+            {
+                "var": name,
+                "direction": direction,
+                "consistency": consistency,
+                "confidence": max(0.0, min(1.0, conf_avg)),
+                "evidence": evidence,
+            }
+        )
+    out.sort(key=lambda x: float(x.get("confidence") or 0.0), reverse=True)
+    return out[: int(max_vars)]
 
 
 def _qdrant_stores() -> tuple[QdrantStore, QdrantStore, QdrantStore]:
@@ -246,6 +319,64 @@ def _build_rule_plan(
     }
     ops.append(GraphOp(op="UPSERT_EVENT", graph_env=graph_env, item_id=event_node_id, text=snapshot_text, payload=event_payload))
 
+    # (2.5) event -> variable candidates (from affected_variables aggregation)
+    settings = get_settings()
+    file_cfg = settings.load_file_settings()
+    causal_cfg = file_cfg.causal if isinstance(file_cfg.causal, dict) else {}
+    max_vars = int(causal_cfg.get("max_event_variables") or 6)
+    var_index = load_causal_variables()
+    event_vars = _aggregate_event_variables(engine, canonical_ids, max_vars=max_vars)
+    for vinfo in event_vars:
+        var_name = str(vinfo.get("var") or "").strip()
+        if not var_name:
+            continue
+        meta = var_index.get(var_name) or {}
+        domain = str(meta.get("domain") or "macro")
+        desc = str(meta.get("desc") or "").strip()
+        desc_text = f"{var_name} ({domain})"
+        if desc:
+            desc_text += f"\n{desc}"
+        desc_text = desc_text[:800]
+
+        var_node_id = node_id_variable(var_name)
+        var_payload = {
+            "node_type": "latent_variable",
+            "node_id": var_node_id,
+            "var": var_name,
+            "domain": domain,
+            "description_text": desc_text,
+            "updated_at_ts": now_ts,
+            "graph_env": graph_env,
+        }
+        ops.append(GraphOp(op="UPSERT_VARIABLE", graph_env=graph_env, item_id=var_node_id, text=desc_text, payload=var_payload))
+
+        direction = str(vinfo.get("direction") or "uncertain")
+        confidence = float(vinfo.get("confidence") or 0.0)
+        consistency = float(vinfo.get("consistency") or 0.0)
+        evidence = vinfo.get("evidence") or canonical_ids[:1]
+        if not isinstance(evidence, list) or not evidence:
+            evidence = canonical_ids[:1]
+
+        edge_key = edge_id(src=event_node_id, relation="event_impacts_variable", dst=var_node_id)
+        reason = f"var={var_name}; dir={direction}; consistency={consistency:.2f}; conf={confidence:.2f}"
+        payload = {
+            "edge_type": "edge",
+            "edge_id": edge_key,
+            "src": event_node_id,
+            "dst": var_node_id,
+            "relation": "event_impacts_variable",
+            "direction": direction,
+            "weight": max(0.0, min(1.0, confidence)),
+            "confidence": max(0.0, min(1.0, confidence)),
+            "consistency": max(0.0, min(1.0, consistency)),
+            "edge_class": "candidate",
+            "reason_text": reason[:800],
+            "evidence_canonical_ids": evidence[:64],
+            "updated_at_ts": now_ts,
+            "graph_env": graph_env,
+        }
+        ops.append(GraphOp(op="UPSERT_EDGE", graph_env=graph_env, item_id=edge_key, text=f"event_impacts_variable: {reason}", payload=payload))
+
     # (3) edges: mentions
     # frequency computed from last 12 analyses in this event
     ticker_counts: dict[str, int] = {t: 0 for t in tickers}
@@ -279,6 +410,7 @@ def _build_rule_plan(
             "relation": "mentions",
             "weight": max(0.0, min(1.0, w)),
             "confidence": 0.7,
+            "edge_class": "correlation",
             "reason_text": reason,
             "evidence_canonical_ids": evidence_by_ticker.get(ts_code) or canonical_ids[:1],
             "updated_at_ts": now_ts,
@@ -289,8 +421,6 @@ def _build_rule_plan(
     # (4) edges: related_to
     # Candidate events are other events in a +/- window around this analysis timestamp.
     # We use the event window minutes configured for this event_type.
-    settings = get_settings()
-    file_cfg = settings.load_file_settings()
     minutes = int((file_cfg.event_windows_minutes or {}).get(event_type, 180))
     anchor = getattr(an, "created_at", None) or utcnow()
     start = anchor - timedelta(minutes=minutes)
@@ -348,6 +478,7 @@ def _build_rule_plan(
             "relation": "related_to",
             "weight": float(w2),
             "confidence": 0.55,
+            "edge_class": "correlation",
             "reason_text": reason2,
             "evidence_canonical_ids": evidence,
             "updated_at_ts": now_ts,
@@ -384,6 +515,9 @@ def _execute_ops(
             event_store.upsert(point_id=pid, vector=vec, payload=op.payload or {})
             touched["event_memory"].append(pid)
         elif op.op == "UPSERT_TICKER":
+            entity_store.upsert(point_id=pid, vector=vec, payload=op.payload or {})
+            touched["entity_memory"].append(pid)
+        elif op.op == "UPSERT_VARIABLE":
             entity_store.upsert(point_id=pid, vector=vec, payload=op.payload or {})
             touched["entity_memory"].append(pid)
         elif op.op == "UPSERT_EDGE":
@@ -469,7 +603,9 @@ def kg_update_from_canonical(canonical_id: str) -> dict[str, Any]:
         # Snapshot "before" for prod points that will be touched.
         prod_point_ids = {
             "event_memory": [point_id(graph_env="prod", item_id=op.item_id) for op in prod_ops if op.op == "UPSERT_EVENT"],
-            "entity_memory": [point_id(graph_env="prod", item_id=op.item_id) for op in prod_ops if op.op == "UPSERT_TICKER"],
+            "entity_memory": [
+                point_id(graph_env="prod", item_id=op.item_id) for op in prod_ops if op.op in {"UPSERT_TICKER", "UPSERT_VARIABLE"}
+            ],
             "edge_memory": [point_id(graph_env="prod", item_id=op.item_id) for op in prod_ops if op.op in {"UPSERT_EDGE", "DELETE_EDGE"}],
         }
         before = _snapshot_before(
@@ -574,29 +710,30 @@ def kg_gc() -> dict[str, Any]:
             edge_store.delete(point_ids=to_del)
             deleted += len(to_del)
 
-    # Decay old related_to edges.
-    for r in _iter_edges("related_to"):
-        payload = getattr(r, "payload", None)
-        if not isinstance(payload, dict):
-            continue
-        updated = int(payload.get("updated_at_ts") or 0)
-        if not updated or updated >= cutoff_decay:
-            continue
+    # Decay old related_to/causal/statistical edges.
+    for rel in ("related_to", "causal", "variable_impacts_entity"):
+        for r in _iter_edges(rel):
+            payload = getattr(r, "payload", None)
+            if not isinstance(payload, dict):
+                continue
+            updated = int(payload.get("updated_at_ts") or 0)
+            if not updated or updated >= cutoff_decay:
+                continue
 
-        w = float(payload.get("weight") or 0.0)
-        payload["weight"] = max(0.0, min(1.0, w * 0.5))
-        payload["updated_at_ts"] = int(now.timestamp())
+            w = float(payload.get("weight") or 0.0)
+            payload["weight"] = max(0.0, min(1.0, w * 0.5))
+            payload["updated_at_ts"] = int(now.timestamp())
 
-        pid = str(payload.get("canonical_id") or "")
-        if not pid:
-            continue
-        vec = getattr(r, "vector", None)
-        if isinstance(vec, dict):
-            vec = next(iter(vec.values()), None)
-        if not isinstance(vec, list) or not vec:
-            continue
-        edge_store.upsert(point_id=pid, vector=vec, payload=payload)
-        decayed += 1
+            pid = str(payload.get("canonical_id") or "")
+            if not pid:
+                continue
+            vec = getattr(r, "vector", None)
+            if isinstance(vec, dict):
+                vec = next(iter(vec.values()), None)
+            if not isinstance(vec, list) or not vec:
+                continue
+            edge_store.upsert(point_id=pid, vector=vec, payload=payload)
+            decayed += 1
 
     return {"ok": True, "deleted": deleted, "decayed": decayed}
 

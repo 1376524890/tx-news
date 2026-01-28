@@ -10,6 +10,7 @@
 - `rules.py` 提供规则分类与事件窗口逻辑（无外部依赖）。
 - `dashscope.py` 封装 OpenAI 兼容的 chat/json 接口（可用于 DashScope/其他兼容服务；本地 vLLM 可不填 api_key；connect 超时相对保守以适配容器网络，并对握手/传输超时做少量重试）。
 - `tickers.py` 做 A 股名称→ts_code 的朴素匹配，辅助分析。
+- `causal_vars.py` 提供因果变量白名单与 affected_variables 规范化。
 
 ## 文件
 
@@ -19,4 +20,5 @@
 | `rules.py` | 规则引擎 | event_type 分类、event_id 与窗口规划。 |
 | `tickers.py` | 实体匹配 | 名称匹配生成 ticker 实体列表。 |
 | `dashscope.py` | LLM 客户端 | DashScope chat/json 请求封装。 |
+| `causal_vars.py` | 因果变量 | 事件→变量白名单加载与规范化。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |

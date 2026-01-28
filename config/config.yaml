@@ -1,4 +1,4 @@
-# Input: 本地运行参数（crawler/retention/embedding/llm/tushare 等）
+# Input: 本地运行参数（crawler/retention/embedding/llm/tushare/causal 等）
 # Output: 供 tx_news.settings.FileSettings 加载的 YAML 配置
 # Pos: 主配置文件（变更时同步更新以上注释与所属目录 FOLDER.md）
 
@@ -73,3 +73,20 @@ event_windows_minutes:
 maintenance:
   # analyze_recent_articles任务的截止时间（小时）
   analyze_cutoff_hours: 24
+
+# 因果合成配置（v3）
+causal:
+  # 统计回看窗口（天）
+  lookback_days: 30
+  # 最多扫描的事件数（避免过大）
+  max_events: 500
+  # 变量→实体最小支持事件数
+  min_support: 3
+  # 方向一致性阈值（pos/neg 占比）
+  min_consistency: 0.6
+  # 每个变量最多保留的实体边数
+  max_variable_edges_per_var: 80
+  # 单次事件最多输出的因果边数
+  max_causal_edges: 60
+  # 单次事件最多采纳的变量数
+  max_event_variables: 6

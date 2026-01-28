@@ -1,0 +1,71 @@
+# Causal variables whitelist for Event -> Variable extraction
+# NOTE: Keep names stable; update in code docs when changed.
+variables:
+  - name: Interest Rate
+    domain: macro
+    directions: ["+", "-"]
+    desc: "Policy rate / market rates"
+  - name: Inflation Expectation
+    domain: macro
+    directions: ["+", "-"]
+    desc: "Inflation expectations"
+  - name: Liquidity
+    domain: macro
+    directions: ["+", "-"]
+    desc: "Market/system liquidity"
+  - name: Risk Premium
+    domain: macro
+    directions: ["+", "-"]
+    desc: "Risk premium / credit spread"
+  - name: Exchange Rate
+    domain: macro
+    directions: ["+", "-"]
+    desc: "FX rate (CNY vs majors)"
+  - name: Commodity Price
+    domain: macro
+    directions: ["+", "-"]
+    desc: "Bulk/energy commodity prices"
+  - name: Financing Cost
+    domain: firm
+    directions: ["+", "-"]
+    desc: "Corporate funding cost"
+  - name: Demand
+    domain: firm
+    directions: ["+", "-"]
+    desc: "Product/service demand"
+  - name: Supply
+    domain: firm
+    directions: ["+", "-"]
+    desc: "Supply capacity / availability"
+  - name: Input Cost
+    domain: firm
+    directions: ["+", "-"]
+    desc: "Raw material / input cost"
+  - name: Pricing Power
+    domain: firm
+    directions: ["+", "-"]
+    desc: "Ability to raise prices"
+  - name: Profit Margin
+    domain: firm
+    directions: ["+", "-"]
+    desc: "Operating margin outlook"
+  - name: Regulatory Cost
+    domain: policy
+    directions: ["+", "-"]
+    desc: "Compliance / regulatory burden"
+  - name: Tax Burden
+    domain: policy
+    directions: ["+", "-"]
+    desc: "Effective tax burden"
+  - name: Policy Uncertainty
+    domain: policy
+    directions: ["+", "-"]
+    desc: "Policy uncertainty level"
+  - name: Consumer Confidence
+    domain: household
+    directions: ["+", "-"]
+    desc: "Household confidence"
+  - name: Disposable Income
+    domain: household
+    directions: ["+", "-"]
+    desc: "Household disposable income"

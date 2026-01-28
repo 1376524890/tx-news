@@ -20,4 +20,5 @@
 | `V2_NEWS_KG_ATTACHMENT_DEV_GUIDE.md` | 入口 | 指向 `V2_NEWS_KG_IMPLEMENTATION.md`（入口指向，不展开细节）。 |
 | `V2_NEWS_KG_DELIVERY_PLAN.md` | 入口 | 指向 `V2_NEWS_KG_IMPLEMENTATION.md`（入口指向，不展开细节）。 |
 | `ANALYSIS_GRAPH_PIPELINE.md` | 流程文档 | 分析图谱网络从入库→分析→KG 更新→看板聚合的搭建与迭代流程。 |
+| `V3_CAUSAL_GRAPH_PLAN.md` | 方案文档 | v3 因果图谱升级方案（差距评估、结构设计、落地步骤与决策点）。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |

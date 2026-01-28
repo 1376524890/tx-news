@@ -1,5 +1,5 @@
 # Input: 环境变量（TXNEWS_* / DASHSCOPE_API_KEY / OpenAI兼容 LLM_*）+ config/config.yaml + config/sources.txt
-# Output: Settings/FileSettings（包含 infra/模型/源列表/去重窗口等配置；并包含 chat 回退开关）
+# Output: Settings/FileSettings（包含 infra/模型/源列表/去重窗口/因果参数等配置；并包含 chat 回退开关）
 # Pos: 全局配置加载入口（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ class FileSettings(BaseModel):
     tushare: dict[str, Any] = Field(default_factory=dict)
     event_windows_minutes: dict[str, int] = Field(default_factory=dict)
     maintenance: dict[str, Any] = Field(default_factory=dict)
+    causal: dict[str, Any] = Field(default_factory=dict)
 
 
 class Settings(BaseSettings):

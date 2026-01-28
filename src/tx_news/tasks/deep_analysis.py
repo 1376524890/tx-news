@@ -1,5 +1,5 @@
 # Input: canonical 文章内容 + Qdrant 相似检索 + DashScope API（可选）
-# Output: 深分析后的结构化结果写回 analyses（幂等跳过/锁防重），并发出 signal
+# Output: 深分析后的结构化结果（含因果变量）写回 analyses（幂等跳过/锁防重），并发出 signal
 # Pos: Deep Path 任务（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from typing import Any
 
 from redis import Redis
 
+from tx_news.analysis.causal_vars import load_causal_variables, normalize_affected_variables
 from tx_news.analysis.dashscope import DashScopeClient
 from tx_news.analysis.rules import EventWindowPlanner
 from tx_news.embedding.embedder import DEFAULT_EMBEDDING_MODEL, build_embedder
@@ -163,7 +164,7 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
         system = (
             "你是金融新闻分析助手。请只输出一个 JSON 对象，不要输出任何多余文本。"
             "你需要在已有初步分析的基础上，结合相关证据进行二次推理与修正。"
-            "输出字段：event_type, entities, tickers, impact, index_view, evidence。"
+            "输出字段：event_type, entities, tickers, affected_variables, impact, index_view, evidence。"
             "注意：不要输出新闻全文，不要输出长段引用。"
         )
         user = (
@@ -172,6 +173,7 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
             f"初步分析：{current_analysis.data if current_analysis else None}\n\n"
             f"相似新闻证据（TopN，含时间与链接）：{evidence}\n\n"
             f"请在 {minutes} 分钟的事件窗口假设下进行逻辑化分析，修正与补全结构化结果。"
+            "affected_variables 必须从 causal_variables.yaml 白名单中选择，输出方向（+/-/0/uncertain）。"
         )
 
         def _call(llm_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -199,12 +201,23 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
 
         base = current_analysis.data if current_analysis and isinstance(current_analysis.data, dict) else {}
         meta = base.get("_txnews") if isinstance(base.get("_txnews"), dict) else {}
+        causal_cfg = file_cfg.causal if isinstance(file_cfg.causal, dict) else {}
+        max_vars = int(causal_cfg.get("max_event_variables") or 6)
+        var_index = load_causal_variables()
+        raw_vars = out.get("affected_variables") if isinstance(out, dict) else None
+        normalized_vars = normalize_affected_variables(raw_vars, var_index=var_index, max_items=max_vars)
+        if isinstance(out, dict):
+            out["affected_variables"] = normalized_vars
         result = {
             **base,
             **out,
             "canonical_id": canonical_id,
             "deep_optimized_at": utcnow().isoformat(),
-            "_txnews": {**meta, "deep_text_checksum": current_checksum or None},
+            "_txnews": {
+                **meta,
+                "deep_text_checksum": current_checksum or None,
+                "affected_variables_raw": raw_vars if raw_vars and raw_vars != normalized_vars else None,
+            },
         }
         upsert_analysis(engine, canonical_id, event_type=str(result.get("event_type", event_type)), data=result, llm_used=True)
         insert_signal(engine, canonical_id, "deep_analysis_updated", {"event_type": result.get("event_type", event_type)})
@@ -214,6 +227,13 @@ def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
             kg_update_from_canonical.delay(canonical_id)
         except Exception as e:
             logger.warning("failed to enqueue kg_update after deep canonical_id=%s err=%s", canonical_id, e)
+        # v3 causal synthesis after deep optimization (best-effort).
+        try:
+            from tx_news.tasks.causal import causal_synthesize_from_canonical
+
+            causal_synthesize_from_canonical.delay(canonical_id)
+        except Exception as e:
+            logger.warning("failed to enqueue causal_synthesize after deep canonical_id=%s err=%s", canonical_id, e)
         return {"updated": True}
     finally:
         if got_lock and redis is not None:

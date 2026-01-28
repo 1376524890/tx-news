@@ -95,6 +95,16 @@
 - `kg_gc`：周期性删除/衰减边（控制边质量与时效）。
 - `kg_reconcile`：每日重建最近 24h 事件的 snapshot_text 与向量。
 
+### 5.6 v3 因果合成（事件驱动）
+- 新增任务：`tx_news.tasks.causal.causal_synthesize_from_canonical`。
+- 触发时机：`analysis_updated` / `deep_analysis_updated` 后异步触发（事件驱动）。
+- 输入：`analyses.data.affected_variables`（白名单约束）+ 事件 tickers + 最近 N 天事件统计。
+- 输出：
+  - `event_impacts_variable`（候选边，来自 affected_variables）
+  - `variable_impacts_entity`（统计边）
+  - `causal`（最终因果边，置信度合成）
+- 配置：`config/causal_variables.yaml`（变量白名单）+ `config/config.yaml: causal`（窗口/阈值）。
+
 ## 6. Dashboard 图谱（API 聚合）
 
 `/kg/graph` 接口基于 `analyses` 表实时聚合：
@@ -118,15 +128,17 @@
 - 分析队列：`src/tx_news/tasks/news_queue.py`
 - 深度分析：`src/tx_news/tasks/deep_analysis.py`
 - KG 构建与治理：`src/tx_news/tasks/kg.py`
+- 因果合成：`src/tx_news/tasks/causal.py`
 - KG 结构与规则：`src/tx_news/kg/*`
 - Dashboard 图谱 API：`apps/api/main.py` (`/kg/graph`)
 
 ## 9. 常见迭代路径（概览）
 
 1) 新文章 → 入队 → analyze → KG 更新。
-2) deep_analysis 触发后 → 修正分析 → KG 二次更新。
-3) 每日 reconcile / 周期 GC → 修整 KG 内部结构。
-4) 看板查询 → 聚合 analyses 形成前端图谱。
+2) analyze / deep_analysis 后 → 触发因果合成（event-driven）。
+3) deep_analysis 触发后 → 修正分析 → KG 二次更新。
+4) 每日 reconcile / 周期 GC → 修整 KG 内部结构。
+5) 看板查询 → 聚合 analyses 形成前端图谱。
 
 如需扩展图谱（新增节点类型/边类型/权重规则），建议同步修改：
 - `tx_news.kg.graphops`/`scoring`/`snapshot`

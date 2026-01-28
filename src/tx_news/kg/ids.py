@@ -1,6 +1,6 @@
-# Input: domain ids（event_id/ts_code/src-dst relation）+ graph_env
+# Input: domain ids（event_id/ts_code/variable/src-dst relation）+ graph_env
 # Output: stable node_id / edge_id and Qdrant point_id (env-isolated)
-# Pos: v2 KG ID helpers（变更时同步更新以上注释与所属目录 FOLDER.md）
+# Pos: v2/v3 KG ID helpers（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
 
@@ -30,6 +30,13 @@ def node_id_ticker(ts_code: str) -> str:
     return f"ticker:{ts}"
 
 
+def node_id_variable(name: str) -> str:
+    var = _clean(name)
+    if not var:
+        raise ValueError("variable name is empty")
+    return f"var:{var}"
+
+
 def edge_id(*, src: str, relation: str, dst: str) -> str:
     s = _clean(src)
     r = _clean(relation)
@@ -49,4 +56,3 @@ def point_id(*, graph_env: str, item_id: str) -> str:
     if not item:
         raise ValueError("item_id is empty")
     return f"{env}::{item}"
-

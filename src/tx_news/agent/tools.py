@@ -1,5 +1,5 @@
 # Input: Postgres/Qdrant/embedding 模型与查询参数
-# Output: search/list/timeline/profile 等工具方法返回结构化结果
+# Output: search/list/timeline/profile 等工具方法返回结构化结果（过滤非实体节点）
 # Pos: Agent 工具实现层（变更时同步更新以上注释与所属目录 FOLDER.md；并在主数据缺失时做本地缓存引导）
 
 from __future__ import annotations
@@ -226,6 +226,9 @@ class TxNewsTools:
         for p in points:
             payload = getattr(p, "payload", None)
             if not isinstance(payload, dict):
+                continue
+            node_type = payload.get("node_type")
+            if node_type and node_type != "ticker":
                 continue
             out.append(
                 {
