@@ -295,6 +295,15 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
     if not canonical_id:
         return {"skipped": True, "reason": "missing_canonical_id"}
 
+    raw_text = canonical.get("text")
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        logger.warning("analyze skipped canonical_id=%s reason=missing_text", canonical_id)
+        try:
+            insert_signal(engine, canonical_id, "analysis_skipped", {"reason": "missing_text"})
+        except Exception:
+            pass
+        return {"canonical_id": canonical_id, "skipped": True, "reason": "missing_text"}
+
     # Cost policy:
     # - GPU mode: prefer local vLLM (llm.deep) for BOTH analyze + deep_analysis; fall back to cloud (llm.chat) on failure.
     # - CPU mode: use cloud (llm.chat) if api_key is configured; otherwise fall back to rules-only.

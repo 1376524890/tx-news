@@ -10,6 +10,67 @@
 
 ---
 
+## 0. 关键路径速览（含代码锚点）
+
+- Analyze 写入并触发 KG + 因果合成：`src/tx_news/tasks/pipeline.py:435`
+- Deep Analysis 修正后再次触发：`src/tx_news/tasks/deep_analysis.py:225`
+- v3 因果合成任务入口：`src/tx_news/tasks/causal.py:627`
+- 变量白名单与规范化：`src/tx_news/analysis/causal_vars.py:73`
+- EventEntityCausalSynthesizer：`src/tx_news/tasks/causal.py:526`
+
+---
+
+## 0.1 伪代码（按模块）
+
+### Analyze / Deep Analysis（结构化抽取）
+```text
+analyze(canonical):
+  event_type = classify_event_type(text)
+  event_id = stable_event_id(event_type, key_entity, window_start)
+  tickers = match_tickers(text)
+  result = {event_id, event_type, tickers, affected_variables: []}
+  if llm_available:
+    out = LLM(system, user)
+    result.merge(out)
+  result.affected_variables = normalize_affected_variables(result.affected_variables)
+  upsert_analysis(result)
+  emit_signal("analysis_updated")
+  enqueue(kg_update_from_canonical)
+  enqueue(causal_synthesize_from_canonical)
+```
+
+### KG Planner（event/ticker/variable/edges）
+```text
+kg_update_from_canonical(canonical_id):
+  analysis = load_analysis(canonical_id)
+  event_node = build_event_snapshot(analysis)
+  ticker_nodes = upsert_tickers(analysis.tickers)
+  event_vars = aggregate_event_variables(event_id)
+  for var in event_vars:
+    upsert_variable_node(var)
+    upsert_edge(event_impacts_variable)
+  upsert_mentions_edges()
+  upsert_related_to_edges()
+  commit_sandbox_then_prod()
+```
+
+### Causal Synthesizer（统计 + 合成）
+```text
+causal_synthesize_from_canonical(canonical_id):
+  event_id = analysis.event_id
+  event_vars = extract_event_variables(event_id)
+  tickers = extract_event_tickers(event_id)
+  var_entity_stats = build_stats(lookback_days, scopes, conflicts)
+  upsert variable_impacts_entity edges
+  for each ticker:
+    for each variable:
+      if passes_thresholds:
+        score = combine(evidence_strength, consistency, temporal, path_support)
+        apply_conflict_penalty()
+        pick best path => emit causal edge
+  commit_sandbox_then_prod()
+```
+
 ## 1. 程序流程图（End-to-End）
 
 ```mermaid
@@ -131,6 +192,17 @@ flowchart TD
   - `variable_impacts_entity` 统计边
   - `causal` 因果边
 
+代码片段（Planner 关键增量）：
+```python
+# src/tx_news/tasks/kg.py (event -> variable candidates)
+event_vars = _aggregate_event_variables(engine, canonical_ids, max_vars=max_vars)
+for vinfo in event_vars:
+    var_node_id = node_id_variable(vinfo["var"])
+    ops.append(GraphOp(op="UPSERT_VARIABLE", item_id=var_node_id, ...))
+    edge_key = edge_id(src=event_node_id, relation="event_impacts_variable", dst=var_node_id)
+    ops.append(GraphOp(op="UPSERT_EDGE", item_id=edge_key, payload={...}))
+```
+
 ### 4.3 Validator/Executor/Critic
 - Validator：保证 payload 完整性（节点文本、边证据、reason_text）
 - Executor：向 Qdrant 写入（sandbox → prod）
@@ -156,6 +228,17 @@ flowchart TD
 - `event_var_confidence >= event_var_min_conf`
 - `variable_impacts_entity.weight >= var_entity_min_weight`
 - `support_events >= min_support`
+
+代码片段（门槛 + 合成）：
+```python
+# src/tx_news/tasks/causal.py
+if vconf < event_var_min_conf:
+    continue
+if edge_stats["weight"] < var_entity_min_weight:
+    continue
+if edge_stats["total"] < min_support:
+    continue
+```
 
 ### 5.2 置信度模型（显式分解）
 示例：
@@ -183,6 +266,13 @@ flowchart TD
 - 每次触发：
   - `kg_update_from_canonical` 维护 v2 KG
   - `causal_synthesize_from_canonical` 生成 v3 因果边
+
+代码片段（触发位置）：
+```python
+# src/tx_news/tasks/pipeline.py
+kg_update_from_canonical.delay(canonical_id)
+causal_synthesize_from_canonical.delay(canonical_id)
+```
 
 ### 6.2 并发与一致性
 - Redis 分布式锁避免重复计算
@@ -215,6 +305,96 @@ flowchart LR
 - `/kg/graph?include_causal=true`（展示因果边）
 - `causal_replay` 离线回放任务（预测 vs 真实反馈）
 - 更精细的行业/主题 scope 映射
+
+---
+
+## 9. 全项目工作流总览（Program Diagram）
+
+```mermaid
+flowchart TD
+  subgraph Ingest[采集与入库]
+    S1[Sources]
+    S2[Collector]
+    S3[MinIO Raw]
+    S4[NATS]
+    S1 --> S2 --> S3
+    S2 --> S4
+  end
+
+  subgraph Pipeline[清洗与分析]
+    P1[normalize_raw]
+    P2[dedup_store]
+    P3[news_queue]
+    P4[analyze]
+    P5[deep_analysis]
+    S4 --> P1 --> P2 --> P3 --> P4
+    P4 --> P5
+  end
+
+  subgraph Storage[存储层]
+    D1[Postgres: articles/versions/analyses]
+    D2[Qdrant: event/entity/edge]
+  end
+
+  subgraph KG[图谱层]
+    K1[kg_update_from_canonical]
+    K2[causal_synthesize_from_canonical]
+    P4 --> K1
+    P4 --> K2
+    P5 --> K1
+    P5 --> K2
+    K1 --> D2
+    K2 --> D2
+  end
+
+  subgraph API[服务层]
+    A1[FastAPI]
+    A2[kg graph]
+    A3[chat stream]
+    D1 --> A1
+    D2 --> A1
+    A1 --> A2
+    A1 --> A3
+  end
+
+  subgraph UI[前端]
+    U1[Dashboard]
+    U2[Chat UI]
+    A2 --> U1
+    A3 --> U2
+  end
+```
+
+---
+
+## 10. 全项目数据流（更细粒度）
+
+```mermaid
+flowchart LR
+  Raw[Raw HTML] --> Norm[Normalize]
+  Norm --> Canon[Canonical + Versions]
+  Canon --> Ana[Analysis JSON]
+  Ana --> Sig[Signals]
+  Ana --> KG1[KG Planner]
+  Ana --> KG2[Causal Synthesizer]
+  KG1 --> QEvent[Qdrant Event]
+  KG1 --> QEntity[Qdrant Entity]
+  KG1 --> QEdge[Qdrant Edge]
+  KG2 --> QEdge
+  QEdge --> Agent[Agent Tools]
+  Ana --> API[API /kg/graph]
+  Agent --> Answer[Answer with Evidence]
+```
+
+---
+
+## 11. 关键逻辑链路（文字版）
+
+1) Collector 抓取 → 标准化 → 去重 → canonical 入库。  
+2) analyze 结构化输出（event/tickers/affected_variables）并写入 `analyses`。  
+3) KG Planner：维护 event/ticker/mentions/related_to + event_impacts_variable。  
+4) Causal Synthesizer：统计生成 variable_impacts_entity，并通过合成器折叠为 causal。  
+5) API/Agent 读取 Qdrant + Postgres，输出证据链与路径解释。  
 
 ---
 
