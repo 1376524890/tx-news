@@ -9,6 +9,47 @@ cd "${ROOT_DIR}"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+kill_tree() {
+  local pid="${1:-}"
+  [[ -n "${pid}" ]] || return 0
+  if kill -0 "${pid}" >/dev/null 2>&1; then
+    # Prefer killing the whole process group (start_local uses nohup; may still have group)
+    kill -- -"${pid}" >/dev/null 2>&1 || true
+    kill "${pid}" >/dev/null 2>&1 || true
+  fi
+}
+
+kill_vllm_by_port() {
+  local port="${1:-9999}"
+  local pids=""
+
+  if have lsof; then
+    pids="$(lsof -tiTCP:"${port}" -sTCP:LISTEN 2>/dev/null | tr '\n' ' ' || true)"
+  elif have ss; then
+    pids="$(ss -ltnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p && $0 ~ /pid=/ {print $0}' | sed -n 's/.*pid=\\([0-9][0-9]*\\).*/\\1/p' | sort -u | tr '\n' ' ' || true)"
+  fi
+
+  for pid in ${pids}; do
+    [[ -n "${pid}" ]] || continue
+    cmd="$(ps -p "${pid}" -o args= 2>/dev/null || true)"
+    if have rg; then
+      if echo "${cmd}" | rg -q "vllm\\.entrypoints\\.openai\\.api_server|vllm\\s|api_server"; then
+        echo "Killing vLLM on port ${port} pid=${pid} cmd=${cmd}"
+        kill_tree "${pid}"
+      else
+        echo "Port ${port} is used by pid=${pid} (not vLLM); skip. cmd=${cmd}"
+      fi
+      continue
+    fi
+    if echo "${cmd}" | grep -Eq "vllm\\.entrypoints\\.openai\\.api_server|vllm[[:space:]]|api_server"; then
+      echo "Killing vLLM on port ${port} pid=${pid} cmd=${cmd}"
+      kill_tree "${pid}"
+    else
+      echo "Port ${port} is used by pid=${pid} (not vLLM); skip. cmd=${cmd}"
+    fi
+  done
+}
+
 compose() {
   if have docker; then
     if docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
@@ -57,6 +98,15 @@ done
 
 RUN_DIR="${TXNEWS_LOCAL_RUN_DIR:-.run/local}"
 INFRA_MARK="${RUN_DIR}/infra.started"
+TXNEWS_VLLM_PORT="${TXNEWS_VLLM_PORT:-9999}"
+
+if [[ -f ".env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+  TXNEWS_VLLM_PORT="${TXNEWS_VLLM_PORT:-9999}"
+fi
 
 if [[ ! -d "${RUN_DIR}" ]]; then
   echo "No run dir: ${RUN_DIR} (nothing to stop)."
@@ -100,6 +150,9 @@ shopt -s nullglob
 for f in "${RUN_DIR}"/*.pid; do
   stop_pidfile "${f}"
 done
+
+echo "== Stop host vLLM (fallback by port) =="
+kill_vllm_by_port "${TXNEWS_VLLM_PORT}"
 
 echo "== Cleanup stray tx-news dev processes (best-effort) =="
 pids=()
