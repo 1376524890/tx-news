@@ -93,6 +93,13 @@ def _allowed_by_scope(var_meta: dict[str, Any], sector: str) -> bool:
     return True
 
 
+def _op_counts(ops: list[GraphOp]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for op in ops:
+        counts[op.op] = counts.get(op.op, 0) + 1
+    return counts
+
+
 def _serialize_record(r: Any) -> dict[str, Any]:
     rid = getattr(r, "id", None)
     payload = getattr(r, "payload", None)
@@ -657,6 +664,12 @@ def causal_synthesize_from_canonical(canonical_id: str) -> dict[str, Any]:
     run_id = str(uuid.uuid4())
     snapshot_id = str(uuid.uuid4())
     try:
+        logger.info(
+            "graphflow causal_start canonical_id=%s run_id=%s event_id=%s",
+            cid,
+            run_id,
+            event_id,
+        )
         create_kg_run(engine, run_id=run_id, graph_env="prod", trigger_canonical_id=cid)
 
         embedding_cfg = settings.resolve_embedding_cfg(file_cfg)
@@ -676,6 +689,7 @@ def causal_synthesize_from_canonical(canonical_id: str) -> dict[str, Any]:
             edge_store=edge_store,
         )
         insert_kg_ops_log(engine, run_id=run_id, phase="planner", payload=plan_sb.model_dump())
+        logger.info("graphflow causal_plan canonical_id=%s run_id=%s ops=%s", cid, run_id, _op_counts(plan_sb.ops))
         if not plan_sb.ops:
             finish_kg_run(engine, run_id=run_id, status="skipped")
             return {"skipped": True, "reason": "no_ops", "run_id": run_id}
@@ -738,6 +752,12 @@ def causal_synthesize_from_canonical(canonical_id: str) -> dict[str, Any]:
             snapshot_payload={"before": before, "touched_prod": touched_prod},
         )
         finish_kg_run(engine, run_id=run_id, status="committed")
+        logger.info(
+            "graphflow causal_committed canonical_id=%s run_id=%s touched=%s",
+            cid,
+            run_id,
+            {k: len(v) for k, v in touched_prod.items()},
+        )
         return {"updated": True, "run_id": run_id, "snapshot_id": snapshot_id}
     except Exception as e:
         logger.exception("causal_synthesize failed canonical_id=%s", cid)

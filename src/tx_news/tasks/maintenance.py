@@ -127,7 +127,7 @@ def analyze_recent_articles() -> dict[str, Any]:
         articles = s.scalars(
             select(Article)
             .where(Article.created_at >= cutoff)
-            .order_by(Article.created_at)
+            .order_by(Article.created_at.desc())
             .limit(100)
         ).all()
 

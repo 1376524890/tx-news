@@ -1,5 +1,5 @@
 # Input: canonical articles with published_at/fetched_at + queue worker signals
-# Output: Priority queue + Celery queue worker processing results (queue_worker_task)
+# Output: Priority queue + Celery queue worker processing results (queue_worker_task; 24h expiry + timeout guard)
 # Pos: News priority queue + worker task registration (change with FOLDER.md)
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 QUEUE_KEY = "txnews:analysis_queue"
 QUEUE_SCORE_KEY = "txnews:analysis_queue:scores"
 
-DEFAULT_QUEUE_TTL_HOURS = 72
+DEFAULT_QUEUE_TTL_HOURS = 24
 
 
 def _get_redis() -> Redis | None:
@@ -83,8 +83,8 @@ def get_next_from_queue(block: bool = True, timeout: int = 5) -> str | None:
     try:
         if block:
             # Blocking: wait for new item or timeout
-            # bzpopmin returns (queue_name, member, score) or None
-            result = redis.bzpopmin(QUEUE_KEY, timeout=timeout)
+            # bzpopmax returns (queue_name, member, score) or None
+            result = redis.bzpopmax(QUEUE_KEY, timeout=timeout)
             if result:
                 queue_name, member, score = result
                 canonical_id = member
@@ -95,8 +95,8 @@ def get_next_from_queue(block: bool = True, timeout: int = 5) -> str | None:
                 return canonical_id
         else:
             # Non-blocking: get top item
-            # zpopmin returns [(member, score)] or []
-            result = redis.zpopmin(QUEUE_KEY)
+            # zpopmax returns [(member, score)] or []
+            result = redis.zpopmax(QUEUE_KEY)
             if result and result[0]:
                 canonical_id, score = result[0]
                 if isinstance(canonical_id, bytes):
@@ -129,7 +129,7 @@ def remove_from_queue(canonical_id: str) -> bool:
         return False
 
 
-def remove_expired_articles(hours: int = 72) -> int:
+def remove_expired_articles(hours: int = 24) -> int:
     """Remove expired articles from queue (>N hours old). Returns count of removed articles."""
     redis = _get_redis()
     if not redis:
@@ -189,7 +189,7 @@ def is_in_queue(canonical_id: str) -> bool:
         return False
 
 
-def _is_article_expired(published_at: datetime | None, fetched_at: datetime | None, hours: int = 72) -> bool:
+def _is_article_expired(published_at: datetime | None, fetched_at: datetime | None, hours: int = 24) -> bool:
     """Check if article is expired based on published_at or fetched_at (UTC+8)."""
     from datetime import timedelta
 
@@ -222,7 +222,7 @@ def process_queue_worker(canonical_id: str) -> dict:
     """
     Process article from queue.
     Called by queue worker after dequeuing.
-    Checks for >72h expiration and triggers analyze.
+    Checks for >24h expiration and triggers analyze.
     """
     from tx_news.storage.postgres import get_article, init_db, make_engine
     from tx_news.settings import get_settings
@@ -246,8 +246,8 @@ def process_queue_worker(canonical_id: str) -> dict:
     published_at = v.published_at
     fetched_at = v.fetched_at
 
-    # Check for >72h expiration
-    if _is_article_expired(published_at, fetched_at, hours=72):
+    # Check for >24h expiration
+    if _is_article_expired(published_at, fetched_at, hours=24):
         logger.info("queue worker skipped canonical_id=%s reason=article_expired", canonical_id)
         return {"skipped": True, "reason": "article_expired"}
 
@@ -277,20 +277,31 @@ def process_queue_worker(canonical_id: str) -> dict:
         return {"skipped": True, "reason": "analyze_failed", "error": str(e)}
 
 
-def run_queue_worker_loop(max_iterations: int | None = None, block_timeout: int = 5) -> None:
+def run_queue_worker_loop(
+    max_iterations: int | None = None,
+    block_timeout: int = 5,
+    max_runtime_seconds: int | None = 15,
+) -> None:
     """
     Run queue worker loop.
     Continuously dequeues and processes articles from the priority queue.
     """
+    start_ts = datetime.now(timezone.utc)
     iteration = 0
     while max_iterations is None or iteration < max_iterations:
+        if max_runtime_seconds is not None:
+            elapsed = (datetime.now(timezone.utc) - start_ts).total_seconds()
+            if elapsed >= max_runtime_seconds:
+                logger.info("queue worker reached max_runtime_seconds=%s", max_runtime_seconds)
+                break
         iteration += 1
 
         # Remove expired articles before getting next
-        remove_expired_articles(hours=72)
+        remove_expired_articles(hours=24)
 
-        # Get next article from queue (blocking)
-        canonical_id = get_next_from_queue(block=True, timeout=block_timeout)
+        # Get next article from queue (blocking only when timeout > 0)
+        use_block = block_timeout > 0
+        canonical_id = get_next_from_queue(block=use_block, timeout=block_timeout)
 
         if canonical_id:
             logger.info("processing queue iteration=%s canonical_id=%s", iteration, canonical_id)
@@ -299,6 +310,9 @@ def run_queue_worker_loop(max_iterations: int | None = None, block_timeout: int 
         else:
             # Queue is empty or timeout
             logger.debug("queue empty, waiting... iteration=%s", iteration)
+            if not use_block:
+                # Non-blocking mode: exit early to avoid busy loops.
+                break
 
         # If queue is empty and we have removed expired items, continue waiting
         # Otherwise, keep running until max_iterations
@@ -308,18 +322,27 @@ def run_queue_worker_loop(max_iterations: int | None = None, block_timeout: int 
 
 
 @celery_app.task(name="tx_news.tasks.news_queue.queue_worker_task")
-def queue_worker_task(max_iterations: int = 100, block_timeout: int = 5) -> dict:
+def queue_worker_task(max_iterations: int = 100, block_timeout: int = 0, max_runtime_seconds: int = 15) -> dict:
     """
     Celery task to run queue worker.
     Processes max_iterations articles from the queue.
     Designed to be called periodically (e.g., every minute).
     """
-    logger.info("queue worker started max_iterations=%s block_timeout=%s", max_iterations, block_timeout)
+    logger.info(
+        "queue worker started max_iterations=%s block_timeout=%s max_runtime_seconds=%s",
+        max_iterations,
+        block_timeout,
+        max_runtime_seconds,
+    )
 
     initial_size = get_queue_size()
     logger.info("queue worker initial queue_size=%s", initial_size)
 
-    run_queue_worker_loop(max_iterations=max_iterations, block_timeout=block_timeout)
+    run_queue_worker_loop(
+        max_iterations=max_iterations,
+        block_timeout=block_timeout,
+        max_runtime_seconds=max_runtime_seconds,
+    )
 
     final_size = get_queue_size()
     logger.info("queue worker finished processed=%s remaining=%s", initial_size - final_size, final_size)

@@ -443,6 +443,15 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
 
         upsert_analysis(engine, canonical_id, event_type=str(result.get("event_type", event_type)), data=result, llm_used=llm_used)
         insert_signal(engine, canonical_id, "analysis_updated", {"event_type": result.get("event_type", event_type), "event_id": event_id})
+        logger.info(
+            "graphflow analyze_done canonical_id=%s event_id=%s event_type=%s tickers=%s vars=%s llm_used=%s",
+            canonical_id,
+            event_id,
+            result.get("event_type", event_type),
+            len(result.get("tickers") or []),
+            len(result.get("affected_variables") or []),
+            llm_used,
+        )
 
         # v2 KG update (best-effort): do not block v1 pipeline on KG failures.
         try:
@@ -471,6 +480,7 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
         is_local = _is_local_llm_base_url(deep_base_url)
         if deep_api_key or is_local:
             deep_optimize.delay(canonical)
+            logger.info("graphflow deep_analysis_enqueued canonical_id=%s", canonical_id)
 
     return result or {"canonical_id": canonical_id, "skipped": True, "reason": "analysis_failed"}
 

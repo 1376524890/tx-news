@@ -1,5 +1,5 @@
 # Input: Settings(redis_url) 与任务模块列表
-# Output: celery_app（含路由/队列/注册策略）
+# Output: celery_app（含路由/队列/注册策略/任务超时保护）
 # Pos: Celery 应用配置入口（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -47,6 +47,15 @@ def make_celery() -> Celery:
         "tx_news.tasks.causal.*": {"queue": "default"},
         "tx_news.tasks.news_queue.*": {"queue": "default"},
     }
+    # Avoid long-running queue worker tasks blocking the single-worker lane.
+    # Soft time limit raises SoftTimeLimitExceeded for graceful cleanup,
+    # hard time limit kills the task if it fails to stop.
+    app.conf.task_annotations = {
+        "tx_news.tasks.news_queue.queue_worker_task": {
+            "soft_time_limit": 20,
+            "time_limit": 30,
+        }
+    }
     app.conf.worker_prefetch_multiplier = 1
     app.conf.task_acks_late = True
 
@@ -68,7 +77,6 @@ def make_celery() -> Celery:
         "news_queue_worker_every_minute": {
             "task": "tx_news.tasks.news_queue.queue_worker_task",
             "schedule": crontab(minute="*"),  # every minute
-            "options": {"expires": 300},  # task expires after 5 minutes to prevent backlog
         },
     }
     return app

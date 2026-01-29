@@ -23,4 +23,5 @@
 | `V3_CAUSAL_GRAPH_PLAN.md` | 方案文档 | v3 因果图谱升级方案（差距评估、结构设计、落地步骤与决策点）。 |
 | `V3_CAUSAL_GRAPH_UPDATE_DEV.md` | 开发文档 | v3 因果图谱更新开发记录（P0/P1/P2 落地与配置说明）。 |
 | `V3_CAUSAL_GRAPH_WORKFLOW.md` | 流程图 | v3 因果图谱流程/数据流/逻辑图与 KG 运行机制。 |
+| `OPS_RUNBOOK.md` | 运维文档 | 启动/停止/健康检查/日志与常见故障排查。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |

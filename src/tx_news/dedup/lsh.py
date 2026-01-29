@@ -138,7 +138,40 @@ class LshDeduper:
     ) -> None:
         state = self.index.load_state(cutoff_ts=cutoff_ts)
         mh = make_minhash(tokenize(text), num_perm=self.index.num_perm)
-        state.lsh.insert(canonical_id, mh)
+        existing = state.entries.get(canonical_id)
+        if isinstance(existing, dict):
+            prev_mh = existing.get("mh")
+            try:
+                if isinstance(prev_mh, MinHash):
+                    def _as_tuple(values: Any) -> tuple:
+                        if hasattr(values, "tolist"):
+                            return tuple(values.tolist())
+                        return tuple(values)
+
+                    if _as_tuple(prev_mh.hashvalues) == _as_tuple(mh.hashvalues):
+                        existing["ts"] = float(timestamp)
+                        state.entries[canonical_id] = existing
+                        self.index.save_state(state.lsh, state.entries)
+                        return
+            except Exception:
+                # fallback to replace on any comparison issue
+                pass
+            # best-effort remove before reinserting to avoid duplicate key errors
+            try:
+                state.lsh.remove(canonical_id)
+            except Exception:
+                pass
+
+        try:
+            state.lsh.insert(canonical_id, mh)
+        except ValueError:
+            # If key still exists in LSH, remove and retry once.
+            try:
+                state.lsh.remove(canonical_id)
+                state.lsh.insert(canonical_id, mh)
+            except Exception:
+                # last resort: keep entries in sync even if LSH rejects
+                pass
         state.entries[canonical_id] = {"ts": float(timestamp), "mh": mh}
         self.index.save_state(state.lsh, state.entries)
 

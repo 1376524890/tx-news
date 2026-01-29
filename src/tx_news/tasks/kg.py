@@ -80,6 +80,13 @@ def _normalize_tickers(value: Any) -> list[str]:
     return uniq
 
 
+def _op_counts(ops: list[GraphOp]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for op in ops:
+        counts[op.op] = counts.get(op.op, 0) + 1
+    return counts
+
+
 def _pick_direction(counts: dict[str, int]) -> tuple[str, float]:
     pos = int(counts.get("+") or 0)
     neg = int(counts.get("-") or 0)
@@ -560,6 +567,12 @@ def kg_update_from_canonical(canonical_id: str) -> dict[str, Any]:
     run_id = str(uuid.uuid4())
     snapshot_id = str(uuid.uuid4())
     try:
+        logger.info(
+            "graphflow kg_update_start canonical_id=%s run_id=%s event_id=%s",
+            cid,
+            run_id,
+            an.data.get("event_id"),
+        )
         create_kg_run(engine, run_id=run_id, graph_env="prod", trigger_canonical_id=cid)
 
         embedding_cfg = settings.resolve_embedding_cfg(file_cfg)
@@ -580,6 +593,7 @@ def kg_update_from_canonical(canonical_id: str) -> dict[str, Any]:
             edge_store=edge_store,
         )
         insert_kg_ops_log(engine, run_id=run_id, phase="planner", payload=plan_sb.model_dump())
+        logger.info("graphflow kg_plan canonical_id=%s run_id=%s ops=%s", cid, run_id, _op_counts(plan_sb.ops))
         validate_plan(plan_sb)
         insert_kg_ops_log(engine, run_id=run_id, phase="validator", payload={"ok": True})
 
@@ -638,6 +652,12 @@ def kg_update_from_canonical(canonical_id: str) -> dict[str, Any]:
             snapshot_payload={"before": before, "touched_prod": touched_prod},
         )
         finish_kg_run(engine, run_id=run_id, status="committed")
+        logger.info(
+            "graphflow kg_committed canonical_id=%s run_id=%s touched=%s",
+            cid,
+            run_id,
+            {k: len(v) for k, v in touched_prod.items()},
+        )
         return {"updated": True, "run_id": run_id, "snapshot_id": snapshot_id}
     except Exception as e:
         logger.exception("kg_update_from_canonical failed canonical_id=%s", cid)
