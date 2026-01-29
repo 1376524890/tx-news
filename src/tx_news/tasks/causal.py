@@ -22,6 +22,7 @@ from tx_news.settings import get_settings
 from tx_news.storage.postgres import (
     create_kg_run,
     finish_kg_run,
+    get_a_shares,
     get_analysis,
     get_event_canonical_ids,
     get_kg_snapshot,
@@ -59,6 +60,37 @@ def _qdrant_stores() -> tuple[QdrantStore, QdrantStore, QdrantStore]:
         QdrantStore(url=settings.qdrant_url, collection="txnews_entity_memory"),
         QdrantStore(url=settings.qdrant_url, collection="txnews_edge_memory"),
     )
+
+
+def _sector_for_industry(industry: str | None) -> str:
+    s = str(industry or "").lower()
+    if any(k in s for k in ["银行", "证券", "保险", "金融", "bank", "broker"]):
+        return "banking"
+    if any(k in s for k in ["地产", "房地产", "real estate"]):
+        return "real_estate"
+    if any(k in s for k in ["建筑", "建材", "基建", "工程", "construction", "infrastructure"]):
+        return "infrastructure"
+    if any(k in s for k in ["化工", "材料", "钢铁", "有色", "金属", "materials", "metals"]):
+        return "materials"
+    if any(k in s for k in ["能源", "煤", "石油", "油气", "电力", "energy", "oil", "gas"]):
+        return "energy"
+    if any(k in s for k in ["汽车", "汽配", "auto"]):
+        return "auto"
+    if any(k in s for k in ["电子", "半导体", "芯片", "计算机", "通信", "electronics", "semiconductor"]):
+        return "electronics"
+    if any(k in s for k in ["消费", "食品", "饮料", "零售", "家电", "纺织", "服装", "consumer", "retail"]):
+        return "consumer"
+    if any(k in s for k in ["制造", "机械", "设备", "manufacturing", "machinery"]):
+        return "manufacturing"
+    return "other"
+
+
+def _allowed_by_scope(var_meta: dict[str, Any], sector: str) -> bool:
+    applies_to = var_meta.get("applies_to") if isinstance(var_meta.get("applies_to"), dict) else {}
+    sectors = applies_to.get("sectors") if isinstance(applies_to.get("sectors"), list) else []
+    if sectors:
+        return str(sector) in {str(s) for s in sectors}
+    return True
 
 
 def _serialize_record(r: Any) -> dict[str, Any]:
@@ -265,6 +297,7 @@ def _build_var_entity_stats(
     *,
     engine,
     var_names: list[str],
+    var_index: dict[str, dict[str, Any]],
     lookback_days: int,
     max_events: int,
     max_vars: int,
@@ -289,13 +322,19 @@ def _build_var_entity_stats(
         tickers = _event_tickers(engine, cids)
         if not tickers:
             continue
+        a_share = get_a_shares(engine, tickers)
+        sector_by_code = {r.ts_code: _sector_for_industry(r.industry) for r in a_share}
         evidence_id = cids[0]
         for v in event_vars:
             vname = str(v.get("var") or "")
             vdir = str(v.get("direction") or "uncertain")
             vstats = stats.setdefault(vname, {"max_count": 1, "ticker_stats": {}})
             tstats = vstats["ticker_stats"]
+            vmeta = var_index.get(vname) or {}
             for ts_code in tickers:
+                sector = sector_by_code.get(ts_code, "other")
+                if not _allowed_by_scope(vmeta, sector):
+                    continue
                 entry = tstats.setdefault(
                     ts_code,
                     {"total": 0, "pos": 0, "neg": 0, "evidence": []},
@@ -339,6 +378,10 @@ def _build_causal_plan(
     max_var_edges = int(causal_cfg.get("max_variable_edges_per_var") or 80)
     max_causal_edges = int(causal_cfg.get("max_causal_edges") or 60)
     max_event_vars = int(causal_cfg.get("max_event_variables") or 6)
+    event_var_min_conf = float(causal_cfg.get("event_var_min_conf") or 0.5)
+    var_entity_min_weight = float(causal_cfg.get("var_entity_min_weight") or 0.2)
+    conflict_ratio_threshold = float(causal_cfg.get("conflict_ratio_threshold") or 0.3)
+    conflict_penalty = float(causal_cfg.get("conflict_penalty") or 0.6)
 
     canonical_ids = get_event_canonical_ids(engine, event_id, limit=12)
     event_vars = _event_variables(engine, canonical_ids, max_vars=max_event_vars)
@@ -348,10 +391,12 @@ def _build_causal_plan(
     if not event_tickers:
         return GraphOpsPlan(run_id=run_id, trigger={"canonical_id": canonical_id}, ops=[])
 
+    var_index = load_causal_variables()
     var_names = [v.get("var") for v in event_vars if v.get("var")]
     var_stats = _build_var_entity_stats(
         engine=engine,
         var_names=var_names,
+        var_index=var_index,
         lookback_days=lookback_days,
         max_events=max_events,
         max_vars=max_event_vars,
@@ -359,8 +404,6 @@ def _build_causal_plan(
 
     now_ts = int(utcnow().timestamp())
     ops: list[GraphOp] = []
-
-    var_index = load_causal_variables()
 
     # (1) variable nodes (stored in entity_memory by design)
     for var_name in var_names:
@@ -397,6 +440,7 @@ def _build_causal_plan(
             pos = int(entry.get("pos") or 0)
             neg = int(entry.get("neg") or 0)
             consistency = max(pos, neg) / total if total > 0 else 0.0
+            conflict_ratio = min(pos, neg) / total if total > 0 else 0.0
             if pos > neg and consistency >= min_consistency:
                 effect_dir = "+"
             elif neg > pos and consistency >= min_consistency:
@@ -405,10 +449,13 @@ def _build_causal_plan(
                 effect_dir = "mixed"
             weight = max(0.0, min(1.0, total / max_count)) if max_count > 0 else 0.0
             confidence = max(0.0, min(1.0, weight * consistency))
+            if conflict_ratio > conflict_ratio_threshold:
+                confidence = max(0.0, min(1.0, confidence * (1.0 - conflict_penalty * conflict_ratio)))
             ranked.append((confidence, ts_code, {
                 "total": total,
                 "pos": pos,
                 "neg": neg,
+                "conflict_ratio": conflict_ratio,
                 "consistency": consistency,
                 "effect_direction": effect_dir,
                 "weight": weight,
@@ -427,7 +474,8 @@ def _build_causal_plan(
                 evidence = canonical_ids[:1]
             reason = (
                 f"var={var_name}; support={stats['total']}; pos={stats['pos']}; neg={stats['neg']}; "
-                f"consistency={stats['consistency']:.2f}; effect={stats['effect_direction']}"
+                f"consistency={stats['consistency']:.2f}; conflict={stats['conflict_ratio']:.2f}; "
+                f"effect={stats['effect_direction']}"
             )
             payload = {
                 "edge_type": "edge",
@@ -442,6 +490,15 @@ def _build_causal_plan(
                 "support_pos": stats["pos"],
                 "support_neg": stats["neg"],
                 "consistency": stats["consistency"],
+                "conflict_ratio": stats["conflict_ratio"],
+                "confidence_breakdown": {
+                    "support_events": stats["total"],
+                    "same_direction_ratio": stats["consistency"],
+                    "conflict_ratio": stats["conflict_ratio"],
+                    "temporal_validity": 1.0,
+                    "recentness": 0.5,
+                },
+                "confidence_model": "stat_v1",
                 "edge_class": "statistical",
                 "reason_text": reason[:800],
                 "evidence_canonical_ids": evidence,
@@ -454,62 +511,91 @@ def _build_causal_plan(
                 "edge_id": eid,
             }
 
-    # (3) event -> entity causal edges
+    # (3) event -> entity causal edges (EventEntityCausalSynthesizer)
     event_node = node_id_event(event_id)
     max_evidence = 12
     evidence_strength = math.log1p(len(canonical_ids)) / math.log1p(max_evidence) if canonical_ids else 0.0
     temporal_alignment = 1.0
-    causal_candidates: list[tuple[float, dict[str, Any]]] = []
+    event_created_at = getattr(an, "created_at", None)
+    if event_created_at:
+        age_days = max(0.0, (utcnow() - event_created_at).total_seconds() / 86400.0)
+        recentness = max(0.0, 1.0 - (age_days / max(1.0, float(lookback_days))))
+    else:
+        recentness = 1.0
 
-    for ts_code in event_tickers:
-        best: dict[str, Any] | None = None
-        for v in event_vars:
-            vname = str(v.get("var") or "")
-            vdir = str(v.get("direction") or "uncertain")
-            if vdir not in {"+", "-"}:
-                continue
-            vconf = float(v.get("confidence") or 0.0)
-            edge_stats = (var_entity_edges.get(vname) or {}).get(ts_code)
-            if not edge_stats:
-                continue
-            effect_dir = str(edge_stats.get("effect_direction") or "mixed")
-            if effect_dir not in {"+", "-"}:
-                continue
-            causal_dir = "+" if vdir == effect_dir else "-"
-            consistency = float(edge_stats.get("consistency") or 0.0)
-            path_support = float(edge_stats.get("weight") or 0.0)
-            base_conf = (
-                0.35 * evidence_strength
-                + 0.25 * consistency
-                + 0.20 * temporal_alignment
-                + 0.20 * path_support
-            )
-            final_conf = max(0.0, min(1.0, base_conf * max(0.2, min(1.0, vconf))))
-            reason = (
-                f"via={vname}; var_dir={vdir}; effect={effect_dir}; "
-                f"support={edge_stats.get('total')}; consistency={consistency:.2f}; conf={final_conf:.2f}"
-            )
-            candidate = {
-                "ts_code": ts_code,
-                "direction": causal_dir,
-                "weight": final_conf,
-                "confidence": final_conf,
-                "reason": reason,
-                "via": vname,
-                "components": {
-                    "evidence_strength": evidence_strength,
-                    "consistency": consistency,
-                    "temporal_alignment": temporal_alignment,
-                    "path_support": path_support,
-                },
-            }
-            if not best or final_conf > float(best.get("confidence") or 0.0):
-                best = candidate
-        if best:
-            causal_candidates.append((float(best.get("confidence") or 0.0), best))
+    def _event_entity_causal_synthesizer() -> list[dict[str, Any]]:
+        out: list[tuple[float, dict[str, Any]]] = []
+        for ts_code in event_tickers:
+            best: dict[str, Any] | None = None
+            for v in event_vars:
+                vname = str(v.get("var") or "")
+                vdir = str(v.get("direction") or "uncertain")
+                if vdir not in {"+", "-"}:
+                    continue
+                vconf = float(v.get("confidence") or 0.0)
+                if vconf < event_var_min_conf:
+                    continue
+                edge_stats = (var_entity_edges.get(vname) or {}).get(ts_code)
+                if not edge_stats:
+                    continue
+                effect_dir = str(edge_stats.get("effect_direction") or "mixed")
+                if effect_dir not in {"+", "-"}:
+                    continue
+                if float(edge_stats.get("weight") or 0.0) < var_entity_min_weight:
+                    continue
+                if int(edge_stats.get("total") or 0) < min_support:
+                    continue
+                causal_dir = "+" if vdir == effect_dir else "-"
+                consistency = float(edge_stats.get("consistency") or 0.0)
+                conflict_ratio = float(edge_stats.get("conflict_ratio") or 0.0)
+                path_support = float(edge_stats.get("weight") or 0.0)
+                base_conf = (
+                    0.35 * evidence_strength
+                    + 0.25 * consistency
+                    + 0.20 * temporal_alignment
+                    + 0.20 * path_support
+                )
+                final_conf = max(0.0, min(1.0, base_conf * max(0.2, min(1.0, vconf))))
+                if conflict_ratio > conflict_ratio_threshold:
+                    final_conf = max(0.0, min(1.0, final_conf * (1.0 - conflict_penalty * conflict_ratio)))
+                reason = (
+                    f"via={vname}; var_dir={vdir}; effect={effect_dir}; "
+                    f"support={edge_stats.get('total')}; consistency={consistency:.2f}; "
+                    f"conflict={conflict_ratio:.2f}; conf={final_conf:.2f}"
+                )
+                candidate = {
+                    "ts_code": ts_code,
+                    "direction": causal_dir,
+                    "weight": final_conf,
+                    "confidence": final_conf,
+                    "reason": reason,
+                    "via": vname,
+                    "confidence_breakdown": {
+                        "support_events": edge_stats.get("total"),
+                        "same_direction_ratio": consistency,
+                        "temporal_validity": temporal_alignment,
+                        "recentness": recentness,
+                        "conflict_ratio": conflict_ratio,
+                        "path_support": path_support,
+                        "event_var_confidence": vconf,
+                    },
+                    "components": {
+                        "evidence_strength": evidence_strength,
+                        "consistency": consistency,
+                        "temporal_alignment": temporal_alignment,
+                        "path_support": path_support,
+                    },
+                }
+                if not best or final_conf > float(best.get("confidence") or 0.0):
+                    best = candidate
+            if best:
+                out.append((float(best.get("confidence") or 0.0), best))
+        out.sort(key=lambda x: x[0], reverse=True)
+        return [c for _, c in out]
 
-    causal_candidates.sort(key=lambda x: x[0], reverse=True)
-    for conf, c in causal_candidates[: max_causal_edges]:
+    causal_candidates = _event_entity_causal_synthesizer()
+
+    for c in causal_candidates[: max_causal_edges]:
         src = event_node
         dst = node_id_ticker(str(c.get("ts_code") or ""))
         eid = edge_id(src=src, relation="causal", dst=dst)
@@ -523,6 +609,8 @@ def _build_causal_plan(
             "direction": c.get("direction"),
             "weight": float(c.get("weight") or 0.0),
             "confidence": float(c.get("confidence") or 0.0),
+            "confidence_breakdown": c.get("confidence_breakdown") or {},
+            "confidence_model": "causal_v1",
             "edge_class": "causal",
             "reason_text": reason[:800],
             "evidence_canonical_ids": canonical_ids[:64],

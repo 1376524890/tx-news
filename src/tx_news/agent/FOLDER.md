@@ -8,7 +8,7 @@
 
 架构（≤3行）：
 - `TxNewsAgent`：围绕“先检索证据再回答”的工具循环。
-- `TxNewsTools`：提供 v1 文章检索工具与 v2 KG 工具（search_entities/search_events/get_event_neighbors/explain_connection），并在主数据缺失时可从本地缓存引导；检索实体时默认过滤非 ticker 节点。
+- `TxNewsTools`：提供 v1 文章检索工具与 v2 KG 工具（search_entities/search_events/get_event_neighbors/get_event_causal_paths/explain_connection），并在主数据缺失时可从本地缓存引导；检索实体时默认过滤非 ticker 节点。
 - 底层依赖 `storage/` 与 `embedding/`（embedding 默认强制 CPU；可用 `TXNEWS_EMBEDDING_DEVICE` 覆盖），上层由 `apps/api` 调用；当在线 LLM SSE 不稳定时可自动回退到非流式以保证 `/chat/stream` 可用。
 
 ## 文件

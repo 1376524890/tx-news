@@ -64,6 +64,7 @@ class TxNewsAgent:
             "search_events": self.tools.search_events,
             "get_event_neighbors": self.tools.get_event_neighbors,
             "explain_connection": self.tools.explain_connection,
+            "get_event_causal_paths": self.tools.get_event_causal_paths,
         }
 
     def _chat_once_stream(
@@ -167,7 +168,7 @@ class TxNewsAgent:
             "1) 严禁输出新闻原文/大段引用；只允许输出你自己的摘要、结构化结论与可点击 URL。\n"
             "2) 任何结论必须先通过工具检索（list_recent/search_news 等）获取证据。\n"
             "3) 优先处理当天/突发：先调用 list_recent(minutes=%d, limit=20)。\n"
-            "4) 检索策略：先 list_recent 校准新鲜度；优先用 search_entities/search_events 命中实体/事件，再用 get_event_neighbors/explain_connection 补充关联与原因；必要时再用 search_news 找补充证据。\n"
+            "4) 检索策略：先 list_recent 校准新鲜度；优先用 search_entities/search_events 命中实体/事件，再用 get_event_neighbors/get_event_causal_paths/explain_connection 补充关联与原因；必要时再用 search_news 找补充证据。\n"
             "5) 输出格式：请尽量使用条列与小标题，给出：结论、影响路径、相关标的、风险与不确定性、证据链接。\n"
             % int(recent_minutes)
         )
@@ -482,6 +483,21 @@ class TxNewsAgent:
             {
                 "type": "function",
                 "function": {
+                    "name": "get_event_causal_paths",
+                    "description": "获取事件的因果路径（Event→Variable→Entity），返回路径与证据。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "event_id": {"type": "string", "minLength": 1},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 12},
+                        },
+                        "required": ["event_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "explain_connection",
                     "description": "解释两个事件之间的连接原因（读取 txnews_edge_memory），返回 reason_text 与证据 canonical_id。",
                     "parameters": {
@@ -505,7 +521,7 @@ class TxNewsAgent:
             "1) 严禁输出新闻原文/大段引用；只允许输出你自己的摘要、结构化结论与可点击 URL。\n"
             "2) 任何结论必须先通过工具检索（list_recent/search_news 等）获取证据。\n"
             "3) 优先处理当天/突发：先调用 list_recent(minutes=%d, limit=20)。\n"
-            "4) 检索策略：先 list_recent 校准新鲜度；优先用 search_entities/search_events 命中实体/事件，再用 get_event_neighbors/explain_connection 补充关联与原因；必要时再用 search_news 找补充证据。\n"
+            "4) 检索策略：先 list_recent 校准新鲜度；优先用 search_entities/search_events 命中实体/事件，再用 get_event_neighbors/get_event_causal_paths/explain_connection 补充关联与原因；必要时再用 search_news 找补充证据。\n"
             "5) 输出格式：请尽量使用条列与小标题，给出：结论、影响路径、相关标的、风险与不确定性、证据链接。\n"
             % int(recent_minutes)
         )

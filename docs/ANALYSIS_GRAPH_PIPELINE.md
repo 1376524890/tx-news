@@ -103,6 +103,8 @@
   - `event_impacts_variable`（候选边，来自 affected_variables）
   - `variable_impacts_entity`（统计边）
   - `causal`（最终因果边，置信度合成）
+- `causal` 与 `variable_impacts_entity` 均包含 `confidence_breakdown`，用于可解释回溯与调参。
+- `event_impacts_variable` / `variable_impacts_entity` / `causal` 均通过显式合成器路径生成（避免隐式噪声累积）。
 - 配置：`config/causal_variables.yaml`（变量白名单）+ `config/config.yaml: causal`（窗口/阈值）。
 
 ## 6. Dashboard 图谱（API 聚合）

@@ -5,6 +5,8 @@ variables:
     domain: macro
     directions: ["+", "-"]
     desc: "Policy rate / market rates"
+    applies_to:
+      sectors: ["banking", "real_estate"]
   - name: Inflation Expectation
     domain: macro
     directions: ["+", "-"]
@@ -29,18 +31,26 @@ variables:
     domain: firm
     directions: ["+", "-"]
     desc: "Corporate funding cost"
+    applies_to:
+      sectors: ["real_estate", "manufacturing", "infrastructure"]
   - name: Demand
     domain: firm
     directions: ["+", "-"]
     desc: "Product/service demand"
+    applies_to:
+      sectors: ["consumer", "auto", "electronics"]
   - name: Supply
     domain: firm
     directions: ["+", "-"]
     desc: "Supply capacity / availability"
+    applies_to:
+      sectors: ["manufacturing", "energy", "materials"]
   - name: Input Cost
     domain: firm
     directions: ["+", "-"]
     desc: "Raw material / input cost"
+    applies_to:
+      sectors: ["materials", "chemicals", "energy"]
   - name: Pricing Power
     domain: firm
     directions: ["+", "-"]

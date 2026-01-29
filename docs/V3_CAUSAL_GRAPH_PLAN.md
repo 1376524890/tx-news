@@ -44,6 +44,8 @@
       domain: macro
       directions: ["+", "-"]
       desc: "Policy rate / market rates"
+      applies_to:
+        sectors: [banking, real_estate]
   ```
 
 ### 4.2 新增 variable 节点
@@ -80,6 +82,7 @@
 
 ### 5.3 结果校验
 - 新增 validator，删除白名单外变量；保留原始输出到 `_txnews.llm_raw`。
+- scope 约束：统计阶段按 `applies_to.sectors` 过滤实体。
 
 ## 6. KG 构建改动
 
@@ -95,6 +98,7 @@
   final_conf = 0.35*evidence + 0.25*consistency + 0.20*temporal + 0.20*path_support
   ```
 - 只有 `final_conf > threshold` 才写入 `relation=causal`。
+- 输出包含 `confidence_breakdown`（support/consistency/temporal/recentness/conflict 等）。
 
 ## 7. API / Agent / UI 改动
 
@@ -134,7 +138,7 @@
 ### 11.2 变量→实体边的来源
 **B. 统计驱动（历史事件回溯）**
 - 优点：可自更新，适配市场变化。
-- 注意：需要设定窗口/阈值，避免噪声累积。
+- 注意：需要设定窗口/阈值，避免噪声累积；冲突方向会触发降权。
 
 ### 11.3 Causal Synthesizer 触发方式
 **B. 事件驱动（新事件触发）**

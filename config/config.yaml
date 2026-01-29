@@ -90,3 +90,11 @@ causal:
   max_causal_edges: 60
   # 单次事件最多采纳的变量数
   max_event_variables: 6
+  # Event -> Variable 最低置信度
+  event_var_min_conf: 0.5
+  # Variable -> Entity 最低权重
+  var_entity_min_weight: 0.2
+  # 冲突比例阈值（pos/neg 均较高时降权）
+  conflict_ratio_threshold: 0.3
+  # 冲突惩罚系数（0-1）
+  conflict_penalty: 0.6

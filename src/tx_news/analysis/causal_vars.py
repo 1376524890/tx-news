@@ -97,6 +97,7 @@ def load_causal_variables() -> dict[str, dict[str, Any]]:
             continue
         domain = str(item.get("domain") or "").strip() or "macro"
         directions = item.get("directions") if isinstance(item.get("directions"), list) else ["+", "-"]
+        applies_to = item.get("applies_to") if isinstance(item.get("applies_to"), dict) else {}
         desc = str(item.get("desc") or "").strip()
         aliases = item.get("aliases") if isinstance(item.get("aliases"), list) else []
         alias_set = {_normalize_alias(name)} | {_normalize_alias(a) for a in aliases if str(a or "").strip()}
@@ -106,6 +107,7 @@ def load_causal_variables() -> dict[str, dict[str, Any]]:
             "directions": [str(d) for d in directions],
             "desc": desc,
             "aliases": sorted(alias_set),
+            "applies_to": applies_to,
         }
     return out
 

@@ -349,6 +349,83 @@ class TxNewsTools:
             )
         return out
 
+    def get_event_causal_paths(self, *, event_id: str, limit: int = 12) -> list[dict[str, Any]]:
+        src = node_id_event(event_id)
+        edge_qdrant = self.ctx.edge_qdrant
+
+        def _scroll_edges(filter_payload: dict[str, Any]) -> list[dict[str, Any]]:
+            out_edges: list[dict[str, Any]] = []
+            offset = None
+            while True:
+                try:
+                    pts, offset2 = edge_qdrant.scroll(
+                        filter_payload=filter_payload,
+                        limit=256,
+                        with_payload=True,
+                        with_vectors=False,
+                        offset=offset,
+                    )
+                except Exception:
+                    return []
+                for r in pts:
+                    payload = getattr(r, "payload", None)
+                    if isinstance(payload, dict):
+                        out_edges.append(payload)
+                if not offset2:
+                    break
+                offset = offset2
+            return out_edges
+
+        ev_var_edges = _scroll_edges({"graph_env": "prod", "src": src, "relation": "event_impacts_variable"})
+        ev_var_edges.sort(key=lambda x: float(x.get("confidence") or 0.0), reverse=True)
+
+        # Prefetch variable node payloads for labels/domains.
+        var_node_ids = [str(e.get("dst") or "") for e in ev_var_edges if str(e.get("dst") or "").startswith("var:")]
+        var_payloads: dict[str, dict[str, Any]] = {}
+        if var_node_ids:
+            pids = [point_id(graph_env="prod", item_id=nid) for nid in var_node_ids]
+            for r in self.ctx.entity_qdrant.retrieve(point_ids=pids, with_payload=True, with_vectors=False):
+                payload = getattr(r, "payload", None)
+                if isinstance(payload, dict) and payload.get("node_id"):
+                    var_payloads[str(payload["node_id"])] = payload
+
+        paths: list[dict[str, Any]] = []
+        for ev_edge in ev_var_edges:
+            var_node = str(ev_edge.get("dst") or "")
+            if not var_node.startswith("var:"):
+                continue
+            var_info = var_payloads.get(var_node) or {}
+            var_name = var_info.get("var") or var_node.replace("var:", "")
+
+            var_entity_edges = _scroll_edges({"graph_env": "prod", "src": var_node, "relation": "variable_impacts_entity"})
+            var_entity_edges.sort(key=lambda x: float(x.get("confidence") or 0.0), reverse=True)
+            for ve in var_entity_edges[: max(1, int(limit))]:
+                dst = str(ve.get("dst") or "")
+                if not dst.startswith("ticker:"):
+                    continue
+                ts_code = dst.replace("ticker:", "")
+                path_conf = min(float(ev_edge.get("confidence") or 0.0), float(ve.get("confidence") or 0.0))
+                paths.append(
+                    {
+                        "event_id": event_id,
+                        "variable": var_name,
+                        "variable_domain": var_info.get("domain"),
+                        "variable_direction": ev_edge.get("direction"),
+                        "variable_confidence": ev_edge.get("confidence"),
+                        "entity_ts_code": ts_code,
+                        "entity_effect_direction": ve.get("effect_direction"),
+                        "entity_confidence": ve.get("confidence"),
+                        "path_confidence": path_conf,
+                        "event_evidence": ev_edge.get("evidence_canonical_ids") or [],
+                        "entity_evidence": ve.get("evidence_canonical_ids") or [],
+                    }
+                )
+            if len(paths) >= int(limit):
+                break
+
+        paths.sort(key=lambda x: float(x.get("path_confidence") or 0.0), reverse=True)
+        return paths[: int(limit)]
+
     def explain_connection(self, *, event_a: str, event_b: str) -> dict[str, Any]:
         src = node_id_event(event_a)
         dst = node_id_event(event_b)
