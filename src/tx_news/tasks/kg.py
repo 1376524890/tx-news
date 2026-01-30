@@ -1,5 +1,5 @@
 # Input: canonical_id（来自 v1 analyze/deep_analysis）+ Postgres(articles/analyses/versions) + Qdrant(event/entity/edge memory)
-# Output: v2/v3 KG 增量更新（sandbox->prod），审计与快照，周期治理任务
+# Output: v2/v3 KG 增量更新（sandbox->prod，embedding 复用 + 实体描述稳定化），审计与快照，周期治理任务
 # Pos: KG 任务入口（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -249,6 +249,9 @@ def _build_rule_plan(
 
     tickers = _normalize_tickers(data.get("tickers"))
     a_share = get_a_shares(engine, tickers)
+    a_share_set = {r.ts_code for r in a_share}
+    if a_share_set:
+        tickers = [t for t in tickers if t in a_share_set]
     name_by_code = {r.ts_code: r.name for r in a_share}
     industry_by_code = {r.ts_code: r.industry for r in a_share}
 
@@ -261,12 +264,7 @@ def _build_rule_plan(
         pid = point_id(graph_env=graph_env, item_id=nid)
         name = name_by_code.get(ts_code) or ""
         industry = industry_by_code.get(ts_code)
-        desc = f"{ts_code} {name}".strip()
-        if industry:
-            desc += f"\nindustry={industry}"
-        desc += f"\nrecent_event_id={event_id_raw}"
-        if url:
-            desc += f"\nrecent_url={url}"
+        desc = f"{ts_code} {name} {industry or ''}".strip()
         desc = desc[:1200]
         payload = {
             "node_type": "ticker",
@@ -276,6 +274,9 @@ def _build_rule_plan(
             "industry": industry,
             "description_text": desc,
             "updated_at_ts": now_ts,
+            "recent_event_id": event_id_raw,
+            "recent_url": url,
+            "last_seen_ts": now_ts,
             "graph_env": graph_env,
         }
         ops.append(GraphOp(op="UPSERT_TICKER", graph_env=graph_env, item_id=nid, text=desc, payload=payload))
@@ -496,6 +497,18 @@ def _build_rule_plan(
     return GraphOpsPlan(run_id=run_id, trigger={"canonical_id": canonical_id}, ops=ops)
 
 
+def _ensure_vectors(plan: GraphOpsPlan, *, embedder) -> None:
+    for op in plan.ops:
+        if op.vector:
+            continue
+        if op.op not in {"UPSERT_EVENT", "UPSERT_TICKER", "UPSERT_VARIABLE", "UPSERT_EDGE"}:
+            continue
+        text = str(op.text or "").strip()
+        if not text:
+            raise ValueError(f"missing embedding text for op={op.op} item_id={op.item_id}")
+        op.vector = embedder.embed(text[:2000])
+
+
 def _execute_ops(
     *,
     plan: GraphOpsPlan,
@@ -596,6 +609,7 @@ def kg_update_from_canonical(canonical_id: str) -> dict[str, Any]:
         logger.info("graphflow kg_plan canonical_id=%s run_id=%s ops=%s", cid, run_id, _op_counts(plan_sb.ops))
         validate_plan(plan_sb)
         insert_kg_ops_log(engine, run_id=run_id, phase="validator", payload={"ok": True})
+        _ensure_vectors(plan_sb, embedder=embedder)
 
         # Build equivalent prod plan by copying ops and flipping env field + payload.graph_env.
         prod_ops: list[GraphOp] = []

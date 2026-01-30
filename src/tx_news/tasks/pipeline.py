@@ -1,5 +1,5 @@
 # Input: NATS raw payload + Postgres/MinIO/Qdrant/embedding/LLM（可选）+ 去重窗口配置
-# Output: canonical 入库、向量 upsert（含时间戳 payload）、analysis/因果变量 upsert、signals 写入（analyze 固定投递 analysis 队列）
+# Output: canonical 入库、向量 upsert（含时间戳 payload）、analysis/因果变量 upsert、signals 写入（analyze 固定投递 analysis 队列 + ticker 白名单/上限）
 # Pos: 主流水线任务定义（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -47,6 +47,7 @@ from tx_news.tasks.kg import kg_update_from_canonical
 logger = logging.getLogger(__name__)
 
 ANALYZE_LOCK_TTL_SECONDS = 10 * 60
+MAX_TICKERS = 30
 
 
 def utcnow() -> datetime:
@@ -123,6 +124,23 @@ def _normalize_tickers(value: Any) -> list[dict[str, Any]]:
             if s:
                 out.append({"ts_code": s})
     return out
+
+
+def _filter_tickers(
+    tickers: list[dict[str, Any]],
+    *,
+    a_share_set: set[str],
+    max_items: int,
+) -> list[dict[str, Any]]:
+    if a_share_set:
+        tickers = [
+            t
+            for t in tickers
+            if str(t.get("ts_code") or "").strip().upper() in a_share_set
+        ]
+    if max_items > 0:
+        tickers = tickers[:max_items]
+    return tickers
 
 
 def _release_redis_lock(redis: Redis, key: str, token: str) -> None:
@@ -423,6 +441,12 @@ def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
                         logger.warning("fallback llm failed; fall back to rules: %s", e2)
 
         result["tickers"] = _normalize_tickers(result.get("tickers"))
+        a_share_set = {str(ts or "").strip().upper() for ts in name_map.values() if ts}
+        result["tickers"] = _filter_tickers(
+            result["tickers"],
+            a_share_set=a_share_set,
+            max_items=MAX_TICKERS,
+        )
 
         causal_cfg = file_cfg.causal if isinstance(file_cfg.causal, dict) else {}
         max_vars = int(causal_cfg.get("max_event_variables") or 6)

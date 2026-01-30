@@ -8,10 +8,10 @@
 
 架构（≤3行）：
 - `celery_app.py` 定义 Celery app 与任务注册策略（并包含 v2.2 所需的 beat_schedule；将 `pipeline.analyze`/`deep_analysis` 分离到 analysis 队列并显式 routing_key，避免被抓取链路阻塞或落入默认队列；queue worker 不再依赖过期策略；并为队列工人配置软/硬超时防止卡住；并默认抑制 httpx/qdrant 的 HTTP Request 噪声日志）。
-- `pipeline.py` 定义 Raw→Normalize→Dedup 的主流水线任务（近重复 + 语义去重均按 `TXNEWS_DEDUP_WINDOW_HOURS` 只对比窗口内文章），并在 `dedup_store` 完成后显式入队 `analyze`（避免链式回调在 broker/DNS 抖动时丢失导致“分析不推进”）；`analyze` 任务固定投递 analysis 队列以免被抓取 backlog 卡住；同时对 `tickers` 等字段做 schema 归一化，保证 API/UI 稳定；并对相同 checksum 的 canonical 分析做幂等跳过，避免重复分析/重复 LLM 成本。
+- `pipeline.py` 定义 Raw→Normalize→Dedup 的主流水线任务（近重复 + 语义去重均按 `TXNEWS_DEDUP_WINDOW_HOURS` 只对比窗口内文章），并在 `dedup_store` 完成后显式入队 `analyze`（避免链式回调在 broker/DNS 抖动时丢失导致“分析不推进”）；`analyze` 任务固定投递 analysis 队列以免被抓取 backlog 卡住；同时对 `tickers` 等字段做 schema 归一化，并在分析入口做 A 股白名单过滤 + 最大数量上限，保证 API/UI 稳定；并对相同 checksum 的 canonical 分析做幂等跳过，避免重复分析/重复 LLM 成本。
 - `news_queue.py` 维护分析优先队列（按发布时间最新优先，24h 过期清理），并由 Celery 定时 `queue_worker_task` 在 analysis 队列运行，拉取队列触发 `pipeline.analyze`（队列工人对新入库 canonical 标记 `is_new_canonical`，确保深分析能被触发；默认非阻塞并带运行时上限以避免任务堆积/卡死）。
 - `deep_analysis.py` 与 `maintenance.py` 提供“深分析”和“维护任务”（深分析任务固定投递 analysis 队列；GPU 模式下 `pipeline.analyze()` 与深分析均优先使用 `llm.deep` 指向本地 vLLM；不可用时回退到 `llm.chat`（需配置 api_key）；embedding 支持绑定到指定 GPU，并在换模型/维度变化时自动兼容 Qdrant collection）。
-- `kg.py` 提供 v2 KG 增量更新与治理任务：`kg_update_from_canonical`（sandbox→prod）、`kg_gc`（边 GC/衰减）、`kg_reconcile`（事件快照重算）、`kg_rollback`（回滚）与审计/快照写入；关键路径会输出 `graphflow` 追踪日志。
+- `kg.py` 提供 v2 KG 增量更新与治理任务：`kg_update_from_canonical`（sandbox→prod，复用 embedding 向量 + 稳定 ticker 描述文本）、`kg_gc`（边 GC/衰减）、`kg_reconcile`（事件快照重算）、`kg_rollback`（回滚）与审计/快照写入；关键路径会输出 `graphflow` 追踪日志。
 - `causal.py` 提供 v3 因果合成任务：从分析结果生成变量边与因果边（含 EventEntityCausalSynthesizer），支持回滚；关键路径会输出 `graphflow` 追踪日志。
 - 向量化：canonical 的 embedding 以“抽取后的正文文本”为输入（不再额外做字符级截断；实际长度仍可能受 embedding 模型的最大 token 限制影响）。
 

@@ -19,6 +19,7 @@
 | `V2_NEWS_KG_DESIGN.md` | 入口 | 指向 `V2_NEWS_KG_IMPLEMENTATION.md`（入口指向，不展开细节）。 |
 | `V2_NEWS_KG_ATTACHMENT_DEV_GUIDE.md` | 入口 | 指向 `V2_NEWS_KG_IMPLEMENTATION.md`（入口指向，不展开细节）。 |
 | `V2_NEWS_KG_DELIVERY_PLAN.md` | 入口 | 指向 `V2_NEWS_KG_IMPLEMENTATION.md`（入口指向，不展开细节）。 |
+| `V2_NEWS_KG_INCREMENTAL_UPDATE_PLAN.md` | 方案文档 | KG 增量更新方案（事件级跳过 → 实体级增量的落地路径与回滚策略）。 |
 | `ANALYSIS_GRAPH_PIPELINE.md` | 流程文档 | 分析图谱网络从入库→分析→KG 更新→看板聚合的搭建与迭代流程。 |
 | `V3_CAUSAL_GRAPH_PLAN.md` | 方案文档 | v3 因果图谱升级方案（差距评估、结构设计、落地步骤与决策点）。 |
 | `V3_CAUSAL_GRAPH_UPDATE_DEV.md` | 开发文档 | v3 因果图谱更新开发记录（P0/P1/P2 落地与配置说明）。 |
