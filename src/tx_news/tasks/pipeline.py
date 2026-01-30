@@ -1,5 +1,5 @@
 # Input: NATS raw payload + Postgres/MinIO/Qdrant/embedding/LLM（可选）+ 去重窗口配置
-# Output: canonical 入库、向量 upsert（含时间戳 payload）、analysis/因果变量 upsert、signals 写入
+# Output: canonical 入库、向量 upsert（含时间戳 payload）、analysis/因果变量 upsert、signals 写入（analyze 固定投递 analysis 队列）
 # Pos: 主流水线任务定义（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -284,7 +284,7 @@ def dedup_store(normalized: dict[str, Any]) -> dict[str, Any]:
     return canonical
 
 
-@celery_app.task(name="tx_news.tasks.pipeline.analyze")
+@celery_app.task(name="tx_news.tasks.pipeline.analyze", queue="analysis", routing_key="analysis")
 def analyze(canonical: dict[str, Any]) -> dict[str, Any]:
     settings = get_settings()
     file_cfg = settings.load_file_settings()

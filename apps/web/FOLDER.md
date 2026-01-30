@@ -32,6 +32,6 @@
 | `tsconfig.json` | 配置 | TypeScript 基础配置。 |
 | `tsconfig.app.json` | 配置 | 应用编译配置（Vite）。 |
 | `tsconfig.node.json` | 配置 | Vite 配置/脚本的 Node 编译配置。 |
-| `vite.config.ts` | 配置 | 开发代理/构建配置与 dev `allowedHosts`，包含 `/dashboard` 等 API 代理（可用 `TXNEWS_VITE_ALLOWED_HOSTS` 追加）。 |
+| `vite.config.ts` | 配置 | 开发代理/构建配置与 dev `allowedHosts`，包含 `/dashboard` 与 `/monitor` 等 API 代理（可用 `TXNEWS_VITE_ALLOWED_HOSTS` 追加）。 |
 | `.gitignore` | 维护 | 忽略本地构建产物与依赖。 |
 | `FOLDER.md` | 目录文档 | 本目录的架构说明与文件职责清单。 |

@@ -1,5 +1,5 @@
 # Input: canonical 文章内容 + Qdrant 相似检索 + DashScope API（可选）
-# Output: 深分析后的结构化结果（含因果变量）写回 analyses（幂等跳过/锁防重），并发出 signal
+# Output: 深分析后的结构化结果（含因果变量）写回 analyses（幂等跳过/锁防重），并发出 signal（任务投递 analysis 队列）
 # Pos: Deep Path 任务（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def _release_redis_lock(redis: Redis, key: str, token: str) -> None:
     )
 
 
-@celery_app.task(name="tx_news.tasks.deep_analysis.deep_optimize")
+@celery_app.task(name="tx_news.tasks.deep_analysis.deep_optimize", queue="analysis", routing_key="analysis")
 def deep_optimize(canonical: dict[str, Any]) -> dict[str, Any]:
     """
     Agentic-style deep analysis:

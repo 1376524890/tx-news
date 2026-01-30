@@ -1,5 +1,5 @@
 # Input: Settings(redis_url) 与任务模块列表
-# Output: celery_app（含路由/队列/注册策略/任务超时保护）
+# Output: celery_app（含路由/队列/注册策略/任务超时保护与显式 routing_key）
 # Pos: Celery 应用配置入口（变更时同步更新以上注释与所属目录 FOLDER.md）
 
 from __future__ import annotations
@@ -8,6 +8,7 @@ import logging
 
 from celery import Celery
 from celery.schedules import crontab
+from kombu import Queue
 
 from tx_news.settings import get_settings
 
@@ -39,13 +40,24 @@ def make_celery() -> Celery:
         ],
     )
     app.conf.task_default_queue = "default"
+    app.conf.task_default_exchange = "default"
+    app.conf.task_default_exchange_type = "direct"
+    app.conf.task_default_routing_key = "default"
+    app.conf.task_queues = (
+        Queue("default", routing_key="default"),
+        Queue("analysis", routing_key="analysis"),
+    )
     app.conf.task_routes = {
-        "tx_news.tasks.pipeline.*": {"queue": "default"},
-        "tx_news.tasks.deep_analysis.*": {"queue": "default"},
-        "tx_news.tasks.maintenance.*": {"queue": "default"},
-        "tx_news.tasks.kg.*": {"queue": "default"},
-        "tx_news.tasks.causal.*": {"queue": "default"},
-        "tx_news.tasks.news_queue.*": {"queue": "default"},
+        "tx_news.tasks.pipeline.ingest_raw": {"queue": "default", "routing_key": "default"},
+        "tx_news.tasks.pipeline.normalize_raw": {"queue": "default", "routing_key": "default"},
+        "tx_news.tasks.pipeline.dedup_store": {"queue": "default", "routing_key": "default"},
+        "tx_news.tasks.pipeline.analyze": {"queue": "analysis", "routing_key": "analysis"},
+        "tx_news.tasks.deep_analysis.*": {"queue": "analysis", "routing_key": "analysis"},
+        "tx_news.tasks.maintenance.*": {"queue": "default", "routing_key": "default"},
+        "tx_news.tasks.kg.*": {"queue": "default", "routing_key": "default"},
+        "tx_news.tasks.causal.*": {"queue": "default", "routing_key": "default"},
+        "tx_news.tasks.news_queue.queue_worker_task": {"queue": "analysis", "routing_key": "analysis"},
+        "tx_news.tasks.news_queue.*": {"queue": "default", "routing_key": "default"},
     }
     # Avoid long-running queue worker tasks blocking the single-worker lane.
     # Soft time limit raises SoftTimeLimitExceeded for graceful cleanup,

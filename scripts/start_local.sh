@@ -647,7 +647,8 @@ PY
 fi
 
 start_bg api uvicorn apps.api.main:app --host 0.0.0.0 --port "${API_PORT}" "${UVICORN_RELOAD_ARGS[@]}"
-start_bg worker celery -A tx_news.tasks.celery_app.celery_app worker -l INFO --pool=solo --concurrency=1
+start_bg worker celery -A tx_news.tasks.celery_app.celery_app worker -l INFO --pool=solo --concurrency=1 -Q default
+start_bg analysis_worker celery -A tx_news.tasks.celery_app.celery_app worker -l INFO --pool=solo --concurrency=1 -Q analysis
 start_bg beat celery -A tx_news.tasks.celery_app.celery_app beat -l INFO
 start_bg nats_bridge python -m apps.worker.nats_bridge
 start_bg collector python -m apps.collector.main

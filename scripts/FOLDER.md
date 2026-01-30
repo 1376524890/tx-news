@@ -17,7 +17,7 @@
 - 国内拉取加速：`setup_docker_mirror.sh` 可写入 Docker daemon `registry-mirrors` 配置（需要 root），用于加速基础镜像 `docker pull`。
 - 在线 LLM 排障：`check_online_llm.sh` 用 `.env` 的在线 LLM 配置做“宿主机 vs 容器”连通性对比（DNS/TLS/HTTP/SSE，并做 IPv4(-4)/IPv6(-6) 对比，打印 resolv.conf 与 proxy/no_proxy；用于定位 `_ssl.c:999 handshake timed out`）。
 - 爬虫排障：`check_crawler_connectivity.sh` 对 `config/sources.txt` 做“宿主机 vs collector 容器”的 DNS/TLS/HTTP 探测，并在容器侧额外检测 NATS JetStream 与基础设施端口连通性（用于定位 `_ssl.c:999 handshake timed out`、`nats: no response from stream`、容器内 DNS 异常等）。
-- 本地非 Docker 启动：`start_local.sh`/`stop_local.sh` 用 docker 只起基础设施（默认 `docker compose up -d`），然后在宿主机 venv 里启动 api/worker/beat/collector/nats-bridge/admin（可用 `--no-admin` 关闭）；`start_local.sh` 会自动创建 venv 并默认 `pip install -r requirements.txt`，并对 docker 版 .env 的 infra 域名做本地替换（postgres/redis/nats/minio/qdrant → localhost），启动前等待 infra 端口就绪（可用 `TXNEWS_SKIP_INFRA_CHECK=1` 跳过，`TXNEWS_INFRA_WAIT_SECONDS` 调整超时）；GPU 模式可选启动宿主机 vLLM；默认 `--web-dev` 在 8000 启动 Vite 热更新（API 自动挪到 `TXNEWS_LOCAL_API_PORT`，默认 18000），必要时会补齐 npm 依赖；`stop_local.sh` 默认会停止宿主机进程（含 vLLM；优先 pidfile，按端口兜底）并关闭由 start_local 启动的 infra（可用 `--keep-infra` 保留容器）。
+- 本地非 Docker 启动：`start_local.sh`/`stop_local.sh` 用 docker 只起基础设施（默认 `docker compose up -d`），然后在宿主机 venv 里启动 api/worker/analysis_worker/beat/collector/nats-bridge/admin（可用 `--no-admin` 关闭）；`start_local.sh` 会自动创建 venv 并默认 `pip install -r requirements.txt`，并对 docker 版 .env 的 infra 域名做本地替换（postgres/redis/nats/minio/qdrant → localhost），启动前等待 infra 端口就绪（可用 `TXNEWS_SKIP_INFRA_CHECK=1` 跳过，`TXNEWS_INFRA_WAIT_SECONDS` 调整超时）；GPU 模式可选启动宿主机 vLLM；默认 `--web-dev` 在 8000 启动 Vite 热更新（API 自动挪到 `TXNEWS_LOCAL_API_PORT`，默认 18000），必要时会补齐 npm 依赖；`stop_local.sh` 默认会停止宿主机进程（含 vLLM；优先 pidfile，按端口兜底）并关闭由 start_local 启动的 infra（可用 `--keep-infra` 保留容器）。
 - 数据重置：`reset.sh` 会停止 compose 并删除基础设施数据卷（postgres/redis/minio/qdrant；可选保留 `hf_cache`），用于 0 数据冷启动；可选清理本地 `.run`/`var/cache`。
 - 图谱追踪：`graph_trace.sh` 过滤 `worker.log` 中的 `graphflow` 日志，便于查看 analysis→KG→causal 的流转。
 - 演示/回归脚本：`demo_kb_api_test.py`（知识库 API：/status + /search）、`demo_db_api_test.py`（数据库 API：/status + /signals + /articles/{id}）。
@@ -35,7 +35,7 @@
 | `setup_docker_mirror.sh` | 运维辅助 | 配置 Docker daemon registry mirror（加速 `docker pull`；需要 root）。 |
 | `check_online_llm.sh` | 运维排障 | 在线 LLM 连通性检查（host vs api 容器）。 |
 | `check_crawler_connectivity.sh` | 运维排障 | 爬虫 sources 连通性检查（host vs collector 容器；含 NATS/infra TCP）。 |
-| `start_local.sh` | 运维入口 | docker 仅启动基础设施；宿主机 venv 启动主程序（api/worker/beat/collector/nats-bridge/admin）、db-init/bootstrap，启动前等待 infra 端口就绪（可跳过）；GPU 模式可选启动宿主机 vLLM；默认 8000 Vite dev。 |
+| `start_local.sh` | 运维入口 | docker 仅启动基础设施；宿主机 venv 启动主程序（api/worker/analysis_worker/beat/collector/nats-bridge/admin）、db-init/bootstrap，启动前等待 infra 端口就绪（可跳过）；GPU 模式可选启动宿主机 vLLM；默认 8000 Vite dev。 |
 | `stop_local.sh` | 运维入口 | 停止 `start_local.sh` 启动的宿主机进程（含 vLLM；含端口兜底）；可选 `--keep-infra` 保留 infra 容器。 |
 | `reset.sh` | 运维入口 | 清空基础设施数据卷（可选保留 hf_cache），用于 0 数据冷启动；可选清理本地 `.run`/`var/cache`。 |
 | `graph_trace.sh` | 运维排障 | 过滤 `graphflow` 日志，查看图谱构建与流转路径。 |

@@ -1,5 +1,5 @@
 # Input: canonical articles with published_at/fetched_at + queue worker signals
-# Output: Priority queue + Celery queue worker processing results (queue_worker_task; 24h expiry + timeout guard)
+# Output: Priority queue + Celery queue worker processing results (queue_worker_task; 24h expiry + timeout guard; worker runs on analysis queue)
 # Pos: News priority queue + worker task registration (change with FOLDER.md)
 
 from __future__ import annotations
@@ -321,7 +321,7 @@ def run_queue_worker_loop(
             break
 
 
-@celery_app.task(name="tx_news.tasks.news_queue.queue_worker_task")
+@celery_app.task(name="tx_news.tasks.news_queue.queue_worker_task", queue="analysis", routing_key="analysis")
 def queue_worker_task(max_iterations: int = 100, block_timeout: int = 0, max_runtime_seconds: int = 15) -> dict:
     """
     Celery task to run queue worker.

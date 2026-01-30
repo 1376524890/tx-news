@@ -1,5 +1,5 @@
 // Input: Vite dev/build config + env overrides + local API endpoints
-// Output: Vite config (proxy/build/allowedHosts incl. dashboard routes)
+// Output: Vite config (proxy/build/allowedHosts incl. dashboard routes + monitor)
 // Pos: Frontend build/dev config (update this header + apps/web/FOLDER.md when changed)
 
 import { defineConfig } from 'vite'
@@ -22,6 +22,8 @@ export default defineConfig(({ mode }) => {
     server: {
       allowedHosts,
       proxy: {
+        '/monitor': adminBase,
+        '/api/monitor': adminBase,
         '/chat': apiBase,
         '/search': apiBase,
         '/signals': apiBase,
